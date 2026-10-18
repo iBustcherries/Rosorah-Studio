@@ -6,7 +6,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 mod relay;
 use anyhow::{Context, Result, ensure};
 use auroracast_core::Project;
-pub use relay::Hub;
+pub use relay::{Hub, REPLAY, save_replay};
 use rosorah_capture::FrameReader;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -547,6 +547,8 @@ pub struct Setup {
     pub bitrate: u32,
     pub state: Arc<State>,
     pub recording: Option<PathBuf>,
+    /// This encoder feeds the replay buffer (the main video's only).
+    pub replay: bool,
 }
 impl Setup {
     fn new(config: &Config, folder: &Path) -> Result<Self> {
@@ -585,6 +587,7 @@ impl Setup {
                 retry_now:Mutex::default(),
             }),
             recording,
+            replay: false,
         })
     }
 }
@@ -603,11 +606,27 @@ impl Stream {
         folder: &Path,
     ) -> Result<Self> {
         let groups = config.canvas_groups(project, canvas)?;
-        let setups = groups
+        let mut setups = groups
             .into_iter()
             .map(|(index, group)| Setup::new(&group, folder).map(|setup| (index, setup)))
             .collect::<Result<Vec<_>>>()?;
+        // The replay buffer follows the main video's encoder.
+        let main = setups.iter().position(|(index, _)| *index == canvas).unwrap_or(0);
+        if let Some((_, setup)) = setups.get_mut(main) {
+            setup.replay = true;
+        }
         Self::start_prepared(project, frames, setups)
+    }
+    /// Encodes the canvas only to fill the replay buffer (nothing goes out).
+    pub fn start_replay_only(project: &Project, canvas: usize, frames: FrameReader, bitrate: u32) -> Result<Self> {
+        let setup = Setup {
+            targets: Vec::new(),
+            bitrate,
+            state: Arc::new(State { destinations: Mutex::new(Vec::new()), stopping: AtomicBool::new(false), retry_now: Mutex::default() }),
+            recording: None,
+            replay: true,
+        };
+        Self::start_prepared(project, frames, vec![(canvas, setup)])
     }
     fn start_prepared(
         project: &Project,

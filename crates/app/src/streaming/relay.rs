@@ -116,10 +116,109 @@ fn read_tag(input: &mut impl Read) -> Result<Option<Tag>> {
         keyframe,
     }))
 }
+/// The replay buffer: the last few seconds of the main video's encoded stream, kept in memory
+/// (no extra encoding) so they can be saved to a file at any moment.
+pub struct Replay {
+    pub enabled: bool,
+    pub seconds: u32,
+    file: Vec<u8>,
+    headers: Vec<Tag>,
+    tags: VecDeque<Tag>,
+    bytes: usize,
+}
+const REPLAY_MAX_BYTES: usize = 256 * 1024 * 1024;
+pub static REPLAY: Mutex<Replay> = Mutex::new(Replay { enabled: false, seconds: 30, file: Vec::new(), headers: Vec::new(), tags: VecDeque::new(), bytes: 0 });
+impl Replay {
+    fn clear(&mut self) {
+        self.file.clear();
+        self.headers.clear();
+        self.tags.clear();
+        self.bytes = 0;
+    }
+    fn push(&mut self, tag: &Tag) {
+        self.bytes += tag.data.len();
+        self.tags.push_back(tag.clone());
+        // Keep at least `seconds`, from the last keyframe that's that old, so a saved clip starts
+        // cleanly; over the memory cap, drop whole keyframe groups from the front.
+        let newest = tag.timestamp;
+        let window = self.seconds.clamp(5, 120) * 1000;
+        let start = self
+            .tags
+            .iter()
+            .rposition(|t| t.keyframe && newest.saturating_sub(t.timestamp) >= window)
+            .or_else(|| self.tags.iter().position(|t| t.keyframe))
+            .unwrap_or(0);
+        for _ in 0..start {
+            let gone = self.tags.pop_front().unwrap();
+            self.bytes -= gone.data.len();
+        }
+        while self.bytes > REPLAY_MAX_BYTES && self.tags.len() > 1 {
+            let gone = self.tags.pop_front().unwrap();
+            self.bytes -= gone.data.len();
+            while self.tags.front().is_some_and(|t| !t.keyframe) && self.tags.len() > 1 {
+                let gone = self.tags.pop_front().unwrap();
+                self.bytes -= gone.data.len();
+            }
+        }
+    }
+    /// Seconds currently held.
+    pub fn held(&self) -> u32 {
+        match (self.tags.front(), self.tags.back()) {
+            (Some(a), Some(b)) => b.timestamp.saturating_sub(a.timestamp) / 1000,
+            _ => 0,
+        }
+    }
+    /// The held seconds as a playable FLV file (timestamps starting at zero).
+    pub fn flv(&self) -> Result<Vec<u8>> {
+        ensure!(!self.file.is_empty() && !self.tags.is_empty(), "The replay buffer is empty; it fills while it's on");
+        let start = self.tags.front().map_or(0, |t| t.timestamp);
+        let mut out = self.file.clone();
+        out.reserve(self.bytes + 1024);
+        let stamped = |data: &[u8], ts: u32, out: &mut Vec<u8>| {
+            let mut data = data.to_vec();
+            data[4] = (ts >> 16) as u8;
+            data[5] = (ts >> 8) as u8;
+            data[6] = ts as u8;
+            data[7] = (ts >> 24) as u8;
+            out.extend_from_slice(&data);
+        };
+        for tag in &self.headers {
+            stamped(&tag.data, 0, &mut out);
+        }
+        for tag in &self.tags {
+            stamped(&tag.data, tag.timestamp - start, &mut out);
+        }
+        Ok(out)
+    }
+}
+/// Writes the replay buffer to `path` (.mp4), repackaging without re-encoding.
+pub fn save_replay(path: &std::path::Path) -> Result<()> {
+    let flv = REPLAY.lock().unwrap().flv()?;
+    let temporary = path.with_extension("flv");
+    std::fs::write(&temporary, &flv).context("Couldn't write the replay")?;
+    let status = Command::new("ffmpeg")
+        .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(&temporary)
+        .args(["-c", "copy", "-movflags", "+faststart"])
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("Saving the replay needs FFmpeg")?;
+    if status.success() {
+        let _ = std::fs::remove_file(&temporary);
+        Ok(())
+    } else {
+        // The FLV plays in most players, so it's kept when the repackaging fails.
+        bail!("Saved as {} (couldn't repackage it as MP4)", temporary.display())
+    }
+}
 fn dispatch(
     mut input: impl Read,
     headers: &Mutex<Headers>,
     queues: &[Arc<Mutex<Queue>>],
+    replay: bool,
 ) -> Result<()> {
     let mut header = [0; 13];
     input.read_exact(&mut header)?;
@@ -128,9 +227,15 @@ fn dispatch(
         "Invalid FLV encoder header"
     );
     headers.lock().unwrap().file = header.to_vec();
+    if replay {
+        let mut r = REPLAY.lock().unwrap();
+        r.clear();
+        r.file = header.to_vec();
+    }
     while let Some(tag) = read_tag(&mut input)? {
         let d = &tag.data;
         let mut h = headers.lock().unwrap();
+        let is_header = d[0] == 18 || (d[0] == 9 && d.len() >= 17 && d[11] & 15 == 7 && d[12] == 0) || (d[0] == 8 && d.len() >= 17 && d[11] >> 4 == 10 && d[12] == 0);
         if d[0] == 18 {
             h.metadata = Some(tag.clone());
         } else if d[0] == 9 && d.len() >= 17 && d[11] & 15 == 7 && d[12] == 0 {
@@ -141,6 +246,18 @@ fn dispatch(
             drop(h);
             for q in queues {
                 q.lock().unwrap().push(tag.clone());
+            }
+        }
+        if replay {
+            let mut r = REPLAY.lock().unwrap();
+            if !r.enabled {
+                r.tags.clear();
+                r.bytes = 0;
+            } else if is_header {
+                r.headers.retain(|t| t.data[0] != d[0]);
+                r.headers.push(tag.clone());
+            } else {
+                r.push(&tag);
             }
         }
     }
@@ -155,6 +272,7 @@ pub struct Hub {
 }
 impl Hub {
     pub fn start(input: impl Read + Send + 'static, setup: &Setup) -> Self {
+        let replay = setup.replay;
         let headers = Arc::new(Mutex::new(Headers::default()));
         let queues: Vec<_> = setup
             .targets
@@ -184,7 +302,7 @@ impl Hub {
         let error = Arc::new(Mutex::new(None));
         let err = error.clone();
         let reader = thread::spawn(move || {
-            if let Err(e) = dispatch(input, &headers, &queues) {
+            if let Err(e) = dispatch(input, &headers, &queues, replay) {
                 *err.lock().unwrap() = Some(format!("{e:#}"));
             }
             for q in &queues {
@@ -654,5 +772,41 @@ mod tests {
         assert!(!log.contains("key-secret"));
         assert!(!log.contains("rtmps://"));
         assert!(log.contains("omitted"));
+    }
+}
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+    /// A minimal FLV tag of `kind` at `ts` ms; video keyframes start with 0x17 0x01.
+    fn tag(kind: u8, ts: u32, key: bool) -> Tag {
+        let body: Vec<u8> = if kind == 9 { vec![if key { 0x17 } else { 0x27 }, 1, 0, 0, 0] } else { vec![0xAF, 1, 0, 0, 0] };
+        let size = body.len() as u32;
+        let mut data = vec![kind, (size >> 16) as u8, (size >> 8) as u8, size as u8, (ts >> 16) as u8, (ts >> 8) as u8, ts as u8, (ts >> 24) as u8, 0, 0, 0];
+        data.extend(body);
+        data.extend((size + 11).to_be_bytes());
+        Tag { data: Arc::new(data), timestamp: ts, keyframe: kind == 9 && key }
+    }
+    #[test]
+    fn keeps_the_window_from_a_keyframe_with_timestamps_from_zero() {
+        let mut r = Replay { enabled: true, seconds: 5, file: b"FLV\x01\x05\0\0\0\x09\0\0\0\0".to_vec(), headers: vec![tag(9, 0, true)], tags: VecDeque::new(), bytes: 0 };
+        // 12 seconds at 10 fps, a keyframe every 2 s, audio in between.
+        for i in 0..120u32 {
+            let ts = i * 100;
+            r.push(&tag(9, ts, i % 20 == 0));
+            r.push(&tag(8, ts + 50, false));
+        }
+        let first = r.tags.front().unwrap();
+        assert!(first.keyframe, "starts on a keyframe");
+        assert!(r.held() >= 5 && r.held() <= 8, "at least 5 s held: {}", r.held());
+        let flv = r.flv().unwrap();
+        assert_eq!(&flv[..3], b"FLV");
+        // The first packet after the header tag is stamped 0.
+        let after_header = 13 + r.headers[0].data.len();
+        assert_eq!(&flv[after_header + 4..after_header + 8], &[0, 0, 0, 0]);
+    }
+    #[test]
+    fn empty_buffer_says_so() {
+        let r = Replay { enabled: true, seconds: 30, file: Vec::new(), headers: Vec::new(), tags: VecDeque::new(), bytes: 0 };
+        assert!(r.flv().is_err());
     }
 }

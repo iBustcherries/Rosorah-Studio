@@ -346,6 +346,9 @@ pub struct Overlay {
     pub source: Id,
     pub opacity: f32,
 }
+fn replay_seconds() -> u32 {
+    30
+}
 fn transition_duration() -> u32 {
     300
 }
@@ -1177,6 +1180,9 @@ pub struct Preferences {
     pub audio_filters: std::collections::BTreeMap<Id, AudioFilters>,
     #[serde(default)]
     pub hotkeys: Vec<Hotkey>,
+    /// How many seconds the replay buffer keeps.
+    #[serde(default = "replay_seconds")]
+    pub replay_seconds: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1360,6 +1366,7 @@ impl Default for Project {
                 music_apps: Vec::new(),
                 audio_filters: Default::default(),
                 hotkeys: Vec::new(),
+                replay_seconds: 30,
                 recording_encoder: RecordingEncoder::Auto,
                 auto_game_audio: true,
             },

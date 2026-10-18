@@ -1112,6 +1112,54 @@ mod tests {
         Ok(())
     }
     #[test]
+    #[ignore = "Requires FFmpeg, ffprobe and Vulkan"]
+    fn replay_buffer_saves_a_playable_clip_without_streaming() -> Result<()> {
+        use crate::streaming::{REPLAY, Stream, save_replay};
+        let folder = output_dir();
+        std::fs::create_dir_all(&folder)?;
+        let mut project = Project::default();
+        project.preferences.recording_encoder = auroracast_core::RecordingEncoder::Software;
+        project.sources[0].kind = auroracast_core::SourceKind::ScreenCapture;
+        project.scenes[0].layers.retain(|l| l.source == 1);
+        project.canvases[0].width = 320;
+        project.canvases[0].height = 180;
+        let mut engine = rosorah_capture::Engine::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        engine.start(1, Box::new(Controlled(tx)), rosorah_capture::Options::default())?;
+        let source = rx.recv_timeout(Duration::from_secs(2))?;
+        source.publish(Frame { width: 1, height: 1, rgba: vec![0, 0, 180, 255] })?;
+        {
+            let mut r = REPLAY.lock().unwrap();
+            r.enabled = true;
+            r.seconds = 5;
+        }
+        let stream = Stream::start_replay_only(&project, 0, engine.reader(), 1000)?;
+        let start = wait_ready(&stream.engine);
+        let outlet = stream.engine.outlet();
+        // Eight seconds of picture and silence.
+        for block in 0..800u64 {
+            let at = start + Duration::from_millis(block * 10);
+            if let Some(wait) = at.checked_duration_since(Instant::now()) {
+                thread::sleep(wait);
+            }
+            outlet.push(at, vec![0.; BLOCK as usize * 2]);
+        }
+        let held = REPLAY.lock().unwrap().held();
+        assert!((5..=8).contains(&held), "held {held} s");
+        let path = folder.join("replay-test.mp4");
+        let _ = std::fs::remove_file(&path);
+        save_replay(&path)?;
+        stream.stop();
+        let probe = Command::new("ffprobe").args(["-v", "error", "-show_entries", "format=duration:stream=codec_type", "-of", "json"]).arg(&path).output()?;
+        let info: serde_json::Value = serde_json::from_slice(&probe.stdout)?;
+        let duration: f64 = info["format"]["duration"].as_str().unwrap_or("0").parse()?;
+        assert!(duration >= 4.5 && duration <= 8.5, "clip lasts {duration} s");
+        let kinds: Vec<_> = info["streams"].as_array().unwrap().iter().map(|s| s["codec_type"].as_str().unwrap_or("").to_owned()).collect();
+        assert!(kinds.contains(&"video".to_owned()) && kinds.contains(&"audio".to_owned()), "{kinds:?}");
+        REPLAY.lock().unwrap().enabled = false;
+        Ok(())
+    }
+    #[test]
     #[ignore = "Requires FFmpeg RTMP listener, ffprobe and Vulkan; never contacts a platform"]
     fn live_streaming_two_destinations_reconnect_and_shared_recording() -> Result<()> {
         use crate::streaming::{Config, Destination, Phase as StreamPhase, Stream};

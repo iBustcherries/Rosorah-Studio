@@ -438,6 +438,12 @@ pub struct Studio {
     canvas_menu: Option<(Id, usize)>,
     /// Open projector windows.
     projectors: Vec<Projector>,
+    /// Replay buffer: on or off, its own encoder when not live, and a save in progress.
+    replay_on: bool,
+    replay_stream: Option<crate::streaming::Stream>,
+    replay_stopping: Vec<crate::streaming::Stream>,
+    replay_saving: Option<mpsc::Receiver<anyhow::Result<PathBuf>>>,
+    replay_retry: Instant,
     /// Hotkeys registered with the system, the list they were made from, and when it last changed.
     global_hotkeys: Option<crate::hotkeys::Global>,
     hotkeys_bound: Vec<auroracast_core::Hotkey>,
@@ -850,6 +856,11 @@ impl Studio {
             sound_rename: None,
             canvas_menu: None,
             projectors: Vec::new(),
+            replay_on: false,
+            replay_stream: None,
+            replay_stopping: Vec::new(),
+            replay_saving: None,
+            replay_retry: Instant::now() - Duration::from_secs(60),
             global_hotkeys: None,
             hotkeys_bound: Vec::new(),
             hotkeys_changed: None,
@@ -2132,11 +2143,100 @@ impl Studio {
         self.layer = self.layer.and_then(renumber);
         self.changed();
     }
+    /// Saves the replay buffer to the recordings folder, in the background.
     fn save_replay(&mut self) {
-        self.tell("The replay buffer isn't available yet.".into());
+        if !self.replay_on {
+            self.tell("Turn the replay buffer on first; it saves the last seconds it has held.".into());
+            return;
+        }
+        let folder = PathBuf::from(&self.record_folder);
+        let stamp = gst::glib::DateTime::now_local().ok().and_then(|d| d.format("%Y-%m-%d %H-%M-%S").ok()).map(|d| d.to_string()).unwrap_or_else(|| "replay".into());
+        let path = folder.join(format!("Replay {stamp}.mp4"));
+        let (tx, rx) = mpsc::channel();
+        self.replay_saving = Some(rx);
+        std::thread::spawn(move || {
+            let result = std::fs::create_dir_all(&folder).map_err(anyhow::Error::from).and_then(|_| crate::streaming::save_replay(&path));
+            let _ = tx.send(result.map(|_| path));
+        });
     }
     fn toggle_replay_buffer(&mut self) {
-        self.tell("The replay buffer isn't available yet.".into());
+        self.replay_on = !self.replay_on;
+        let mut replay = crate::streaming::REPLAY.lock().unwrap();
+        replay.enabled = self.replay_on;
+        replay.seconds = self.project.preferences.replay_seconds;
+        drop(replay);
+        if !self.replay_on {
+            if let Some(stream) = self.replay_stream.take() {
+                stream.stop();
+                self.replay_stopping.push(stream);
+            }
+        }
+    }
+    /// Keeps the replay buffer fed: from the stream while live, otherwise from an encoder of its own.
+    fn replay_tick(&mut self) {
+        if let Some(rx) = &self.replay_saving
+            && let Ok(result) = rx.try_recv()
+        {
+            self.replay_saving = None;
+            match result {
+                Ok(path) => {
+                    self.tell(format!("Replay saved: {}", path.display()));
+                    self.last_recording = Some(path);
+                }
+                Err(e) => self.tell(format!("{e:#}")),
+            }
+        }
+        self.replay_stopping.retain(|s| s.view().result.is_none());
+        crate::streaming::REPLAY.lock().unwrap().seconds = self.project.preferences.replay_seconds;
+        if !self.replay_on {
+            return;
+        }
+        if self.live_stream.is_some() {
+            // The stream's encoder takes over; the replay-only one stops.
+            if let Some(stream) = self.replay_stream.take() {
+                stream.stop();
+                self.replay_stopping.push(stream);
+            }
+        } else if self.replay_stream.is_none() && self.replay_stopping.is_empty() && self.replay_retry.elapsed() > Duration::from_secs(5) {
+            self.replay_retry = Instant::now();
+            match crate::streaming::Stream::start_replay_only(&self.project, 0, self.captures.reader(), self.stream_config.bitrate) {
+                Ok(stream) => {
+                    self.audio.streaming_outlets(stream.outlets());
+                    self.replay_stream = Some(stream);
+                }
+                Err(e) => self.tell(format!("The replay buffer couldn't start: {e:#}")),
+            }
+        }
+        if let Some(stream) = &self.replay_stream
+            && let Some(Err(e)) = stream.view().result
+        {
+            self.tell(format!("The replay buffer stopped: {e}"));
+            self.replay_stream = None;
+        }
+    }
+    /// Replay buffer controls for the Stream panel.
+    fn replay_controls(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            let mut on = self.replay_on;
+            if ui.toggle_value(&mut on, "⏺ Replay").on_hover_text("Keeps the last seconds in memory so you can save a clip").changed() {
+                self.toggle_replay_buffer();
+            }
+            if self.replay_on {
+                if ui.add_enabled(self.replay_saving.is_none(), egui::Button::new("Save replay")).clicked() {
+                    self.save_replay();
+                }
+                let held = crate::streaming::REPLAY.lock().unwrap().held();
+                note(ui, format!("{held} s held"));
+            }
+            let mut seconds = self.project.preferences.replay_seconds;
+            if ui.add(egui::DragValue::new(&mut seconds).range(5..=120).suffix(" s")).on_hover_text("How much the replay buffer keeps").changed() {
+                self.project.preferences.replay_seconds = seconds;
+                self.dirty = true;
+            }
+        });
+        if self.replay_on && self.live_stream.is_none() {
+            note(ui, "Not live, so the replay buffer runs its own encoder (about the cost of recording).");
+        }
     }
     fn toggle_virtual_camera(&mut self) {
         self.tell("The virtual camera isn't available yet.".into());
@@ -3314,6 +3414,8 @@ impl Studio {
         ctx.request_repaint_after(Duration::from_millis(100));
     }
     fn broadcast_routes(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        self.replay_controls(ui);
         ui.separator();
         ui.strong("Where to stream");
         let before = self.stream_config.clone();
@@ -6370,6 +6472,7 @@ impl eframe::App for Studio {
         self.panel_windows(ctx);
         self.projector_windows(ctx);
         self.hotkeys_tick(ctx);
+        self.replay_tick();
         self.loading_screen(ctx);
         if self.automation_editor.preview_open {
             let mut open = true;
