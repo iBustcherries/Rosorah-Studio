@@ -249,43 +249,112 @@ impl Studio {
             }
             self.remote_settings = target.unwrap_or_default();
         }
-        let Some(server) = &self.remote else { return };
-        let mut calls = Vec::new();
-        while let Ok(call) = server.calls.try_recv() {
-            calls.push(call);
+        if let Some(server) = &self.remote {
+            let mut calls = Vec::new();
+            while let Ok(call) = server.calls.try_recv() {
+                calls.push(call);
+            }
+            for call in calls {
+                let answer = self.remote_command(&call.command, &call.data);
+                let _ = call.reply.send(answer);
+            }
         }
-        for call in calls {
-            let answer = self.remote_command(&call.command, &call.data);
-            let _ = call.reply.send(answer);
+        // Scripts switched on or off are (re)loaded.
+        if self.project.preferences.scripts_enabled != self.scripts_loaded {
+            self.scripts_loaded = self.project.preferences.scripts_enabled.clone();
+            self.scripts.load(&self.scripts_loaded);
         }
-        // Events: what changed since last time, then new activity and chat.
+        // Events (what changed, plus activity and chat) go to controllers and scripts, if any listen.
+        let mut events = std::mem::take(&mut self.pending_events);
+        if self.remote.is_none() && self.scripts.is_empty() {
+            return;
+        }
         let now = self.remote_status();
         let before = std::mem::replace(&mut self.remote_seen, now.clone());
-        let Some(server) = &self.remote else { return };
         let scene = |id: Option<Id>| id.and_then(|id| self.project.scene(id)).map_or(serde_json::Value::Null, |s| serde_json::json!(s.name));
         if now.scene != before.scene {
-            server.broadcast(serde_json::json!({"event": "scene", "id": now.scene, "name": scene(now.scene)}));
+            events.push(serde_json::json!({"event": "scene", "id": now.scene, "name": scene(now.scene)}));
         }
         if now.preview != before.preview && now.preview.is_some() {
-            server.broadcast(serde_json::json!({"event": "preview", "id": now.preview, "name": scene(now.preview)}));
+            events.push(serde_json::json!({"event": "preview", "id": now.preview, "name": scene(now.preview)}));
         }
         for (key, a, b) in [("studio_mode", before.studio, now.studio), ("live", before.live, now.live), ("recording", before.recording, now.recording), ("replay", before.replay, now.replay), ("virtual_camera", before.camera, now.camera)] {
             if a != b {
-                server.broadcast(serde_json::json!({"event": key, "on": b}));
+                events.push(serde_json::json!({"event": key, "on": b}));
             }
         }
         for (id, muted) in &now.muted {
             if before.muted.get(id).is_some_and(|m| m != muted) {
                 let name = self.project.preferences.workspace.sound_names.get(id).cloned().or_else(|| self.project.audio.iter().find(|c| c.id == *id).map(|c| c.name.clone()));
-                server.broadcast(serde_json::json!({"event": "mute", "id": id, "name": name, "muted": muted}));
+                events.push(serde_json::json!({"event": "mute", "id": id, "name": name, "muted": muted}));
             }
         }
         let newest = self.chat.messages().map(|m| m.received_ms).max().unwrap_or(0);
         if newest > self.remote_chat_seen {
-            for m in self.chat.messages().filter(|m| m.received_ms > self.remote_chat_seen) {
-                server.broadcast(serde_json::json!({"event": "chat", "platform": m.platform.name(), "author": m.author, "text": m.text}));
+            // Messages from before Rosorah started listening aren't replayed.
+            if self.remote_chat_seen > 0 {
+                for m in self.chat.messages().filter(|m| m.received_ms > self.remote_chat_seen) {
+                    events.push(serde_json::json!({"event": "chat", "platform": m.platform.name(), "author": m.author, "text": m.text}));
+                }
             }
             self.remote_chat_seen = newest;
+        }
+        if let Some(server) = &self.remote {
+            for event in &events {
+                server.broadcast(event.clone());
+            }
+        }
+        if !self.scripts.is_empty() {
+            let s = &now;
+            let status = serde_json::json!({"scene": scene(s.scene), "preview": scene(s.preview), "studio_mode": s.studio, "live": s.live, "recording": s.recording, "replay": s.replay, "virtual_camera": s.camera});
+            for request in self.scripts.run(&events, &status) {
+                if let Err(e) = self.remote_command(&request.command, &request.data) {
+                    self.scripts.errors.insert(request.script, format!("{}: {e}", request.command));
+                }
+            }
+        }
+    }
+    /// Settings > Scripts.
+    fn scripts_page(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Scripts");
+        note(ui, "Small Lua programs that react to what happens (follows, chat, scene changes…) and run Rosorah's commands. Each runs in a sandbox with no access to your files or the internet.");
+        ui.add_space(10.);
+        let folder = crate::scripts::folder();
+        ui.horizontal(|ui| {
+            if ui.button("Open the scripts folder").clicked() {
+                let _ = std::fs::create_dir_all(&folder);
+                if crate::scripts::available().is_empty() {
+                    let _ = std::fs::write(folder.join("example.lua"), crate::scripts::EXAMPLE);
+                }
+                let _ = crate::desktop::open(&folder);
+            }
+            if ui.button("Reload scripts").on_hover_text("After editing a script").clicked() {
+                self.scripts.load(&self.scripts_loaded);
+            }
+        });
+        note(ui, folder.display().to_string());
+        ui.add_space(8.);
+        let available = crate::scripts::available();
+        if available.is_empty() {
+            note(ui, "No scripts yet. Open the folder: an example is added to start from.");
+        }
+        for name in available {
+            card().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let mut on = self.project.preferences.scripts_enabled.contains(&name);
+                if ui.checkbox(&mut on, RichText::new(&name).strong()).changed() {
+                    let list = &mut self.project.preferences.scripts_enabled;
+                    if on { list.push(name.clone()); } else { list.retain(|n| *n != name); }
+                    self.dirty = true;
+                }
+                if let Some(error) = self.scripts.errors.get(&name) {
+                    ui.colored_label(ui.visuals().warn_fg_color, error);
+                }
+                for line in self.scripts.log(&name).iter().rev().take(5) {
+                    note(ui, line);
+                }
+            });
+            ui.add_space(6.);
         }
     }
     /// Settings > Remote control.

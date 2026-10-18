@@ -54,6 +54,7 @@ mod music;
 mod utilities;
 mod external_import;
 mod recording;
+mod scripts;
 mod remote;
 #[cfg(not(windows))]
 mod renderer_capture;

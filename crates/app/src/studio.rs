@@ -376,6 +376,7 @@ enum Settings {
     Audio,
     Hotkeys,
     Remote,
+    Scripts,
     /// The advanced-options switch, backups, profiles and imports.
     Advanced,
 }
@@ -446,6 +447,10 @@ pub struct Studio {
     remote_attempt: Instant,
     remote_seen: RemoteState,
     remote_chat_seen: u64,
+    /// Lua scripts running, the list they were loaded from, and events waiting for them.
+    scripts: crate::scripts::Scripts,
+    scripts_loaded: Vec<String>,
+    pending_events: Vec<serde_json::Value>,
     /// The virtual camera's output while it's on, and ones still finishing.
     virtual_camera: Option<crate::recording::Recording>,
     camera_stopping: Vec<crate::recording::Recording>,
@@ -873,6 +878,9 @@ impl Studio {
             remote_attempt: Instant::now() - Duration::from_secs(60),
             remote_seen: Default::default(),
             remote_chat_seen: 0,
+            scripts: Default::default(),
+            scripts_loaded: Vec::new(),
+            pending_events: Vec::new(),
             virtual_camera: None,
             camera_stopping: Vec::new(),
             replay_on: false,
@@ -5472,6 +5480,7 @@ impl Studio {
                     (Settings::Audio, "Sound"),
                     (Settings::Hotkeys, "Hotkeys"),
                     (Settings::Remote, "Remote control"),
+                    (Settings::Scripts, "Scripts"),
                     (Settings::Appearance, "Look & feel"),
                     (Settings::Advanced, "Advanced"),
                 ] {
@@ -5502,6 +5511,7 @@ impl Studio {
                 Settings::Announcements=>self.announce_settings(ui),
                 Settings::Hotkeys=>self.hotkey_settings(ui),
                 Settings::Remote=>self.remote_settings_page(ui),
+                Settings::Scripts=>self.scripts_page(ui),
                 Settings::Donations=>{ let (edited, preview) = crate::donations::ui(ui, &mut self.project.preferences.donations, &mut self.donations, &mut self.kofi); changed |= edited; if edited {self.donation_save_due=Some(Instant::now());}
                 if let Some(text) = preview { self.active_alert=Some((text,Instant::now()+Duration::from_secs(8))); self.page=Page::Studio; } },
                 Settings::Video=>{
@@ -6157,6 +6167,11 @@ impl eframe::App for Studio {
                 .map(|d| d.activity(&self.project.preferences.donations)),
         );
         for item in incoming {
+            // Follows, subs, donations… for remote controllers and scripts.
+            if self.remote.is_some() || !self.scripts.is_empty() {
+                let name = format!("{:?}", item.kind).to_lowercase();
+                self.pending_events.push(serde_json::json!({"event": name, "platform": item.platform.name(), "author": item.author, "text": item.text, "count": item.facts.count}));
+            }
             let kind = item.kind;
             let platform = item.platform;
             let event = Event {

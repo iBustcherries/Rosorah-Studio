@@ -1180,6 +1180,9 @@ pub struct Preferences {
     pub audio_filters: std::collections::BTreeMap<Id, AudioFilters>,
     #[serde(default)]
     pub hotkeys: Vec<Hotkey>,
+    /// Lua scripts switched on, by file name.
+    #[serde(default)]
+    pub scripts_enabled: Vec<String>,
     /// How many seconds the replay buffer keeps.
     #[serde(default = "replay_seconds")]
     pub replay_seconds: u32,
@@ -1367,6 +1370,7 @@ impl Default for Project {
                 audio_filters: Default::default(),
                 hotkeys: Vec::new(),
                 replay_seconds: 30,
+                scripts_enabled: Vec::new(),
                 recording_encoder: RecordingEncoder::Auto,
                 auto_game_audio: true,
             },

@@ -30,6 +30,8 @@ libc = "0.2"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 tungstenite = { version = "0.28", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 sha2 = "0.10"
+# Lua 5.4 for user scripts, compiled into Rosorah (MIT).
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
 base64 = "0.22"
 getrandom = "0.3"
 
