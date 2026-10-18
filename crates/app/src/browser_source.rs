@@ -191,14 +191,14 @@ mod integration_tests {
         p.sources[0].kind = SourceKind::Browser { url: url.clone() };
         p.sources[1].kind = SourceKind::Color([0, 0, 255, 255]);
         p.scenes[0].layers = vec![
-            Layer { crop: [0.;4], group: 0, frame: Default::default(),
+            Layer { crop: [0.;4], group: 0, frame: Default::default(), look: Default::default(),
                 source: 2,
                 rect: [0., 0., 1., 1.],
                 visible: true,
                 locked: false,
                 opacity: 1.,
             },
-            Layer { crop: [0.;4], group: 0, frame: Default::default(),
+            Layer { crop: [0.;4], group: 0, frame: Default::default(), look: Default::default(),
                 source: 1,
                 rect: [0., 0., 1., 1.],
                 visible: true,

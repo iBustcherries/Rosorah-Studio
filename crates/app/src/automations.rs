@@ -455,7 +455,7 @@ fn add_sample_source(p: &mut Project, sample: &crate::alert_samples::Sample, lay
     if sample.sound || layer {
         let scenes: Vec<Id> = p.canvases.iter().map(|c| c.scene).collect();
         for scene in p.scenes.iter_mut().filter(|s| scenes.contains(&s.id)) {
-            scene.layers.push(auroracast_core::Layer { frame: Default::default(), source: id, rect, visible: true, locked: sample.sound, opacity: if sample.sound { 0. } else { 1. }, crop: [0.; 4], group: 0 });
+            scene.layers.push(auroracast_core::Layer { frame: Default::default(), look: Default::default(), source: id, rect, visible: true, locked: sample.sound, opacity: if sample.sound { 0. } else { 1. }, crop: [0.; 4], group: 0 });
         }
     }
     id

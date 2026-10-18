@@ -72,15 +72,15 @@ impl Guide {
     let id=p.id();// 16:9 by default, so 16:9 media fills it and 4:3 media fits top to bottom without stretching.
     let mut settings=Settings{kind:Kind::AlertBox,label:"Alerts".into(),background:[0;4],alert_layout:self.layout,automation_only:true,layout_width:960,layout_height:540,..Default::default()};settings.platforms.push(Platform::Donations);
     p.sources.push(Source{id,name:"Alerts".into(),kind:SourceKind::Widget(settings)});
-    if let Some(s)=p.scenes.iter_mut().find(|s|s.id==canvas.scene){s.layers.push(Layer{ frame: Default::default(),source:id,rect:alert_box_rect(&canvas),visible:true,locked:false,opacity:1.,crop:[0.;4],group:0});}
+    if let Some(s)=p.scenes.iter_mut().find(|s|s.id==canvas.scene){s.layers.push(Layer{ frame: Default::default(), look: Default::default(),source:id,rect:alert_box_rect(&canvas),visible:true,locked:false,opacity:1.,crop:[0.;4],group:0});}
     id
   };
   if let Some(scene)=p.scenes.iter_mut().find(|s|s.id==canvas.scene) {
-   if let Some(layer)=scene.layers.iter_mut().find(|l|l.source==box_id){layer.visible=true;}else{scene.layers.push(Layer{ frame: Default::default(),source:box_id,rect:alert_box_rect(&canvas),visible:true,locked:false,opacity:1.,crop:[0.;4],group:0});}
+   if let Some(layer)=scene.layers.iter_mut().find(|l|l.source==box_id){layer.visible=true;}else{scene.layers.push(Layer{ frame: Default::default(), look: Default::default(),source:box_id,rect:alert_box_rect(&canvas),visible:true,locked:false,opacity:1.,crop:[0.;4],group:0});}
   }
   let mut add=|path:&str,sound:bool|->Option<Id>{if path.is_empty(){return None;}let id=p.id();p.sources.push(Source{id,name:format!("{} · {}",self.name,if sound{"Sound"}else{"Media"}),kind:SourceKind::VideoFile(VideoSettings{path:path.into(),gain:self.gain,audio:sound||self.sound.is_empty(),looped:false,automation_only:true,duration_secs:self.seconds,canvases:vec![canvas.id],..Default::default()})});
    let audio_id=p.id();p.audio.push(AudioChannel{id:audio_id,name:format!("{} · {}",self.name,if sound{"Sound"}else{"Media"}),gain_db:0.,muted:false,tracks:[true,false,false,false,false,false],delay_ms:0,monitor:self.monitor,monitor_only:false,noise_suppression:Default::default(),media_source:Some(id)});
-   if sound {if let Some(s)=p.scenes.iter_mut().find(|s|s.id==canvas.scene){s.layers.push(Layer{ frame: Default::default(),source:id,rect:[0.,0.,0.001,0.001],visible:true,locked:true,opacity:0.,crop:[0.;4],group:0});}}
+   if sound {if let Some(s)=p.scenes.iter_mut().find(|s|s.id==canvas.scene){s.layers.push(Layer{ frame: Default::default(), look: Default::default(),source:id,rect:[0.,0.,0.001,0.001],visible:true,locked:true,opacity:0.,crop:[0.;4],group:0});}}
    Some(id)};
   let media=add(&self.media,false);let sound=add(&self.sound,true);
   if self.monitor&&(media.is_some()||sound.is_some())&&p.preferences.monitor_device.is_empty(){p.preferences.monitor_device=crate::audio::DEFAULT_MONITOR.into();}

@@ -206,6 +206,7 @@ dependencies = [
  "anyhow",
  "auroracast-core",
  "bytemuck",
+ "image",
  "pollster",
  "wgpu",
 ]

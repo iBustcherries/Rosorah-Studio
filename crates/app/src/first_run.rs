@@ -235,7 +235,7 @@ impl Studio {
         if let Some(id) = alerts {
             self.route_visual_alerts(id);
         }
-        let layer = |source: Id, rect: [f32; 4]| Layer { crop: [0.; 4], group: 0, frame: Default::default(), source, rect, visible: true, locked: false, opacity: 1. };
+        let layer = |source: Id, rect: [f32; 4]| Layer { crop: [0.; 4], group: 0, frame: Default::default(), look: Default::default(), source, rect, visible: true, locked: false, opacity: 1. };
         let mut scenes: Vec<Scene> = Vec::new();
         let mut add_scene = |project: &mut Project, name: &str, layers: Vec<Layer>| {
             let id = project.id();

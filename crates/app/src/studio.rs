@@ -2354,7 +2354,7 @@ impl Studio {
                 ui.menu_button("Reuse a capture or camera", |ui| {
                     for (id, label) in reusable {
                         if ui.button(label).clicked() {
-                            self.project.scenes[si].layers.push(Layer { crop: [0.;4], group: 0, frame: Default::default(), source: id, rect: [0., 0., 1., 1.], visible: true, locked: false, opacity: 1. });
+                            self.project.scenes[si].layers.push(Layer { crop: [0.;4], group: 0, frame: Default::default(), look: Default::default(), source: id, rect: [0., 0., 1., 1.], visible: true, locked: false, opacity: 1. });
                             let index = self.project.scenes[si].layers.len() - 1;
                             self.layer = Some(index);
                             self.selections.insert(self.project.scenes[si].id, vec![index]);
@@ -2397,7 +2397,7 @@ impl Studio {
         };
         let id = self.project.id();
         self.project.sources.push(Source { id, name: name.clone(), kind });
-        self.project.scenes[si].layers.push(Layer { crop: [0.; 4], group: 0, frame: Default::default(), source: id, rect, visible: true, locked: false, opacity: 1. });
+        self.project.scenes[si].layers.push(Layer { crop: [0.; 4], group: 0, frame: Default::default(), look: Default::default(), source: id, rect, visible: true, locked: false, opacity: 1. });
         let index = self.project.scenes[si].layers.len() - 1;
         self.layer = Some(index);
         self.selections.insert(scene, vec![index]);
@@ -6288,7 +6288,7 @@ fn ensure_automatic_source(project: &mut Project) -> bool {
     });
     for scene in &mut project.scenes {
         if project.canvases.iter().any(|c| c.scene == scene.id) {
-            scene.layers.push(Layer { crop: [0.;4], group: 0, frame: Default::default(),
+            scene.layers.push(Layer { crop: [0.;4], group: 0, frame: Default::default(), look: Default::default(),
                 source: id,
                 rect: [0., 0., 1., 1.],
                 visible: true,

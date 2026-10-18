@@ -30,6 +30,8 @@ pub enum SourceKind {
     Browser { url: String },
     ChatOverlay,
     Widget(widgets::Settings),
+    /// Another scene, shown as one layer (nested scene).
+    Scene(Id),
 }
 
 impl SourceKind {
@@ -44,6 +46,7 @@ impl SourceKind {
                 | Self::TestPattern
                 | Self::Color(_)
                 | Self::Image { .. }
+                | Self::Scene(_)
         )
     }
     pub fn label(&self) -> &'static str {
@@ -58,6 +61,7 @@ impl SourceKind {
             Self::Browser { .. } => "Browser",
             Self::ChatOverlay => "Chat overlay",
             Self::Widget(_) => "Widget",
+            Self::Scene(_) => "Scene",
         }
     }
 }
@@ -127,6 +131,14 @@ pub enum Transition {
     /// Layers showing the same source in both scenes glide to their new place and size;
     /// the others fade out or in.
     Move,
+    /// The old scene slides out as the new one slides in.
+    Slide,
+    /// The new scene slides in over the old one.
+    Swipe,
+    /// A soft-edged pattern (bars, circle, clock…) reveals the new scene.
+    PatternWipe,
+    /// Fade to a colour, then from it into the new scene.
+    FadeToColor,
 }
 impl Transition {
     pub fn label(self) -> &'static str {
@@ -137,13 +149,42 @@ impl Transition {
             Self::Stinger => "Stinger video",
             Self::Screen => "Transition screen",
             Self::Move => "Move",
+            Self::Slide => "Slide",
+            Self::Swipe => "Swipe",
+            Self::PatternWipe => "Pattern wipe",
+            Self::FadeToColor => "Fade to colour",
         }
     }
     /// Fade and Wipe blend a snapshot of the old scene in the compositor; the others switch
     /// instantly underneath (Stinger and Screen hide the switch with an overlay).
     pub fn blends(self) -> bool {
-        matches!(self, Self::Fade | Self::Wipe)
+        matches!(self, Self::Fade | Self::Wipe | Self::Slide | Self::Swipe | Self::PatternWipe | Self::FadeToColor)
     }
+    /// Transitions drawn by the compositor that take a duration.
+    pub const TIMED: [Self; 7] = [Self::Fade, Self::Wipe, Self::Move, Self::Slide, Self::Swipe, Self::PatternWipe, Self::FadeToColor];
+}
+/// Settings for Pattern wipe and Fade to colour.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TransitionStyle {
+    /// Fade to colour's colour.
+    pub color: [u8; 3],
+    /// Pattern wipe's pattern (see WIPE_PATTERNS) and how soft its edge is (0…0.5).
+    pub pattern: u8,
+    pub softness: f32,
+}
+impl Default for TransitionStyle {
+    fn default() -> Self {
+        Self { color: [0, 0, 0], pattern: 3, softness: 0.1 }
+    }
+}
+/// Pattern wipe patterns, numbered as the compositor draws them.
+pub const WIPE_PATTERNS: [(u8, &str); 7] = [(1, "Left to right"), (2, "Top to bottom"), (3, "Circle"), (4, "Clock"), (5, "Diamond"), (6, "Blinds"), (7, "Box")];
+/// A transition used when switching to one particular scene, instead of the usual one.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SceneTransition {
+    pub kind: Transition,
+    pub ms: u32,
 }
 /// Stinger video and transition screen settings. Each media file is an automation-only
 /// video source (a picture plays as a still), so it gets the usual mixer channel.
@@ -257,6 +298,129 @@ impl Frame {
         self.feather <= 0. && (self.shape == FrameShape::Square || (self.shape == FrameShape::Rounded && self.radius <= 0.))
     }
 }
+/// How a layer mixes with what's underneath.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Add,
+    Multiply,
+    Screen,
+    Lighten,
+    Darken,
+}
+impl BlendMode {
+    pub const ALL: [Self; 6] = [Self::Normal, Self::Add, Self::Multiply, Self::Screen, Self::Lighten, Self::Darken];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "Normal",
+            Self::Add => "Add",
+            Self::Multiply => "Multiply",
+            Self::Screen => "Screen",
+            Self::Lighten => "Lighten",
+            Self::Darken => "Darken",
+        }
+    }
+}
+/// How a layer appears or disappears when it's shown or hidden.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LayerTransition {
+    #[default]
+    None,
+    Fade,
+    Zoom,
+    SlideLeft,
+    SlideRight,
+    SlideUp,
+    SlideDown,
+}
+impl LayerTransition {
+    pub const ALL: [Self; 7] = [Self::None, Self::Fade, Self::Zoom, Self::SlideLeft, Self::SlideRight, Self::SlideUp, Self::SlideDown];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::None => "Instant",
+            Self::Fade => "Fade",
+            Self::Zoom => "Zoom",
+            Self::SlideLeft => "Slide from the left",
+            Self::SlideRight => "Slide from the right",
+            Self::SlideUp => "Slide from the top",
+            Self::SlideDown => "Slide from the bottom",
+        }
+    }
+}
+/// A layer's transform and video filters. Everything at its default draws the layer unchanged
+/// and costs nothing extra.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Look {
+    /// Clockwise, in degrees, around the layer's centre.
+    pub rotation: f32,
+    pub flip_horizontal: bool,
+    pub flip_vertical: bool,
+    pub blend: BlendMode,
+    /// Colour correction: brightness and contrast −1…1, saturation 0…2 (1 = unchanged),
+    /// hue shift in degrees, gamma 0.2…5 (1 = unchanged).
+    pub brightness: f32,
+    pub contrast: f32,
+    pub saturation: f32,
+    pub hue: f32,
+    pub gamma: f32,
+    /// A colour look-up table (.cube file) and how strongly it applies (0…1).
+    pub lut: String,
+    pub lut_amount: f32,
+    /// 0…1.
+    pub sharpen: f32,
+    /// Continuous scrolling, in layer widths/heights per second.
+    pub scroll: [f32; 2],
+    /// A picture whose brightness (and transparency) decides what of the layer shows.
+    pub mask: String,
+    pub mask_invert: bool,
+    /// Removes dark (or light) areas: what's darker than `luma_min` or lighter than `luma_max` goes.
+    pub luma_key: bool,
+    pub luma_min: f32,
+    pub luma_max: f32,
+    pub luma_softness: f32,
+    /// Shows the source this many milliseconds late (up to 2 s), e.g. to match audio.
+    pub delay_ms: u32,
+    pub show: LayerTransition,
+    pub hide: LayerTransition,
+    pub transition_ms: u32,
+}
+impl Default for Look {
+    fn default() -> Self {
+        Self {
+            rotation: 0.,
+            flip_horizontal: false,
+            flip_vertical: false,
+            blend: BlendMode::Normal,
+            brightness: 0.,
+            contrast: 0.,
+            saturation: 1.,
+            hue: 0.,
+            gamma: 1.,
+            lut: String::new(),
+            lut_amount: 1.,
+            sharpen: 0.,
+            scroll: [0., 0.],
+            mask: String::new(),
+            mask_invert: false,
+            luma_key: false,
+            luma_min: 0.,
+            luma_max: 1.,
+            luma_softness: 0.05,
+            delay_ms: 0,
+            show: LayerTransition::None,
+            hide: LayerTransition::None,
+            transition_ms: 300,
+        }
+    }
+}
+impl Look {
+    /// Whether the colour is changed at all.
+    pub fn colour_adjusted(&self) -> bool {
+        self.brightness != 0. || self.contrast != 0. || self.saturation != 1. || self.hue != 0. || self.gamma != 1.
+    }
+}
 /// Normalized canvas coordinates. A source can be referenced by many layers.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Layer {
@@ -264,6 +428,8 @@ pub struct Layer {
     pub crop: [f32;4],
     #[serde(default)]
     pub frame: Frame,
+    #[serde(default)]
+    pub look: Look,
     #[serde(default)]
     pub group: u64,
     pub source: Id,
@@ -829,6 +995,11 @@ pub struct Preferences {
     pub transition_ms: u32,
     #[serde(default)]
     pub transition_media: TransitionMedia,
+    #[serde(default)]
+    pub transition_style: TransitionStyle,
+    /// Per-scene overrides: switching to that scene uses its own transition.
+    #[serde(default)]
+    pub scene_transitions: std::collections::BTreeMap<Id, SceneTransition>,
     /// Live transition overlays by canvas id; never saved.
     #[serde(skip)]
     pub overlays: std::collections::BTreeMap<Id, Overlay>,
@@ -879,7 +1050,7 @@ pub struct Project {
 }
 
 fn layer(source: Id, rect: [f32; 4]) -> Layer {
-    Layer { crop: [0.;4], group: 0, frame: Default::default(),
+    Layer { crop: [0.;4], group: 0, frame: Default::default(), look: Default::default(),
         source,
         rect,
         visible: true,
@@ -1026,6 +1197,8 @@ impl Default for Project {
                 transition: Transition::Cut,
                 transition_ms: 300,
                 transition_media: TransitionMedia::default(),
+                transition_style: TransitionStyle::default(),
+                scene_transitions: Default::default(),
                 overlays: Default::default(),
                 snapping: SnapSettings::default(),
                 capture_resolution: CaptureResolution::default(),
@@ -1484,7 +1657,7 @@ mod layer_edit_tests {
             id: 10,
             name: "Layers".into(),
             layers: (1..=4)
-                .map(|source| Layer { crop: [0.;4], group: 0, frame: Default::default(),
+                .map(|source| Layer { crop: [0.;4], group: 0, frame: Default::default(), look: Default::default(),
                     source,
                     rect: [0.1, 0.2, 0.3, 0.4],
                     opacity: 0.6,

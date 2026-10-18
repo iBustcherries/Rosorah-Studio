@@ -141,8 +141,8 @@ impl Studio {
                 self.changed();
             }
         }
-        let before = (self.project.preferences.transition, self.project.preferences.transition_ms, self.project.preferences.transition_media.clone());
-        for kind in [Transition::Cut, Transition::Fade, Transition::Wipe, Transition::Move, Transition::Stinger, Transition::Screen] {
+        let before = (self.project.preferences.transition, self.project.preferences.transition_ms, self.project.preferences.transition_media.clone(), self.project.preferences.transition_style.clone());
+        for kind in [Transition::Cut, Transition::Fade, Transition::Wipe, Transition::Slide, Transition::Swipe, Transition::PatternWipe, Transition::FadeToColor, Transition::Move, Transition::Stinger, Transition::Screen] {
             ui.selectable_value(&mut self.project.preferences.transition, kind, kind.label());
         }
         ui.separator();
@@ -153,6 +153,26 @@ impl Studio {
             Transition::Move => {
                 ui.add(egui::DragValue::new(&mut self.project.preferences.transition_ms).range(100..=2000).suffix(" ms"));
                 note(ui, "Layers showing the same thing in both scenes (your camera, a game, an image) glide to their new place and size. Everything else fades.");
+            }
+            Transition::Slide | Transition::Swipe => {
+                ui.add(egui::DragValue::new(&mut self.project.preferences.transition_ms).range(100..=2000).suffix(" ms"));
+            }
+            Transition::PatternWipe => {
+                ui.add(egui::DragValue::new(&mut self.project.preferences.transition_ms).range(100..=3000).suffix(" ms"));
+                let style = &mut self.project.preferences.transition_style;
+                ui.horizontal_wrapped(|ui| {
+                    for (id, name) in auroracast_core::WIPE_PATTERNS {
+                        ui.selectable_value(&mut style.pattern, id, name);
+                    }
+                });
+                ui.add(egui::Slider::new(&mut style.softness, 0.0..=0.5).text("Soft edge").show_value(false));
+            }
+            Transition::FadeToColor => {
+                ui.add(egui::DragValue::new(&mut self.project.preferences.transition_ms).range(100..=3000).suffix(" ms"));
+                ui.horizontal(|ui| {
+                    ui.label("Colour");
+                    ui.color_edit_button_srgb(&mut self.project.preferences.transition_style.color);
+                });
             }
             Transition::Stinger => {
                 self.transition_file_row(ui, true);
@@ -176,7 +196,7 @@ impl Studio {
             }
             Transition::Cut => {}
         }
-        if before != (self.project.preferences.transition, self.project.preferences.transition_ms, self.project.preferences.transition_media.clone()) {
+        if before != (self.project.preferences.transition, self.project.preferences.transition_ms, self.project.preferences.transition_media.clone(), self.project.preferences.transition_style.clone()) {
             self.changed();
         }
     }

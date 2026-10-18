@@ -742,7 +742,7 @@ mod tests {
             name: "test".into(),
             kind: SourceKind::ScreenCapture,
         });
-        project.scenes[0].layers.push(auroracast_core::Layer { crop: [0.;4], group: 0, frame: Default::default(),
+        project.scenes[0].layers.push(auroracast_core::Layer { crop: [0.;4], group: 0, frame: Default::default(), look: Default::default(),
             source: id,
             rect: [0., 0., 1., 1.],
             visible: true,

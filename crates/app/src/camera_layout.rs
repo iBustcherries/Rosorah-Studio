@@ -57,7 +57,7 @@ mod tests {
         });
         for i in 0..2 {
             let scene = p.canvases[i].scene;
-            p.scenes.iter_mut().find(|s| s.id == scene).unwrap().layers = vec![Layer { crop: [0.;4], group: 0, frame: Default::default(),
+            p.scenes.iter_mut().find(|s| s.id == scene).unwrap().layers = vec![Layer { crop: [0.;4], group: 0, frame: Default::default(), look: Default::default(),
                 source: id,
                 rect: [0.2, 0.1, 0.3, 0.3],
                 visible: true,

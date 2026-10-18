@@ -453,7 +453,7 @@ impl Studio {
     fn add_source_layer(&mut self, si: usize, name: &str, kind: SourceKind, rect: [f32; 4]) -> Id {
         let id = self.project.id();
         self.project.sources.push(Source { id, name: name.into(), kind });
-        self.project.scenes[si].layers.push(Layer { crop: [0.; 4], group: 0, frame: Default::default(), source: id, rect, visible: true, locked: false, opacity: 1. });
+        self.project.scenes[si].layers.push(Layer { crop: [0.; 4], group: 0, frame: Default::default(), look: Default::default(), source: id, rect, visible: true, locked: false, opacity: 1. });
         let index = self.project.scenes[si].layers.len() - 1;
         self.layer = Some(index);
         self.selections.insert(self.project.scenes[si].id, vec![index]);

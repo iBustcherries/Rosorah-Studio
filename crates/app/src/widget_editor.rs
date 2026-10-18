@@ -77,7 +77,7 @@ impl Studio {
             if let Some(id) = self.project.sources.iter().find(|s| matches!(&s.kind, SourceKind::Widget(w) if w.kind == widgets::Kind::AlertBox)).map(|s|s.id) {
                 if let Some(scene) = self.project.scenes.iter_mut().find(|s|s.id==scene) {
                     let index = if let Some(i)=scene.layers.iter().position(|l|l.source==id) {scene.layers[i].visible=true;i} else {
-                        scene.layers.push(Layer{ frame: Default::default(),source:id,rect:[0.15,0.1,0.7,0.35],visible:true,locked:false,opacity:1.,crop:[0.;4],group:0});scene.layers.len()-1
+                        scene.layers.push(Layer{ frame: Default::default(), look: Default::default(),source:id,rect:[0.15,0.1,0.7,0.35],visible:true,locked:false,opacity:1.,crop:[0.;4],group:0});scene.layers.len()-1
                     };
                     self.layer=Some(index);self.selections.insert(scene.id,vec![index]);
                 }
@@ -97,7 +97,7 @@ impl Studio {
             kind: SourceKind::Widget(settings),
         });
         if let Some(scene) = self.project.scenes.iter_mut().find(|s| s.id == scene) {
-            scene.layers.push(Layer { crop: [0.;4], group: 0, frame: Default::default(),
+            scene.layers.push(Layer { crop: [0.;4], group: 0, frame: Default::default(), look: Default::default(),
                 source: id,
                 rect: [0.1, 0.1, 0.8, height],
                 visible: true,
