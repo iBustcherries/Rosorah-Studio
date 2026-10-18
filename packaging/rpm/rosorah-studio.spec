@@ -9,7 +9,7 @@
 
 Name:           rosorah-studio
 Version:        %{pkgversion}
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        Streaming, recording and multistreaming studio
 License:        Proprietary
 ExclusiveArch:  x86_64

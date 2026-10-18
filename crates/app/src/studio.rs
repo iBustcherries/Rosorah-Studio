@@ -292,6 +292,8 @@ pub struct Studio {
     camera_drafts: std::collections::BTreeMap<Id, auroracast_core::CameraSettings>,
     workspace: Workspace,
     scene_dialog: Option<(Id, String, bool)>,
+    /// The sound whose settings window is open.
+    sound_settings: Option<Id>,
     broadcast_window: u8,
     panels_animating: bool,
     toggle_panel: Option<Panel>,
@@ -583,6 +585,8 @@ impl Studio {
         let scene_dialog = (page == "delete-scene")
             .then(|| project.canvases.first().and_then(|c| project.scene(c.scene)).map(|s| (s.id, s.name.clone(), true)))
             .flatten();
+        // `--page sound-settings` opens the microphone's settings for screenshots.
+        let sound_settings = (page == "sound-settings").then(|| project.audio.iter().find(|c| c.name.to_lowercase().contains("mic")).map(|c| c.id)).flatten();
         let mut widget_editor = WidgetEditor::default();
         if page == "widgets" {
             widget_editor.id = project
@@ -645,6 +649,7 @@ impl Studio {
             preview_size: [0, 0],
             animate: false,
             scene_dialog,
+            sound_settings,
             broadcast_window: if page == "add-service" { 3 } else { 0 },
             panels_animating: false,
             frame: 0,
@@ -3744,33 +3749,17 @@ impl Studio {
         ui.horizontal_wrapped(|ui| {
             if advanced && ui.button("Monitoring & sync…").clicked(){self.tools.audio=true;}
             note(ui, format!("Volumes for {}",self.project.scene(scene_id).map(|s|s.name.as_str()).unwrap_or("this scene")));
+            self.add_sound_menu(ui, &view);
             if !advanced {
-                self.add_sound_menu(ui, &view);
                 return;
             }
             ui.menu_button("Options",|ui| {
-        if !self.project.audio.iter().any(|c| c.name == "Desktop audio")
-            && ui.button("Add computer sound").on_hover_text("Everything playing on this computer").clicked()
-        {
-            let id = self.project.id();
-            self.project.audio.push(auroracast_core::AudioChannel { monitor_only:false,
-                id,
-                name: "Desktop audio".into(),
-                gain_db: 0.,
-                muted: false,
-                tracks: [true, false, false, false, false, false],
-                delay_ms: 0,
-                monitor: false,
-                noise_suppression: Default::default(),
-                media_source: None,
-            });
-            self.changed();
-            self.audio.refresh();
-        }
                 if ui.button("Refresh inputs").clicked(){self.audio.refresh();}
         if advanced { ui.collapsing("Advanced audio",|ui|{
             let old=self.project.preferences.monitor_device.clone();
-            egui::ComboBox::from_id_salt("monitor_device").selected_text(view.devices.iter().find(|d|d.target==old).map(|d|d.label.as_str()).unwrap_or(if old==crate::audio::DEFAULT_MONITOR{"System default output"}else{"Monitoring off"})).show_ui(ui,|ui|{ui.selectable_value(&mut self.project.preferences.monitor_device,String::new(),"Monitoring off");ui.selectable_value(&mut self.project.preferences.monitor_device,crate::audio::DEFAULT_MONITOR.into(),"System default output");for d in view.devices.iter().filter(|d|d.kind=="Audio/Sink"){ui.selectable_value(&mut self.project.preferences.monitor_device,d.target.clone(),&d.label);}});
+            // A submenu, not a dropdown: a dropdown inside this menu would close the menu when clicked.
+            let current=view.devices.iter().find(|d|d.target==old).map(|d|d.label.clone()).unwrap_or(if old==crate::audio::DEFAULT_MONITOR{"System default output".into()}else{"Monitoring off".into()});
+            ui.menu_button(format!("Monitoring: {current}"),|ui|{ui.selectable_value(&mut self.project.preferences.monitor_device,String::new(),"Monitoring off");ui.selectable_value(&mut self.project.preferences.monitor_device,crate::audio::DEFAULT_MONITOR.into(),"System default output");for d in view.devices.iter().filter(|d|d.kind=="Audio/Sink"){ui.selectable_value(&mut self.project.preferences.monitor_device,d.target.clone(),&d.label);}});
             ui.small(&view.monitor_status);ui.small("Use headphones. Monitoring a desktop mix back to the same output can create feedback.");
             if ui.checkbox(&mut self.project.preferences.multitrack_recording,"Record six separate audio tracks in standalone MKV").changed()||old!=self.project.preferences.monitor_device{self.changed();}
             if ui.button("Separate game, microphone and music tracks").clicked(){for c in &mut self.project.audio{c.tracks=[false;6];c.tracks[0]=true;let t=if c.id==crate::game_audio::CHANNEL{1}else if c.name.to_lowercase().contains("mic"){2}else{3};c.tracks[t]=true;}self.project.preferences.multitrack_recording=true;self.changed();}
@@ -3863,6 +3852,8 @@ impl Studio {
         let meter_height = (strip_height - overhead).max(24.);
         let automatic = self.project.preferences.auto_game_audio;
         let accent = self.accent();
+        let sound_settings = &mut self.sound_settings;
+        let mut refresh = false;
         let mut draw_channel = |ui: &mut egui::Ui, channel: &mut auroracast_core::AudioChannel| {
             ui.push_id(channel.id, |ui| {
                 if dragged == Some(channel.id) {
@@ -3903,79 +3894,124 @@ impl Studio {
                     let response=if vertical_audio {ui.horizontal(|ui| {crate::material::meter_sized(ui,levels,true,meter_height);ui.add(slider.vertical())}).inner}else{ui.add(slider)};
                     if response.changed() {channel.gain_db=if gain<=-60. {-100.}else{gain};changed=true;}
                     if ui.selectable_label(channel.muted,if channel.muted {"🔇"}else{"🔊"}).on_hover_text(if channel.muted {"Muted · click to unmute"}else{"Click to mute"}).clicked() {channel.muted = !channel.muted;changed=true;}
-                    ui.menu_button("⚙",|ui| {
+                    if ui.button("⚙").on_hover_text("Sound settings").clicked() {
+                        *sound_settings = Some(channel.id);
+                    }
+                    });
+                    // Settings open in a window in the middle of the screen rather than a popup menu,
+                    // so choosing a device never closes them halfway through.
+                    if *sound_settings == Some(channel.id) {
+                    let ctx = ui.ctx().clone();
+                    let mut done = false;
+                    let modal = egui::Modal::new(egui::Id::new(("sound-settings", channel.id))).frame(solid_window(&ctx)).show(&ctx, |ui| {
+                    ui.set_width(400.);
+                    ui.spacing_mut().item_spacing.y = 6.;
+                    ui.heading(&channel.name);
+                    crate::material::meter_plain(ui, levels);
+                    note(ui, "Speak or play something; the bar moves when this sound is coming through.");
+                    ui.add_space(6.);
                     if automatic && channel.id == crate::game_audio::CHANNEL {
-                        ui.label("Following captured game");
-                        ui.small(
-                            view.status
-                                .get(&channel.id)
-                                .map_or("Waiting for a captured game", String::as_str),
-                        );
+                        ui.label(RichText::new("Following the captured game").strong());
+                        note(ui, view.status.get(&channel.id).map_or("Waiting for a captured game", String::as_str));
                     } else if channel.id == ALERTS_STRIP {
-                        ui.small("Every alert sound together. Each alert's own level is in its alert settings.");
+                        note(ui, "Every alert sound together. Each alert's own level is in its alert settings.");
                     } else if channel.media_source.is_some() {
-                        ui.small("Video sound · follows visible scene");
+                        note(ui, "Sound from a video. It plays while the video is in the visible scene.");
                     } else {
-                        if channel.name=="Desktop audio" {ui.small("Captures everything playing through the chosen output. Mute game audio to avoid doubling it.");}
+                        let output = channel.name == "Desktop audio";
+                        ui.label(RichText::new(if output { "Speakers or headphones to capture" } else { "Device" }).strong());
+                        if output {
+                            note(ui, "Captures everything playing through this output. Mute game audio to avoid hearing it twice.");
+                        }
                         let selected = self.audio.selected.entry(channel.id).or_default();
                         let enabled = self.audio.enabled.entry(channel.id).or_default();
                         let before = selected.clone();
-                        egui::ComboBox::from_id_salt("audio-input")
-                            .width(ui.available_width().min(360.))
-                            .selected_text(
-                                view.devices
-                                    .iter()
-                                    .find(|d| &d.serial == selected)
-                                    .map_or("Choose input…", |d| d.label.as_str()),
-                            )
-                            .show_ui(ui, |ui| {
+                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                            egui::ScrollArea::vertical().max_height(220.).auto_shrink([false, true]).show(ui, |ui| {
                                 ui.selectable_value(selected, String::new(), "None");
-                                for d in view.devices.iter().filter(|d|channel.name!="Desktop audio" || d.kind=="Audio/Sink") {
-                                    ui.selectable_value(selected, d.serial.clone(), &d.label);
+                                // Grouped under headings, so the rows don't each repeat what kind of device they are.
+                                let groups: &[(&str, &str, fn(&str) -> bool)] = if output {
+                                    &[("", "Desktop output: ", |k| k == "Audio/Sink")]
+                                } else {
+                                    &[
+                                        ("Microphones and inputs", "Microphone / input: ", |k| k == "Audio/Source"),
+                                        ("Sound playing on this computer", "Desktop output: ", |k| k == "Audio/Sink"),
+                                        ("Apps", "Application: ", |k| k != "Audio/Source" && k != "Audio/Sink"),
+                                    ]
+                                };
+                                for (heading, prefix, wanted) in groups {
+                                    let devices: Vec<_> = view.devices.iter().filter(|d| wanted(&d.kind)).collect();
+                                    if devices.is_empty() {
+                                        continue;
+                                    }
+                                    if !heading.is_empty() {
+                                        ui.add_space(4.);
+                                        note(ui, *heading);
+                                    }
+                                    for d in devices {
+                                        ui.selectable_value(selected, d.serial.clone(), d.label.strip_prefix(prefix).unwrap_or(&d.label));
+                                    }
                                 }
                             });
+                        });
                         if *selected != before {
                             *enabled = !selected.is_empty();
                         }
                         if !selected.is_empty() {
                             ui.horizontal_wrapped(|ui| {
-                                if ui
-                                    .small_button(if *enabled { "Stop" } else { "Start" })
-                                    .clicked()
-                                {
+                                if ui.button(if *enabled { "Stop" } else { "Start" }).clicked() {
                                     *enabled = !*enabled;
                                 }
-                                if *enabled {
-                                    ui.small(
-                                        view.status
-                                            .get(&channel.id)
-                                            .map_or("Connecting…", String::as_str),
-                                    );
-                                }
+                                note(ui, if *enabled { view.status.get(&channel.id).map_or("Connecting…", String::as_str) } else { "Stopped" });
                             });
+                        }
+                        if ui.small_button("Look for new devices").clicked() {
+                            refresh = true;
                         }
                     }
                     if channel.name.to_lowercase().contains("mic") || self.audio.selected.get(&channel.id).is_some_and(|serial| view.devices.iter().any(|d| &d.serial == serial && d.kind == "Audio/Source")) {
-                        ui.collapsing("Microphone noise suppression",|ui| {
-                        let old=channel.noise_suppression;
-                        egui::ComboBox::from_id_salt("noise_suppression").selected_text(channel.noise_suppression.label()).show_ui(ui,|ui| {for mode in auroracast_core::NoiseSuppression::ALL {ui.selectable_value(&mut channel.noise_suppression,mode,mode.label());}});
-                        ui.small("Noise suppression · reduces steady background noise");
-                        changed|=old!=channel.noise_suppression;
+                        ui.add_space(6.);
+                        ui.label(RichText::new("Noise suppression").strong());
+                        ui.horizontal(|ui| {
+                            for mode in auroracast_core::NoiseSuppression::ALL {
+                                changed |= ui.selectable_value(&mut channel.noise_suppression, mode, mode.label()).changed();
+                            }
                         });
+                        note(ui, "Reduces steady background noise like fans or hum.");
                     }
-                    if advanced { ui.collapsing("Advanced audio & tracks", |ui| {
+                    if advanced {
+                        ui.add_space(6.);
+                        ui.label(RichText::new("Timing and monitoring").strong());
                         changed |= ui.add(egui::DragValue::new(&mut channel.delay_ms).range(0..=2000).suffix(" ms audio delay")).changed();
-                        ui.small("Delay this audio to match a late camera, e.g. DroidCam. Applies to recording and streaming.");
-                        if ui.checkbox(&mut channel.monitor,"Listen on monitoring output").changed(){if !channel.monitor{channel.monitor_only=false;}changed=true;}
-                        if channel.monitor {changed |= ui.checkbox(&mut channel.monitor_only,"Monitor only (exclude from stream / recording)").changed();}
+                        note(ui, "Delay this audio to match a late camera, e.g. DroidCam. Applies to recording and streaming.");
+                        if ui.checkbox(&mut channel.monitor, "Listen on monitoring output").changed() {
+                            if !channel.monitor {
+                                channel.monitor_only = false;
+                            }
+                            changed = true;
+                        }
+                        if channel.monitor {
+                            changed |= ui.checkbox(&mut channel.monitor_only, "Monitor only (exclude from stream / recording)").changed();
+                        }
+                        ui.add_space(6.);
+                        ui.label(RichText::new("Recording tracks").strong());
                         ui.horizontal_wrapped(|ui| {
                             for (i, route) in channel.tracks.iter_mut().enumerate() {
                                 changed |= ui.checkbox(route, format!("{}", i + 1)).changed();
                             }
                         });
-                    }); }
+                    }
+                    ui.add_space(10.);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(egui::Button::new(RichText::new("Done").strong()).min_size(egui::vec2(80., 0.))).clicked() {
+                            done = true;
+                        }
                     });
                     });
+                    if done || modal.should_close() {
+                        *sound_settings = None;
+                    }
+                    }
                 });
                 ui.add_space(4.);
             }).response.rect
@@ -4059,6 +4095,9 @@ impl Studio {
                     }
                     drop_target(ui, &rects);
                 });
+        }
+        if refresh {
+            self.audio.refresh();
         }
         // Strip positions map to project channels; the Alerts strip stands for its first sound.
         let actual = |id: Id| if id == ALERTS_STRIP { alert_members.first().or(effect_members.first()).copied().unwrap_or(id) } else { id };
@@ -5111,7 +5150,7 @@ impl eframe::App for Studio {
         self.go_live_window(ctx);
         self.report_window(ctx);
         self.toast_ui(ctx);
-        if self.screenshot.is_some() && !self.screenshot_requested && self.ui_frames >= 4 && !self.appearance.busy() {
+        if self.screenshot.is_some() && !self.screenshot_requested && self.ui_frames >= 20 && !self.appearance.busy() {
             self.screenshot_requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
         }
