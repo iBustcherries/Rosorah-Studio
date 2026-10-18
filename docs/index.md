@@ -17,7 +17,9 @@ Rosorah Studio is under active development. Available features and platform supp
 - [Release downloads](https://github.com/iBustcherries/RosorahStudio-releases/releases)
 - [Report a problem](https://github.com/iBustcherries/Rosorah-Studio/issues)
 
-## Privacy and support
+## Terms, privacy, and support
+
+Read the [Terms and Conditions](terms.html) for information about using Rosorah Studio and its connected services.
 
 Account connections are optional. Review the [Privacy Policy](privacy.html) to learn how Rosorah handles account information, chat, recordings, browser sessions, and connected services, and how to revoke access or request deletion.
 
