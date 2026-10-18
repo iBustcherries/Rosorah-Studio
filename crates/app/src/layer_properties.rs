@@ -98,6 +98,15 @@ impl Studio {
                 }
             }
         });
+        ui.separator();
+        if ui.button("Copy").on_hover_text("Paste it into any scene, on either canvas (Ctrl+C / Ctrl+V)").clicked() {
+            self.copy_layers(si, i);
+            ui.close();
+        }
+        if !self.layer_clipboard.is_empty() && ui.button("Paste here").clicked() {
+            self.paste_layers(si);
+            ui.close();
+        }
         if ui.button(if locked { "Unlock" } else { "Lock" }).clicked() {
             self.project.scenes[si].layers[i].locked = !locked;
             self.changed();

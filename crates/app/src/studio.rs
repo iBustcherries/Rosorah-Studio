@@ -424,6 +424,10 @@ pub struct Studio {
     scene_dialog: Option<(Id, String, bool)>,
     /// The sound whose settings window is open.
     sound_settings: Option<Id>,
+    /// The layer whose menu was opened by right-clicking it on the canvas.
+    canvas_menu: Option<(Id, usize)>,
+    /// Layers copied for pasting into any scene.
+    layer_clipboard: Vec<CopiedLayer>,
     /// A sound strip being renamed, and the name typed so far.
     sound_rename: Option<(Id, String)>,
     web_docks: crate::browser_dock::Docks,
@@ -814,6 +818,8 @@ impl Studio {
             scene_dialog,
             sound_settings,
             sound_rename: None,
+            canvas_menu: None,
+            layer_clipboard: Vec::new(),
             web_docks: Default::default(),
             announcer: Default::default(),
             announce_picker: None,
@@ -2015,6 +2021,34 @@ impl Studio {
             self.save_stream_settings();
         }
     }
+    /// Moves a layer within its scene (front is last), keeping selections pointing at the same layers.
+    fn move_layer(&mut self, si: usize, from: usize, to: usize) {
+        let count = self.project.scenes[si].layers.len();
+        if from == to || from >= count || to >= count || self.project.scenes[si].layers[from].locked {
+            return;
+        }
+        let active = self.project.scenes[si].id;
+        let mut origins: Vec<_> = (0..count).collect();
+        let original = origins.remove(from);
+        origins.insert(to, original);
+        let moved = self.project.scenes[si].layers.remove(from);
+        self.project.scenes[si].layers.insert(to, moved);
+        let renumber = |index: usize| origins.iter().position(|old| *old == index);
+        if let Some(selected) = self.selections.get_mut(&active) {
+            *selected = selected.iter().filter_map(|i| renumber(*i)).collect();
+        }
+        if let Some((scene, index)) = self.crop_layer && scene == active {
+            self.crop_layer = renumber(index).map(|i| (scene, i));
+        }
+        if let Some((scene, index)) = self.layer_properties && scene == active {
+            self.layer_properties = renumber(index).map(|i| (scene, i));
+        }
+        if let Some((scene, index)) = self.canvas_menu && scene == active {
+            self.canvas_menu = renumber(index).map(|i| (scene, i));
+        }
+        self.layer = self.layer.and_then(renumber);
+        self.changed();
+    }
     fn panel_title(&self, panel: Panel) -> String {
         match panel {
             Panel::Web(id) => self.project.preferences.workspace.browser_docks.iter().find(|d| d.id == id).map_or_else(|| panel.title().into(), |d| d.name.clone()),
@@ -2223,24 +2257,8 @@ impl Studio {
         if let Some((from, to)) = moved {
             dropped = Some((count - 1 - from, count - 1 - to));
         }
-        if let Some((from, to)) = dropped.filter(|(from, to)| {
-            from != to
-                && *from < count
-                && *to < count
-                && !self.project.scenes[si].layers[*from].locked
-        }) {
-            let mut origins: Vec<_> = (0..count).collect();
-            let original = origins.remove(from);
-            origins.insert(to, original);
-            let moved = self.project.scenes[si].layers.remove(from);
-            self.project.scenes[si].layers.insert(to, moved);
-            if let Some(selected)=self.selections.get_mut(&active){*selected=selected.iter().filter_map(|i|origins.iter().position(|old|old==i)).collect();}
-            if let Some((scene,index))=self.crop_layer && scene==active {self.crop_layer=origins.iter().position(|old|*old==index).map(|i|(scene,i));}
-            if let Some((scene,index))=self.layer_properties && scene==active {self.layer_properties=origins.iter().position(|old|*old==index).map(|i|(scene,i));}
-            self.layer = self
-                .layer
-                .and_then(|selected| origins.iter().position(|old| *old == selected));
-            self.changed();
+        if let Some((from, to)) = dropped {
+            self.move_layer(si, from, to);
         }
         if count == 0 {
             card().show(ui, |ui| {
@@ -3588,9 +3606,28 @@ impl Studio {
         egui::CollapsingHeader::new("Camera settings").default_open(true).show(ui, |ui| {
             ui.label(self.captures.camera_status(id));
             ui.label("Live preview appears on the canvas. Camera audio is not added to the mix.");
+            // One list of cameras; DroidCam's own settings show only when DroidCam is the choice.
+            let device_name = self.camera_devices.iter().find(|d| d.path == draft.device).map(|d| d.name.clone());
+            let droidcam_device = device_name.as_deref().is_some_and(|n| n.to_lowercase().contains("droidcam"));
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut draft.network,false,"Webcam / USB");
-                ui.selectable_value(&mut draft.network,true,"DroidCam Wi-Fi");
+                ui.label("Camera");
+                egui::ComboBox::from_id_salt(("camera_device", id))
+                    .selected_text(if draft.network { "DroidCam over Wi-Fi".to_owned() } else { device_name.clone().unwrap_or_else(|| "Select camera".into()) })
+                    .show_ui(ui, |ui| {
+                        for device in &self.camera_devices {
+                            if ui.selectable_label(!draft.network && draft.device == device.path, format!("{} ({})", device.name, device.path)).clicked() {
+                                draft.network = false;
+                                draft.device = device.path.clone();
+                            }
+                        }
+                        ui.separator();
+                        if ui.selectable_label(draft.network, "DroidCam over Wi-Fi").on_hover_text("A phone running DroidCam on the same network").clicked() {
+                            draft.network = true;
+                        }
+                    });
+                if ui.small_button("⟳").on_hover_text("Look for cameras again").clicked() {
+                    self.camera_devices = crate::camera::devices();
+                }
             });
             if draft.network {
                 ui.label("Phone Wi-Fi IP / hostname"); ui.text_edit_singleline(&mut draft.host);
@@ -3598,14 +3635,12 @@ impl Studio {
                 ui.checkbox(&mut draft.legacy_url,"Use legacy DroidCam /video address");
                 ui.small("Open DroidCam on your phone and use the IP and port shown there. Keep both devices on the same network.");
             } else {
-                egui::ComboBox::from_id_salt(("camera_device",id)).selected_text(self.camera_devices.iter().find(|d|d.path==draft.device).map(|d|d.name.as_str()).unwrap_or("Select camera"))
-                    .show_ui(ui, |ui| { for device in &self.camera_devices { ui.selectable_value(&mut draft.device, device.path.clone(), format!("{} ({})",device.name,device.path)); } });
-                if ui.button("Refresh cameras").clicked() { self.camera_devices=crate::camera::devices(); }
                 ui.collapsing("Device path",|ui| {ui.text_edit_singleline(&mut draft.device);});
-                ui.small("DroidCam USB or desktop-client connections appear here as a webcam after connecting in the DroidCam Linux client.");
                 ui.checkbox(&mut draft.auto_mode,"Auto detect resolution and FPS");
-                if draft.auto_mode {
-                    ui.small("Uses the camera's available output. For DroidCam, change quality in its desktop client; Rosorah follows the published mode.");
+                if draft.auto_mode && droidcam_device {
+                    ui.small("For DroidCam, change quality in its desktop client; Rosorah follows the published mode.");
+                } else if draft.auto_mode {
+                    ui.small("Uses the camera's available output.");
                 }
             }
             if draft.network || !draft.auto_mode {
@@ -4236,12 +4271,8 @@ impl Studio {
                 muted(),
             );
         }
-        if let Some(si) = self
-            .project
-            .scenes
-            .iter()
-            .position(|s| s.id == canvas.scene)
-            && ui
+        if let Some(si) = self.project.scenes.iter().position(|s| s.id == canvas.scene) {
+            let (edited, response) = ui
                 .push_id(("preview_edit", canvas.id), |ui| {
                     crate::canvas_edit::edit_multi(
                         ui,
@@ -4256,9 +4287,40 @@ impl Studio {
                         self.project.preferences.locked_canvases.contains(&canvas.id),
                     )
                 })
-                .inner
-        {
-            self.changed();
+                .inner;
+            if edited {
+                self.changed();
+            }
+            // Right-clicking a layer on the canvas opens the same menu as in the Layers panel.
+            if response.secondary_clicked()
+                && let Some(point) = response.interact_pointer_pos()
+            {
+                self.canvas_menu = crate::canvas_edit::layer_at(target, &self.project.scenes[si], point).map(|i| (canvas.scene, i));
+                if let Some((scene, i)) = self.canvas_menu {
+                    self.select_layer(scene, i, false);
+                }
+            }
+            let mut dropped = None;
+            response.context_menu(|ui| match self.canvas_menu.filter(|(scene, i)| *scene == canvas.scene && *i < self.project.scenes[si].layers.len()) {
+                Some((_, i)) => {
+                    let source = self.project.scenes[si].layers[i].source;
+                    let name = self.project.source(source).map(|s| s.name.clone()).unwrap_or_default();
+                    ui.label(RichText::new(&name).small().strong());
+                    self.layer_menu(ui, si, i, &name, &mut dropped);
+                }
+                None => {
+                    if ui.add_enabled(!self.layer_clipboard.is_empty(), egui::Button::new("Paste")).clicked() {
+                        self.paste_layers(si);
+                        ui.close();
+                    }
+                    if self.layer_clipboard.is_empty() {
+                        note(ui, "Right-click a layer for its options, or copy one to paste here.");
+                    }
+                }
+            });
+            if let Some((from, to)) = dropped {
+                self.move_layer(si, from, to);
+            }
         }
         self.canvas_layout_tools(ui);
     }
@@ -4279,6 +4341,24 @@ impl Studio {
         }
         self.sound_rename_ui(ctx);
         self.update_window_ui(ctx);
+        // Ctrl+C / Ctrl+V copy and paste layers, unless a text box has the keyboard.
+        if ctx.memory(|m| m.focused().is_none()) && !egui::Popup::is_any_open(ctx) {
+            let (copy, paste) = ctx.input(|i| {
+                (
+                    i.events.iter().any(|e| matches!(e, egui::Event::Copy)) || (i.modifiers.command && i.key_pressed(egui::Key::C)),
+                    i.events.iter().any(|e| matches!(e, egui::Event::Paste(_))) || (i.modifiers.command && i.key_pressed(egui::Key::V)),
+                )
+            });
+            let scene = self.project.canvases.get(self.canvas).map(|c| c.scene);
+            if let Some(si) = scene.and_then(|scene| self.project.scenes.iter().position(|s| s.id == scene)) {
+                if copy && let Some(i) = self.layer.filter(|i| *i < self.project.scenes[si].layers.len()) {
+                    self.copy_layers(si, i);
+                }
+                if paste && !self.layer_clipboard.is_empty() {
+                    self.paste_layers(si);
+                }
+            }
+        }
         if !self.update_checked && self.screenshot.is_some() && self.update_window {
             self.update_checked = true;
             self.updates.check_as(ctx, "0.0.1");

@@ -77,3 +77,142 @@ cloned.insert(old,id);id};layer.source=id;}
   });if changed{auroracast_core::layout::set_crop(&mut self.project.scenes[si].layers[index],crop);self.changed();}if !open{self.crop_layer=None;}
  }
 }
+
+/// Layers copied with Copy, waiting to be pasted into any scene on any canvas.
+#[derive(Clone)]
+struct CopiedLayer {
+    layer: Layer,
+    source: Source,
+    browser: Option<auroracast_core::browser::Settings>,
+    chroma: Option<auroracast_core::browser::ChromaKey>,
+    /// The canvas size it was copied from, so it keeps its shape on a canvas of another shape.
+    canvas: [u32; 2],
+}
+/// Sources that cost real work to run (a capture, a camera, a page, a video). A pasted copy shows
+/// the same one rather than starting another; light sources get their own editable copy.
+fn shared_when_copied(kind: &SourceKind) -> bool {
+    matches!(
+        kind,
+        SourceKind::ScreenCapture | SourceKind::Game | SourceKind::Camera | SourceKind::VideoCamera(_) | SourceKind::Browser { .. } | SourceKind::VideoFile(_) | SourceKind::ChatOverlay
+    )
+}
+/// Where a layer goes on a canvas of another shape: same pixel proportions, same centre, scaled
+/// down only if it wouldn't fit.
+fn rect_on_canvas(rect: [f32; 4], from: [u32; 2], to: [u32; 2]) -> [f32; 4] {
+    if from == to || from[0] == 0 || from[1] == 0 || to[0] == 0 || to[1] == 0 {
+        return rect;
+    }
+    let [x, y, w, h] = rect;
+    let (fw, fh, tw, th) = (from[0] as f32, from[1] as f32, to[0] as f32, to[1] as f32);
+    let (mut pw, mut ph) = (w * fw, h * fh);
+    let fit = (tw / pw).min(th / ph).min(1.);
+    pw *= fit;
+    ph *= fit;
+    let (cx, cy) = (x + w / 2., y + h / 2.);
+    let (nw, nh) = (pw / tw, ph / th);
+    [(cx - nw / 2.).clamp(0., 1. - nw), (cy - nh / 2.).clamp(0., 1. - nh), nw, nh]
+}
+impl Studio {
+    /// Copies the selected layers (or `index` when nothing is selected) of scene `si`.
+    fn copy_layers(&mut self, si: usize, index: usize) {
+        let scene = &self.project.scenes[si];
+        let mut picked = self.selections.get(&scene.id).cloned().unwrap_or_default();
+        if !picked.contains(&index) {
+            picked = vec![index];
+        }
+        picked.sort();
+        let canvas = self
+            .project
+            .canvases
+            .iter()
+            .find(|c| c.scene == scene.id || self.project.canvas_scenes(c.id).contains(&scene.id))
+            .map_or([1920, 1080], |c| [c.width, c.height]);
+        let copied: Vec<CopiedLayer> = picked
+            .iter()
+            .filter_map(|&i| {
+                let layer = scene.layers.get(i)?.clone();
+                let source = self.project.source(layer.source)?.clone();
+                Some(CopiedLayer {
+                    browser: self.project.preferences.browser_sources.get(&source.id).cloned(),
+                    chroma: self.project.preferences.chroma_keys.get(&source.id).cloned(),
+                    layer,
+                    source,
+                    canvas,
+                })
+            })
+            .collect();
+        let n = copied.len();
+        self.layer_clipboard = copied;
+        self.tell(if n == 1 { "Copied. Right-click a scene's canvas or use Ctrl+V to paste it.".into() } else { format!("Copied {n} layers. Paste them into any scene with Ctrl+V.") });
+    }
+    /// Pastes the copied layers on top of scene `si`; they're independent of the originals.
+    fn paste_layers(&mut self, si: usize) {
+        if self.layer_clipboard.is_empty() {
+            return;
+        }
+        let scene_id = self.project.scenes[si].id;
+        let canvas = self
+            .project
+            .canvases
+            .iter()
+            .find(|c| c.scene == scene_id || self.project.canvas_scenes(c.id).contains(&scene_id))
+            .map_or([1920, 1080], |c| [c.width, c.height]);
+        let mut duplicated = std::collections::BTreeMap::new();
+        let mut groups = std::collections::BTreeMap::new();
+        let mut next_group = self.project.scenes[si].layers.iter().map(|l| l.group).max().unwrap_or(0) + 1;
+        let first = self.project.scenes[si].layers.len();
+        for copied in self.layer_clipboard.clone() {
+            let mut layer = copied.layer.clone();
+            let old = copied.source.id;
+            let reuse = shared_when_copied(&copied.source.kind) && self.project.source(old).is_some();
+            if !reuse {
+                // Its own source, so editing the copy's text or picture leaves the original alone.
+                layer.source = *duplicated.entry(old).or_insert_with(|| {
+                    let id = self.project.id();
+                    self.project.sources.push(Source { id, ..copied.source.clone() });
+                    if let Some(settings) = copied.browser.clone() {
+                        self.project.preferences.browser_sources.insert(id, settings);
+                    }
+                    if let Some(key) = copied.chroma.clone() {
+                        self.project.preferences.chroma_keys.insert(id, key);
+                    }
+                    id
+                });
+            }
+            if layer.group != 0 {
+                layer.group = *groups.entry(layer.group).or_insert_with(|| {
+                    let g = next_group;
+                    next_group += 1;
+                    g
+                });
+            }
+            layer.rect = rect_on_canvas(layer.rect, copied.canvas, canvas);
+            layer.locked = false;
+            self.project.scenes[si].layers.push(layer);
+        }
+        let pasted: Vec<usize> = (first..self.project.scenes[si].layers.len()).collect();
+        self.layer = pasted.last().copied();
+        self.selections.insert(scene_id, pasted);
+        self.changed();
+    }
+}
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+    #[test]
+    fn copies_keep_their_shape_on_a_canvas_of_another_shape() {
+        // A 16:9 camera box, half the width of a 1920×1080 canvas, pasted onto 1080×1920.
+        let r = rect_on_canvas([0.25, 0.25, 0.5, 0.5], [1920, 1080], [1080, 1920]);
+        let (w_px, h_px) = (r[2] * 1080., r[3] * 1920.);
+        assert!(((w_px / h_px) - 16. / 9.).abs() < 0.01, "{r:?}");
+        assert!(r[0] >= 0. && r[1] >= 0. && r[0] + r[2] <= 1.0001 && r[1] + r[3] <= 1.0001);
+        assert_eq!(rect_on_canvas([0.1, 0.2, 0.3, 0.4], [1920, 1080], [1920, 1080]), [0.1, 0.2, 0.3, 0.4]);
+    }
+    #[test]
+    fn heavy_sources_are_shared_and_light_ones_copied() {
+        assert!(shared_when_copied(&SourceKind::ScreenCapture));
+        assert!(shared_when_copied(&SourceKind::Browser { url: String::new() }));
+        assert!(!shared_when_copied(&SourceKind::Image { path: String::new() }));
+        assert!(!shared_when_copied(&SourceKind::Color([0; 4])));
+    }
+}
