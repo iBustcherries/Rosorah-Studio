@@ -142,6 +142,15 @@ fn solid_window(ctx: &egui::Context) -> egui::Frame {
     let [r, g, b, _] = panel().to_srgba_unmultiplied();
     egui::Frame::window(&ctx.style()).fill(Color32::from_rgb(r, g, b))
 }
+/// The cursor over something that can be dragged. Windows has no open-hand cursor (it would show
+/// the four-arrow "move" cross), so it gets the pointing hand there.
+pub(crate) fn grab_cursor() -> egui::CursorIcon {
+    if cfg!(windows) { egui::CursorIcon::PointingHand } else { egui::CursorIcon::Grab }
+}
+/// The cursor while dragging; the pointing hand on Windows for the same reason.
+pub(crate) fn grabbing_cursor() -> egui::CursorIcon {
+    if cfg!(windows) { egui::CursorIcon::PointingHand } else { grabbing_cursor() }
+}
 /// A list whose rows can be picked up and moved: the held row follows the pointer and the
 /// others slide out of its way. `row` draws one row (by position, top first) and returns the
 /// response that starts a drag. Returns `(from, to)` positions when a row is dropped somewhere new.
@@ -191,7 +200,7 @@ fn sortable_rows(
             next = Some((p, pointer.y - rect.top()));
         }
         if held.is_some_and(|h| h.0 == p) {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            ui.ctx().set_cursor_icon(grabbing_cursor());
         }
     }
     if held.is_some() && !ui.input(|i| i.pointer.any_down()) {
@@ -1115,52 +1124,51 @@ impl Studio {
                                 ui.close();
                             }
                         });
-                        if self.advanced() {
-                            ui.menu_button("Panels", |ui| {
-                                note(ui, "Drag to an edge to snap; center to group tabs");
-                                note(ui, "Double-click a tab to float or dock it");
-                                note(ui, "Drag a tab out of the window, or right-click it, to give it its own window");
-                                for panel in Panel::ALL {
+                        // Panels can be moved, hidden and brought back in both modes.
+                        ui.menu_button("Panels", |ui| {
+                            note(ui, "Drag to an edge to snap; center to group tabs");
+                            note(ui, "Double-click a tab to float or dock it");
+                            note(ui, "Drag a tab out of the window, or right-click it, to give it its own window");
+                            for panel in Panel::ALL {
+                                let mut visible = self.workspace.contains(panel);
+                                if ui
+                                    .add_enabled(panel != Panel::Preview, egui::Checkbox::new(&mut visible, panel.title()))
+                                    .changed()
+                                {
+                                    self.workspace.set_visible(panel, visible);
+                                }
+                            }
+                            ui.separator();
+                            ui.strong("Web pages");
+                            let mut remove = None;
+                            for dock in &self.project.preferences.workspace.browser_docks {
+                                ui.horizontal(|ui| {
+                                    let panel = Panel::Web(dock.id);
                                     let mut visible = self.workspace.contains(panel);
-                                    if ui
-                                        .add_enabled(panel != Panel::Preview, egui::Checkbox::new(&mut visible, panel.title()))
-                                        .changed()
-                                    {
+                                    if ui.checkbox(&mut visible, &dock.name).on_hover_text(&dock.url).changed() {
                                         self.workspace.set_visible(panel, visible);
                                     }
-                                }
-                                ui.separator();
-                                ui.strong("Web pages");
-                                let mut remove = None;
-                                for dock in &self.project.preferences.workspace.browser_docks {
-                                    ui.horizontal(|ui| {
-                                        let panel = Panel::Web(dock.id);
-                                        let mut visible = self.workspace.contains(panel);
-                                        if ui.checkbox(&mut visible, &dock.name).on_hover_text(&dock.url).changed() {
-                                            self.workspace.set_visible(panel, visible);
-                                        }
-                                        if ui.small_button("✕").on_hover_text("Remove this web page").clicked() {
-                                            remove = Some(dock.id);
-                                        }
-                                    });
-                                }
-                                if let Some(id) = remove {
-                                    self.project.preferences.workspace.browser_docks.retain(|d| d.id != id);
-                                    self.workspace.retain_web(&self.project.preferences.workspace.browser_docks.iter().map(|d| d.id).collect::<Vec<_>>());
-                                    self.web_docks.remove(id);
-                                    self.dirty = true;
-                                }
-                                if ui.button("+ Add a web page…").clicked() {
-                                    self.web_dock_dialog = Some((String::new(), "https://".into()));
-                                    ui.close();
-                                }
-                                ui.separator();
-                                if ui.button("Reset layout").clicked() {
-                                    self.reset_layout();
-                                    ui.close();
-                                }
-                            });
-                        }
+                                    if ui.small_button("✕").on_hover_text("Remove this web page").clicked() {
+                                        remove = Some(dock.id);
+                                    }
+                                });
+                            }
+                            if let Some(id) = remove {
+                                self.project.preferences.workspace.browser_docks.retain(|d| d.id != id);
+                                self.workspace.retain_web(&self.project.preferences.workspace.browser_docks.iter().map(|d| d.id).collect::<Vec<_>>());
+                                self.web_docks.remove(id);
+                                self.dirty = true;
+                            }
+                            if ui.button("+ Add a web page…").clicked() {
+                                self.web_dock_dialog = Some((String::new(), "https://".into()));
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button("Reset layout").clicked() {
+                                self.reset_layout();
+                                ui.close();
+                            }
+                        });
                     }
                     ui.menu_button("Help", |ui| self.help_menu(ui));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.live_controls(ui));
@@ -1536,7 +1544,8 @@ impl Studio {
                 };
                 let response = ui
                     .add_sized([(ui.available_width() - 34.).max(30.), 30.], egui::Button::new(text).selected(active == id).truncate().sense(egui::Sense::click_and_drag()))
-                    .on_hover_text("Click to switch · drag to reorder · right-click for more");
+                    .on_hover_text("Click to switch · drag to reorder · right-click for more")
+                    .on_hover_cursor(grab_cursor());
                 if response.clicked() {
                     self.request_scene(canvas, id);
                 }
@@ -1936,7 +1945,7 @@ impl Studio {
                     )
                     .on_hover_text(if locked { "Locked · right-click to unlock" } else { "Drag to reorder (top appears in front) · double-click to change" });
                 if !locked {
-                    response.clone().on_hover_cursor(egui::CursorIcon::Grab);
+                    response.clone().on_hover_cursor(grab_cursor());
                 }
                 if response.clicked() {self.select_layer(active,i,ui.input(|i|i.modifiers.shift));}
                 if response.double_clicked() {
@@ -4089,13 +4098,12 @@ impl Studio {
             style.overlay.selection_stroke_width = 2.;
             style.overlay.surface_fade_opacity = 0.85;
             dock.translations.tab_context_menu.eject_button = "Float panel".into();
-            // Simple mode keeps panels where they are; Advanced lets them be dragged, closed and floated.
-            let advanced = self.advanced();
+            // Panels can be dragged, closed and floated in both Simple and Advanced mode.
             egui_dock::DockArea::new(&mut dock)
                 .style(style)
-                .draggable_tabs(advanced)
-                .show_close_buttons(advanced)
-                .tab_context_menus(advanced)
+                .draggable_tabs(true)
+                .show_close_buttons(true)
+                .tab_context_menus(true)
                 .window_bounds(ui.max_rect())
                 .show_leaf_close_all_buttons(false)
                 .show_leaf_collapse_buttons(false)
@@ -4137,10 +4145,10 @@ impl Studio {
                         ui.horizontal(|ui| {
                             // Dragging this handle out of the window and letting go docks the panel again.
                             let handle = ui.add(egui::Label::new(RichText::new(format!("⠿ {}", self.panel_title(tab))).strong()).sense(egui::Sense::drag()))
-                                .on_hover_cursor(egui::CursorIcon::Grab)
+                                .on_hover_cursor(grab_cursor())
                                 .on_hover_text("Drag out of this window and let go to dock it back where it was");
                             if handle.dragged() {
-                                ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                                ctx.set_cursor_icon(grabbing_cursor());
                             }
                             if handle.drag_stopped()
                                 && ctx.input(|i| i.pointer.latest_pos().is_none_or(|p| !i.content_rect().contains(p)))
@@ -4298,9 +4306,9 @@ impl Studio {
                         for response in [handle, name] {
                             response.dnd_set_drag_payload(MixerDrag(channel.id));
                             if response.dragged() {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                                ui.ctx().set_cursor_icon(grabbing_cursor());
                             } else if response.hovered() {
-                                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+                                ui.ctx().set_cursor_icon(grab_cursor());
                             }
                             response.on_hover_text("Drag to reorder");
                         }
@@ -5741,16 +5749,13 @@ impl egui_dock::TabViewer for StudioTabs<'_> {
         [false, false]
     }
     fn on_tab_button(&mut self, tab: &mut Panel, response: &egui::Response) {
-        if !self.0.advanced() {
-            return;
-        }
         if response.dragged() && *tab != Panel::Preview {
             self.0.dragging_panel = Some(*tab);
         }
         if response.double_clicked() {
             self.0.toggle_panel = Some(*tab);
         }
-        response.clone().on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(
+        response.clone().on_hover_cursor(grab_cursor()).on_hover_text(
             "Drag toward an edge to snap. Drop in the center to group tabs. Drag past the window edge for its own window. Double-click to float or dock.",
         );
     }

@@ -1050,7 +1050,7 @@ impl Editor {
                             let handle = ui
                                 .add(egui::Label::new(RichText::new(format!("↕  {} · {}", i + 1, action_label(a))).strong()).sense(egui::Sense::click_and_drag()))
                                 .on_hover_text("Drag onto another step to reorder")
-                                .on_hover_cursor(egui::CursorIcon::Grab);
+                                .on_hover_cursor(crate::studio::grab_cursor());
                             if handle.drag_started() {
                                 handle.dnd_set_drag_payload(i);
                             }
