@@ -435,6 +435,8 @@ pub struct Studio {
     sound_settings: Option<Id>,
     /// The layer whose menu was opened by right-clicking it on the canvas.
     canvas_menu: Option<(Id, usize)>,
+    /// Open projector windows.
+    projectors: Vec<Projector>,
     /// Studio Mode: the scene being prepared, and the Program view's picture.
     studio_preview: Option<Id>,
     studio_taking: bool,
@@ -838,6 +840,7 @@ impl Studio {
             sound_settings,
             sound_rename: None,
             canvas_menu: None,
+            projectors: Vec::new(),
             studio_preview: None,
             studio_taking: false,
             program_texture: None,
@@ -1324,6 +1327,7 @@ impl Studio {
                                 ui.close();
                             }
                             ui.separator();
+                            ui.menu_button("Open a projector", |ui| self.projector_menu(ui));
                             if ui.button("Reset layout").clicked() {
                                 self.reset_layout();
                                 ui.close();
@@ -6340,6 +6344,7 @@ impl eframe::App for Studio {
             Page::Alerts => self.alerts(ctx),
         }
         self.panel_windows(ctx);
+        self.projector_windows(ctx);
         self.loading_screen(ctx);
         if self.automation_editor.preview_open {
             let mut open = true;
@@ -6654,6 +6659,7 @@ mod migration_tests {
 include!("widget_editor.rs");
 
 include!("layer_tools.rs");
+include!("projectors.rs");
 
 include!("layer_properties.rs");
 
