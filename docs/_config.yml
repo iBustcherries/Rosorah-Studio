@@ -1,0 +1,6 @@
+title: Rosorah Studio
+description: Free, open-source streaming and recording software.
+theme: jekyll-theme-cayman
+show_downloads: false
+exclude:
+  - privacy-policy-draft.md
