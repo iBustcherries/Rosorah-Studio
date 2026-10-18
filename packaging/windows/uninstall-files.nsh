@@ -1,3 +1,4 @@
+Delete "$INSTDIR\accounts-defaults.json"
 Delete "$INSTDIR\browser\chat_browser.py"
 Delete "$INSTDIR\browser\collector.js"
 Delete "$INSTDIR\browser\dock_browser.py"
