@@ -23,7 +23,7 @@ You must meet the eligibility requirements of each connected service and be lega
 
 These terms do not replace any license accompanying Rosorah Studio, its dependencies, fonts, media, or other components. Rights granted under an applicable open-source license remain governed by that license and are not restricted by these terms. In a conflict concerning those licensed rights, the applicable software license controls.
 
-Publication of source code or these terms does not itself select a software license. Consult the license notices for the particular release or component, or contact the maintainer if a notice is missing or unclear.
+Rosorah Studio's original project code is licensed under the [GNU General Public License, version 3 only (GPL-3.0-only)](https://github.com/iBustcherries/Rosorah-Studio/blob/master/LICENSE), except where a file or component carries a different license notice. Third-party dependencies, vendored code, fonts, and media retain their respective licenses. Consult the license notices for the particular release or component. These website terms do not change the licensing of earlier releases.
 
 Third-party names and logos belong to their respective owners. These terms do not grant permission to imply endorsement by Rosorah Studio or another service.
 
