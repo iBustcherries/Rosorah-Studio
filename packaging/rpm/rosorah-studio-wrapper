@@ -1,0 +1,7 @@
+#!/bin/sh
+# Starts the installed Rosorah Studio. Game-capture hooks are installed per user, only if they were built.
+cd /opt/rosorah-studio || exit 1
+if [ -d hooks ]; then
+    python3 ./install-renderer.py --quiet || echo 'Game-capture hooks could not be installed for this user; continuing without them.' >&2
+fi
+exec ./rosorah-studio "$@"

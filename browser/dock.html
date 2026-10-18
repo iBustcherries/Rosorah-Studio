@@ -1,0 +1,47 @@
+<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https://www.youtube.com/s/gaming/emoji/ https://static-cdn.jtvnw.net https://yt3.ggpht.com https://yt3.googleusercontent.com https://www.gstatic.com https://fonts.gstatic.com https://i.ytimg.com https://files.kick.com; script-src 'unsafe-inline'; style-src 'unsafe-inline'"><meta name="viewport" content="width=device-width, initial-scale=1"><style>
+.emote{height:1.9em;max-width:5em;vertical-align:middle;object-fit:contain}#compose{position:sticky;bottom:0;background:#182133;padding:12px;border-top:1px solid #34415b}#draft{box-sizing:border-box;width:100%;margin:8px 0;padding:9px;background:#101522;color:white;border:1px solid #52617d;border-radius:5px}button{padding:7px 10px;background:#6550c7;color:white;border:0;border-radius:5px;cursor:pointer}button:disabled{opacity:.5}#recent button{margin:3px}#post-status{display:block;margin-top:6px}
+
+body{margin:0;background:#101522;color:#e6eaf5;font:14px system-ui}header{position:sticky;top:0;background:#182133;padding:14px;border-bottom:1px solid #34415b}h2{margin:0 0 8px;font-size:18px}select{background:#253149;color:white;border:1px solid #52617d;border-radius:5px;padding:6px}#feed{padding:12px}.message{background:#1c2232;padding:10px;margin-bottom:6px;border-radius:8px;overflow-wrap:anywhere}.activity{border-left:3px solid #e8ba6f}.platform{font-size:11px;margin-right:8px}.Twitch{color:#b99aff}.YouTube{color:#ff8787}.Kick{color:#66de68}.body{white-space:pre-wrap;margin-top:5px}.time{color:#a3adc4;font-size:11px;margin-left:8px}small{color:#aab6ce}</style></head><body><header><h2>Chat & activity</h2><select id="platform"><option>All platforms</option><option>Twitch</option><option>YouTube</option><option>Kick</option></select> <select id="kind"><option>Chat & events</option><option>Chat only</option><option>Events only</option></select><p><small>Chat arrives as soon as the platform page receives it. Send below; your connected Rosorah account sends the message. No YouTube chat API polling.</small></p></header><main id="feed"></main><form id="compose"><select id="target"><option>Twitch</option><option>YouTube</option></select> <button type="button" id="signin">Accounts</button><input id="draft" autocomplete="off" placeholder="Type a message…"><button id="send" disabled>Send</button> <button type="button" id="emoji">😀</button><details><summary>Recent emotes</summary><div id="recent"></div></details><small id="post-status"></small></form><script>
+const feed=document.querySelector('#feed'); const rows=new Map();
+function filter(){for(const e of rows.values())e.hidden=(platform.value!=='All platforms'&&e.dataset.platform!==platform.value)||(kind.value==='Chat only'&&e.dataset.kind==='activity')||(kind.value==='Events only'&&e.dataset.kind!=='activity');}
+const platform=document.querySelector('#platform'),kind=document.querySelector('#kind');platform.onchange=kind.onchange=filter;
+window.ingest=(m)=>{
+ const key=m.platform+':'+m.id;
+ if(m.type==='delete'){rows.get(key)?.remove();rows.delete(key);return;}
+ const previous=rows.get(key);
+ if(previous && previous.dataset.payload===JSON.stringify(m))return;
+ const stick=window.scrollY+innerHeight>=document.documentElement.scrollHeight-90;
+ const row=document.createElement('div');row.className='message '+(m.kind==='activity'?'activity':'');row.dataset.platform=m.platform;row.dataset.kind=m.kind;
+ const p=document.createElement('span');p.className='platform '+m.platform;p.textContent=m.platform;
+ const a=document.createElement('strong');a.textContent=m.author;
+ const t=document.createElement('span');t.className='time';t.textContent=new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+ const b=document.createElement('div');b.className='body';
+ if(Array.isArray(m.parts) && m.parts.length){
+   for(const part of m.parts.slice(0,128)){
+     if(safeImage(part.src)){
+       const img=document.createElement('img');img.className='emote';img.src=part.src;img.alt=part.text;img.title=part.text;img.referrerPolicy='no-referrer';img.onerror=()=>img.replaceWith(document.createTextNode(part.text||''));b.append(img);
+       if(part.text){emotes.set(m.platform+':'+part.text,{platform:m.platform,...part});while(emotes.size>200)emotes.delete(emotes.keys().next().value);}
+     }else b.append(document.createTextNode(part.text||''));
+   }
+ }else b.textContent=m.text;
+ row.dataset.payload=JSON.stringify(m);
+ row.append(p,a,t,b);if(previous)previous.replaceWith(row);else feed.append(row);rows.set(key,row);while(rows.size>500){const k=rows.keys().next().value;rows.get(k).remove();rows.delete(k);}filter();if(stick)scrollTo(0,document.documentElement.scrollHeight);
+};
+
+const safeImage=src=>{try{const u=new URL(src);return u.protocol==='https:'&&!u.username&&!u.password&&(!u.port||u.port==='443')&&(['static-cdn.jtvnw.net','yt3.ggpht.com','yt3.googleusercontent.com','www.gstatic.com','fonts.gstatic.com','i.ytimg.com','files.kick.com'].includes(u.hostname)||(u.hostname==='www.youtube.com'&&u.pathname.startsWith('/s/gaming/emoji/')));}catch{return false;}};
+const emotes=new Map(),draft=document.querySelector('#draft'),target=document.querySelector('#target'),send=document.querySelector('#send'),status=document.querySelector('#post-status');
+let composer=null,pending=null,sequence=0;
+window.setAccounts=names=>{const old=target.value;target.replaceChildren(...names.map(name=>new Option(name,name)));if(names.includes(old))target.value=old;target.hidden=names.length<2;send.disabled=!composer||!!pending||!names.length;};
+window.connectComposer=c=>{composer=c;send.disabled=!target.options.length;};
+function recent(){const box=document.querySelector('#recent');box.replaceChildren();for(const e of [...emotes.values()].filter(e=>e.platform===target.value).slice(-40)){const button=document.createElement('button');button.type='button';const img=document.createElement('img');img.src=e.src;img.alt=e.text;img.className='emote';button.append(img);button.title=e.text;button.onclick=()=>{draft.value+=' '+e.text+' ';draft.focus();};box.append(button);}}
+document.querySelector('details').ontoggle=recent;target.onchange=recent;
+document.querySelector('#signin').onclick=()=>composer?.open(target.value);
+document.querySelector('#emoji').onclick=()=>{draft.value+='😀';draft.focus();};
+document.querySelector('#compose').onsubmit=e=>{
+ e.preventDefault();if(!composer||pending||!target.value||!draft.value.trim())return;
+ if([...draft.value].length>(target.value==='YouTube'?200:500)){status.textContent='Message is too long for this platform.';return;}
+ const request='dock-'+(++sequence);pending={request,text:draft.value};send.disabled=true;status.textContent='Submitting…';composer.send(target.value,draft.value,request);
+ setTimeout(()=>{if(pending?.request===request){pending=null;send.disabled=!target.options.length;status.textContent='No response. Check the platform chat before resending; your draft was kept.';}},30000);
+};
+window.postResult=m=>{if(pending?.request!==m.request)return;if(m.ok&&draft.value===pending.text)draft.value='';pending=null;send.disabled=!target.options.length;status.textContent=m.text;};
+</script></body></html>

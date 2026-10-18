@@ -1,0 +1,11 @@
+{$RELAY_DOMAIN} {
+    request_body {
+        max_size 64KB
+    }
+    header {
+        Cache-Control "no-store"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+    }
+    reverse_proxy receiver:8080
+}

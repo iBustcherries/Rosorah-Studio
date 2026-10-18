@@ -1,0 +1,32 @@
+services:
+  receiver:
+    build: .
+    environment:
+      PUBLIC_URL: https://${RELAY_DOMAIN:?Set RELAY_DOMAIN}
+      DATABASE: /data/relay.sqlite3
+    volumes:
+      - relay_data:/data
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 1
+    pids_limit: 100
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+  https:
+    image: caddy:2
+    environment:
+      RELAY_DOMAIN: ${RELAY_DOMAIN:?Set RELAY_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+volumes:
+  relay_data:
+  caddy_data:
+  caddy_config:

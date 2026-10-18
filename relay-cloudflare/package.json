@@ -1,0 +1,1 @@
+{"name":"rosorah-kofi-cloudflare","version":"0.24.0-preview.1","private":true,"type":"module","scripts":{"test":"node --test test.mjs","deploy":"wrangler deploy","login":"wrangler login"},"devDependencies":{"miniflare":"^4.0.0","wrangler":"^4.0.0"}}

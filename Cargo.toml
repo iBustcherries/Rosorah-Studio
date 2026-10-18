@@ -1,0 +1,26 @@
+[workspace]
+members = ["crates/core", "crates/gpu", "crates/app", "crates/capture", "crates/windows"]
+resolver = "2"
+
+[workspace.package]
+version = "0.32.0-preview.7"
+edition = "2024"
+rust-version = "1.90"
+
+[workspace.dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+wgpu = { version = "27.0.1", default-features = false, features = ["std", "vulkan", "wgsl", "parking_lot"] }
+pollster = "0.4"
+bytemuck = { version = "1.24", features = ["derive"] }
+eframe = { version = "0.33.2", default-features = false, features = ["default_fonts", "wgpu", "wayland", "x11"] }
+
+[profile.release]
+lto = false
+codegen-units = 1
+strip = true
+
+
+[patch.crates-io]
+egui_dock = { path = "vendor/egui_dock" }

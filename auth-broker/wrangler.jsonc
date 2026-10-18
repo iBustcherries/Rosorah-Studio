@@ -1,0 +1,10 @@
+{
+  "name": "rosorah-kick-auth",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-10-14",
+  "observability": { "enabled": true },
+  "preview_urls": false,
+  "ratelimits": [{"name":"RATE_LIMIT","namespace_id":"17653","simple":{"limit":30,"period":60}}],
+  "durable_objects": { "bindings": [{ "name": "KICK_EVENTS", "class_name": "KickEvents" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["KickEvents"] }]
+}

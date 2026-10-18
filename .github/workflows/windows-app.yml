@@ -1,0 +1,23 @@
+name: Windows full application development build
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  windows-app:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Install verified media SDK
+        shell: pwsh
+        run: ./packaging/windows/install-gstreamer.ps1
+      - name: Check, test, and link Studio
+        shell: pwsh
+        run: |
+          $env:GSTREAMER_1_0_ROOT_MSVC_X86_64 = 'C:\gstreamer\1.0\msvc_x86_64'
+          ./packaging/windows/build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rosorah-windows-development-requires-gstreamer
+          path: dist/windows-development
+          if-no-files-found: error
+# This workflow is a build gate, not proof of live capture/audio compatibility.

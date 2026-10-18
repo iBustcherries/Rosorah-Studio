@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Rosorah Studio
+Comment=Independent streaming studio — development build
+Exec=rosorah-studio
+Icon=io.rosorah.Studio
+Terminal=false
+Categories=AudioVideo;Video;
+StartupWMClass=io.rosorah.Studio
+

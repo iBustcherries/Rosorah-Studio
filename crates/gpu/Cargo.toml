@@ -1,0 +1,16 @@
+[package]
+name = "auroracast-gpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+auroracast-core = { path = "../core" }
+anyhow.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+bytemuck.workspace = true
+
+
+[target.'cfg(target_os = "windows")'.dependencies]
+wgpu = { workspace = true, features = ["dx12"] }

@@ -1,0 +1,50 @@
+[package]
+name = "rosorah-studio"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+auroracast-core = { path = "../core" }
+auroracast-gpu = { path = "../gpu" }
+anyhow.workspace = true
+serde_json.workspace = true
+eframe.workspace = true
+pollster.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+
+serde.workspace = true
+egui_dock = { version = "0.18.0", features = ["serde"] }
+
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"] }
+futures-util = "0.3"
+gst = { package = "gstreamer", version = "0.24" }
+gst-app = { package = "gstreamer-app", version = "0.24" }
+gst-video = { package = "gstreamer-video", version = "0.24" }
+
+rosorah-capture = { path = "../capture" }
+
+
+libc = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+tungstenite = { version = "0.28", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+sha2 = "0.10"
+base64 = "0.22"
+getrandom = "0.3"
+
+libloading = "0.8.9"
+
+ab_glyph = "0.2"
+
+qrcode = { version = "0.14.1", default-features = false }
+
+
+[target.'cfg(windows)'.dependencies]
+rosorah-windows = { path = "../windows" }
+windows = { version = "0.58", features = ["Foundation", "Foundation_Collections", "Media_Control", "Storage_Streams", "Win32_System_WinRT"] }
+rfd = { version = "0.15", default-features = false }
+
+[target.'cfg(not(windows))'.dependencies]
+ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "screencast", "file_chooser"] }
+zbus = { version = "5.19", default-features = false, features = ["blocking-api", "tokio"] }

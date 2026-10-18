@@ -1,0 +1,4 @@
+{
+  "twitch": {"id": "PUBLIC_TWITCH_DEVICE_FLOW_CLIENT_ID", "secret": ""},
+  "youtube": {"id": "GOOGLE_DESKTOP_CLIENT_ID", "secret": "GOOGLE_DESKTOP_CLIENT_SECRET"}
+}

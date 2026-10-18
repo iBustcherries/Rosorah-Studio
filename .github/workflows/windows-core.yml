@@ -1,0 +1,16 @@
+name: Windows engine and native backends
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  native-backend:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked -p auroracast-core -p rosorah-capture -p rosorah-windows
+      - run: cargo check --locked -p auroracast-gpu
+      - run: cargo build --locked --release -p rosorah-windows --bin rosorah-windows-probe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rosorah-windows-backend-diagnostic
+          path: target/release/rosorah-windows-probe.exe
+# A backend diagnostic, not the Studio app. Hardware tests require an interactive Windows desktop.

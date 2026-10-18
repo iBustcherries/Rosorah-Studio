@@ -1,0 +1,5 @@
+{
+  "twitch": { "id": "KEEP_EXISTING_TWITCH_CLIENT_ID" },
+  "youtube": { "id": "KEEP_EXISTING_GOOGLE_DESKTOP_CLIENT_ID", "secret": "KEEP_EXISTING_GOOGLE_DESKTOP_CLIENT_VALUE" },
+  "kick": { "id": "REGISTERED_KICK_CLIENT_ID", "broker_url": "https://YOUR-DEPLOYED-WORKER.workers.dev" }
+}
