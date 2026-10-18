@@ -1,4 +1,5 @@
 [package]
+license.workspace = true
 name = "auroracast-core"
 version.workspace = true
 edition.workspace = true
