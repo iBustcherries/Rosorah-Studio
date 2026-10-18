@@ -1,8 +1,8 @@
-// Settings > Connections: one card per platform with its account sign-in and live destinations.
+// Settings > Accounts: one card per platform with its account sign-in and live destinations.
 impl Studio {
     fn connections_settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Connections");
-        note(ui, "Sign in once for chat, stream details and automatic stream keys. Switch on the destinations to include when you go live.");
+        ui.heading("Streaming platforms");
+        note(ui, "Sign in once for chat, alerts and automatic stream keys. Then tick where to go live.");
         ui.add_space(12.);
         let live = self.live_stream.is_some();
         let mut save = false;
@@ -59,12 +59,12 @@ impl Studio {
             .collect();
         card().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.strong("Other destinations");
+            ui.strong("Other platforms");
             ui.add_enabled_ui(!live, |ui| {
                 for slot in others {
                     save |= self.destination_row(ui, slot, false);
                 }
-                if ui.button("+ Add destination").on_hover_text("Any RTMP server").clicked() {
+                if ui.button("+ Add another platform").on_hover_text("Any service that gives you a server address and stream key").clicked() {
                     self.broadcast_window = 3;
                 }
             });
@@ -72,17 +72,18 @@ impl Studio {
         ui.add_space(10.);
         card().show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.strong("Output");
             ui.add_enabled_ui(!live, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Video bitrate");
-                    save |= ui
-                        .add(egui::DragValue::new(&mut self.stream_config.bitrate).range(1000..=20_000).speed(100).suffix(" kbps"))
-                        .lost_focus();
-                });
-                save |= ui.checkbox(&mut self.stream_config.record, "Record while streaming (same encoder)").changed();
+                save |= ui.checkbox(&mut self.stream_config.record, "Also save a recording while streaming").changed();
+                if self.advanced() {
+                    ui.horizontal(|ui| {
+                        ui.label("Video bitrate");
+                        save |= ui
+                            .add(egui::DragValue::new(&mut self.stream_config.bitrate).range(1000..=20_000).speed(100).suffix(" kbps"))
+                            .lost_focus();
+                    });
+                    note(ui, "Destinations on one canvas share an encoder unless a connection sets its own bitrate. Twitch accepts up to 6,000 kbps. Recordings finish when streaming stops.");
+                }
             });
-            note(ui, "Destinations on one canvas share an encoder unless a connection sets its own bitrate. Twitch accepts up to 6,000 kbps. Recordings finish when streaming stops.");
         });
         if live {
             note(ui, "Stop streaming to change destinations.");
@@ -92,10 +93,12 @@ impl Studio {
             self.save_stream_settings();
         }
         if !self.stream_error.is_empty() {
-            ui.colored_label(Color32::LIGHT_RED, &self.stream_error);
+            self.error_line(ui, self.stream_error.clone());
         }
         ui.add_space(10.);
-        ui.collapsing("Chat troubleshooting", |ui| {
+        let status = self.browser_chat.status.to_lowercase();
+        let chat_trouble = ["attention", "fail", "cannot", "can't", "retrying"].iter().any(|w| status.contains(w));
+        if self.advanced() || chat_trouble { ui.collapsing("Chat troubleshooting", |ui| {
             ui.small(&self.browser_chat.status);
             if ui.button("Open browser chat window").clicked() && let Err(e) = self.browser_chat.start() {
                 self.browser_chat.status = e.to_string();
@@ -110,7 +113,7 @@ impl Studio {
                 self.accounts[0].send(crate::accounts::Command::Reconnect);
             }
             ui.small("Chat is read from the platform websites. Sending a YouTube message uses 20 units of API quota.");
-        });
+        }); }
     }
     /// TikTok has no sign-in API for chat: Rosorah reads the user's LIVE page in the chat browser.
     fn tiktok_card(&mut self, ui: &mut egui::Ui, live: bool) -> bool {
@@ -164,16 +167,6 @@ impl Studio {
                 save = true;
             }
         });
-        if !name.is_empty() && ui.small_button("Copy TikTok page structure for support").on_hover_text("Copies tags and hook names only, no messages or names. Paste it to whoever is helping if TikTok chat stops appearing.").clicked() {
-            self.browser_chat.diagnostic = None;
-            self.browser_chat.send(serde_json::json!({"type":"diagnose","platform":"TikTok"}));
-            self.tiktok_diagnostic_wanted = true;
-        }
-        if self.tiktok_diagnostic_wanted && let Some(report) = self.browser_chat.diagnostic.take() {
-            ui.ctx().copy_text(report);
-            self.tiktok_diagnostic_wanted = false;
-            self.message = "TikTok page structure copied".into();
-        }
         save
     }
     /// Platform name, sign-in state and Connect / Sign out for one account.
@@ -231,6 +224,8 @@ impl Studio {
     fn destination_row(&mut self, ui: &mut egui::Ui, slot: usize, vertical: bool) -> bool {
         let name = self.stream_config.connection_name(slot);
         let canvases = self.project.canvases.clone();
+        let advanced = self.advanced();
+        let several_videos = canvases.len() > 1 && (advanced || self.project.preferences.workspace.vertical_video);
         let Some(dest) = self.stream_config.destination_mut(slot) else { return false };
         let mut changed = false;
         ui.horizontal_wrapped(|ui| {
@@ -247,15 +242,16 @@ impl Studio {
                 .map(|c| c.name.clone())
                 .unwrap_or_default();
             let key = if dest.managed_by_account {
-                "key from account"
+                "set up by signing in ✓"
             } else if dest.key.is_empty() {
-                "no stream key yet"
+                "sign in above, or connect manually"
             } else {
-                "manual key"
+                "stream key added ✓"
             };
-            ui.small(format!("{canvas} · {key}"));
+            ui.small(if several_videos { format!("{canvas} · {key}") } else { key.to_owned() });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("Stream key & server…").clicked() {
+                let label = if dest.managed_by_account { "Stream key & server…" } else { "Or connect manually…" };
+                if (advanced || !dest.managed_by_account) && ui.small_button(label).clicked() {
                     self.broadcast_window = 100 + slot as u8;
                 }
             });

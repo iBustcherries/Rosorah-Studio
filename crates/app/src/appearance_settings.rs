@@ -1,4 +1,4 @@
-// Settings > Appearance & chat: theme, background and panel style.
+// Settings > Look & feel: theme, background and panel style.
 impl Studio {
     fn look_settings(&mut self, ui: &mut egui::Ui) -> bool {
         use auroracast_core::workspace::{Backdrop, BackdropFit, PanelStyle, ThemeMode};

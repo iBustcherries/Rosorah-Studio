@@ -9,6 +9,36 @@ struct WidgetEditor {
     copied: Option<widgets::Style>,
     last: Option<Instant>,
 }
+/// A new widget's starting look for its kind.
+fn widget_settings(kind: widgets::Kind) -> widgets::Settings {
+    let mut settings = widgets::Settings {
+        kind,
+        label: kind.label().into(),
+        ..Default::default()
+    };
+    settings.apply_theme(widgets::Theme::Material);
+    if kind == widgets::Kind::AlertBox {
+        settings.background = [0, 0, 0, 0];
+        settings.platforms.push(Platform::Donations);
+    }
+    if kind == widgets::Kind::Chat {
+        settings.apply_theme(widgets::Theme::Unified);
+        settings.font_size = 28;
+        settings.label.clear();
+    }
+    if kind == widgets::Kind::Text {
+        settings.background = [0, 0, 0, 0];
+        settings.foreground = [255, 255, 255, 255];
+        settings.font_size = 0;
+        settings.outline_width = 3;
+        settings.content = "Your text here".into();
+    }
+    if kind == widgets::Kind::NowPlaying {
+        settings.font_size = 42;
+        settings.background = [18, 22, 30, 238];
+    }
+    settings
+}
 impl Studio {
     fn restore_layer_proportions(&mut self, scene: usize, layer: usize) {
         let id = self.project.scenes[scene].layers[layer].source;
@@ -57,32 +87,7 @@ impl Studio {
             }
         }
         let id = self.project.id();
-        let mut settings = widgets::Settings {
-            kind,
-            label: kind.label().into(),
-            ..Default::default()
-        };
-        settings.apply_theme(widgets::Theme::Material);
-        if kind == widgets::Kind::AlertBox {
-            settings.background = [0, 0, 0, 0];
-            settings.platforms.push(Platform::Donations);
-        }
-        if kind == widgets::Kind::Chat {
-            settings.apply_theme(widgets::Theme::Unified);
-            settings.font_size = 28;
-            settings.label.clear();
-        }
-        if kind == widgets::Kind::Text {
-            settings.background = [0, 0, 0, 0];
-            settings.foreground = [255, 255, 255, 255];
-            settings.font_size = 0;
-            settings.outline_width = 3;
-            settings.content = "Your text here".into();
-        }
-        if kind == widgets::Kind::NowPlaying {
-            settings.font_size = 42;
-            settings.background = [18, 22, 30, 238];
-        }
+        let settings = widget_settings(kind);
         let canvas = &self.project.canvases[self.canvas];
         let ratio=if kind==widgets::Kind::Sports{if settings.sports.layout==widgets::ScoreLayout::Ticker{8.}else{5.}}else{2.4};
         let height = (0.8 * canvas.width as f32 / canvas.height as f32 / ratio).min(0.8);
@@ -107,43 +112,6 @@ impl Studio {
         self.widget_editor.sample = true;
         self.widget_editor.key = 0;
         self.changed();
-    }
-    fn widgets_menu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button("Widgets", |ui| {
-            ui.strong("Add to this canvas");
-            egui::ScrollArea::vertical()
-                .max_height(430.)
-                .show(ui, |ui| {
-                    for kind in widgets::Kind::ALL {
-                        if ui.button(kind.label()).clicked() {
-                            self.add_widget(kind);
-                            ui.close();
-                        }
-                    }
-                });
-            let sources: Vec<_> = self
-                .project
-                .sources
-                .iter()
-                .filter(|s| matches!(s.kind, SourceKind::Widget(_)))
-                .map(|s| (s.id, s.name.clone()))
-                .collect();
-            if !sources.is_empty() {
-                ui.separator();
-                ui.menu_button("Edit existing widget", |ui| {
-                    for (id, name) in sources {
-                        let response=ui.button(name);
-                        response.context_menu(|ui|{let scene=self.project.canvases[self.canvas].scene;let layer=self.project.scene(scene).and_then(|s|s.layers.iter().position(|l|l.source==id&&!l.locked));if ui.add_enabled(layer.is_some(),egui::Button::new("Delete widget from this scene")).clicked(){self.pending_layer_delete=layer.map(|i|(scene,i));ui.close();}});
-                        if response.clicked() {
-                            self.widget_editor.id = Some(id);
-                            self.widget_editor.sample = false;
-                            self.widget_editor.key = 0;
-                            ui.close();
-                        }
-                    }
-                });
-            }
-        });
     }
     fn widget_editor_window(&mut self, ctx: &egui::Context) {
         let mut editor = std::mem::take(&mut self.widget_editor);
@@ -279,24 +247,5 @@ impl Studio {
                 let _ = tx.send(project.save(&path).map_err(|e| e.to_string()));
             });
         }
-    }
-    fn readiness_window(&mut self, ctx: &egui::Context) {
-        if !self.readiness_open {
-            return;
-        }
-        let mut open = true;
-        egui::Window::new("Stream readiness").open(&mut open).default_width(560.).anchor(egui::Align2::CENTER_CENTER,[0.,0.]).show(ctx,|ui|{ui.label("A local check of this project. It does not start a stream or send test alerts.");ui.separator();for account in &self.accounts{ui.label(format!("{} · {}",account.platform.name(),if account.connected{"Account connected"}else{"Not connected"}));}
-  let mut destinations=vec![(self.stream_config.connection_names[0].as_str(),&self.stream_config.twitch),(self.stream_config.connection_names[1].as_str(),&self.stream_config.youtube),(self.stream_config.connection_names[2].as_str(),&self.stream_config.youtube_vertical)];
-  destinations.extend(self.stream_config.services.iter().map(|s|(s.name.as_str(),&s.destination)));
-  let mut enabled=0;for(name,dest)in destinations{if dest.enabled{enabled+=1;let status=if dest.server.trim().is_empty(){"Server address is missing"}else if dest.key.trim().is_empty(){"Stream key / broadcast setup needed"}else if dest.canvas.is_some_and(|id|!self.project.canvases.iter().any(|c|c.id==id)){"Assigned canvas is missing"}else{"Configured locally — connection not tested"};ui.label(format!("{name} · {status}"));}}if enabled==0{ui.label("No streaming destinations enabled");}
-  let scene=self.project.canvases[self.canvas].scene;for channel in self.project.audio_for_scene(scene){if channel.name.to_lowercase().contains("mic"){ui.label(format!("{} · {}",channel.name,if channel.muted||channel.gain_db<=-60.{"Muted / silent"}else{"Enabled — check the live input meter"}));}}
-  let mut missing=0;for source in &self.project.sources{let path=match &source.kind{SourceKind::Image{path}=>Some(path.as_str()),SourceKind::VideoFile(v)=>Some(v.path.as_str()),_=>None};if path.is_some_and(|p|!std::path::Path::new(p).is_file()){missing+=1;ui.colored_label(Color32::LIGHT_RED,format!("Missing file · {}",source.name));}}
-  if missing==0{ui.label("Media files · all referenced files are present");}
-  for source in &self.project.sources {match &source.kind{SourceKind::Browser{..}=>{ui.label(format!("{} · {}",source.name,self.captures.browser_status(source.id)));},SourceKind::VideoCamera(_)|SourceKind::ScreenCapture=>{ui.label(format!("{} · {}",source.name,self.captures.status(source.id)));},_=>{}}}
-  if ui.button("Manage connected accounts").clicked(){self.page=Page::Settings;self.settings=Settings::Accounts;}
-  ui.separator();ui.label("Before going live: verify the platform destination, watch your mic meter, and use the widget sample previews to check layout. This check cannot confirm what viewers receive.");if ui.button("Open broadcast settings").clicked(){self.page=Page::Settings;self.settings=Settings::Accounts;}
-  let backups=self.project_path.with_extension("backups");if backups.is_dir(){ui.separator();ui.label("Saved project backups (newest first)");for n in 1..=5{let path=backups.join(format!("{n}.json"));if path.exists()&&ui.button(format!("Load backup {n} as unsaved changes")).clicked(){match Project::load(&path){Ok(project)=>{self.adopt_project(project);self.changed();},Err(e)=>self.message=format!("Backup unavailable: {e}")}}}}
- });
-        self.readiness_open = open;
     }
 }

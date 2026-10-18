@@ -328,7 +328,7 @@ impl Recording {
             .clone();
         ensure!(
             canvas.width.is_multiple_of(2) && canvas.height.is_multiple_of(2),
-            "Output requires even canvas width and height (Settings > Canvases & recording)"
+            "Output requires even canvas width and height (Settings > Video & recording)"
         );
         let path = output.path();
         let shared = Arc::new(Shared {

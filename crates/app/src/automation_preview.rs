@@ -22,8 +22,8 @@ pub fn show(
         .resizable(true)
         .show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.selectable_value(vertical, false, "Canvas 1");
-                ui.selectable_value(vertical, true, "Canvas 2");
+                ui.selectable_value(vertical, false, "Main video");
+                ui.selectable_value(vertical, true, "Vertical video");
             });
             let size = ui.available_size().min(maximum).max(egui::vec2(1., 1.));
             let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());

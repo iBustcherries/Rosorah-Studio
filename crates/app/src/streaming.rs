@@ -351,7 +351,7 @@ impl Config {
         }
         ensure!(
             !targets.is_empty(),
-            "Enable a streaming service in Broadcast"
+            "Choose where to stream: switch on a platform in Settings > Accounts"
         );
         for (index, target) in targets.iter().enumerate() {
             if let Location::Network(url) = &target.destination {
@@ -386,7 +386,7 @@ impl Config {
                 continue;
             }
             let index = if let Some(id) = dest.canvas {
-                project.canvases.iter().position(|c| c.id == id).context("A streaming destination's canvas is missing. Choose its canvas again in Broadcast.")?
+                project.canvases.iter().position(|c| c.id == id).context("A streaming destination's canvas is missing. Choose its video again in Settings > Accounts.")?
             } else if slot == 2 {
                 vertical.context("Choose an existing canvas for the second YouTube connection")?
             } else {

@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-/// Colors follow Settings > Appearance (theme and see-through panels).
+/// Colors follow Settings > Look & feel (theme and see-through panels).
 fn bg() -> Color32 {
     crate::appearance::current().bg
 }
@@ -113,6 +113,11 @@ fn message_menu(
         *action = Some(ChatAction::Hide(m.platform, m.id.clone()));
     }
 }
+/// Guide and checklist windows stay solid even with see-through panels, so they're easy to read.
+fn solid_window(ctx: &egui::Context) -> egui::Frame {
+    let [r, g, b, _] = panel().to_srgba_unmultiplied();
+    egui::Frame::window(&ctx.style()).fill(Color32::from_rgb(r, g, b))
+}
 fn card() -> egui::Frame {
     egui::Frame::new()
         .fill(panel())
@@ -131,12 +136,26 @@ enum Page {
 #[derive(Clone, Copy, PartialEq)]
 enum Settings {
     Appearance,
+    /// Accounts has two tabs: streaming platforms (Accounts) and Donations.
     Accounts,
     Donations,
     Video,
     Audio,
-    Backups,
-    Profiles,
+    /// The advanced-options switch, backups, profiles and imports.
+    Advanced,
+}
+/// What a first-time user plans to do; picks the starter scenes.
+#[derive(Clone, Copy, PartialEq)]
+enum Starter {
+    Games,
+    Chatting,
+    Recording,
+}
+/// A short notice above the footer, optionally offering Undo.
+struct Toast {
+    text: String,
+    undo: bool,
+    until: Instant,
 }
 use crate::system_monitor::Resources;
 pub struct Studio {
@@ -157,6 +176,16 @@ pub struct Studio {
     edit_history: crate::edit_history::History,
     continuous_edit: bool,
     readiness_open: bool,
+    /// The Go live checklist is open; starting the stream happens from there.
+    go_live_open: bool,
+    /// When the microphone was last heard, for the Go live checklist.
+    mic_heard: Option<Instant>,
+    report_open: bool,
+    /// No saved project existed at start, so the setup guide may replace the demo scenes.
+    first_run: bool,
+    toast: Option<Toast>,
+    /// Incomplete recordings being repaired automatically at start.
+    recovering: Option<mpsc::Receiver<Vec<Result<PathBuf, String>>>>,
     recovery_candidate: Option<Project>,
     recovery_write: Option<mpsc::Receiver<Result<(), String>>>,
     last_recovery: Instant,
@@ -400,7 +429,31 @@ impl Studio {
         accounts[1].restore(account_config.youtube.clone());
         let mut kick_account = crate::accounts::Account::new(Platform::Kick);
         kick_account.restore(account_config.kick.clone());
-        let tools=crate::utilities::Tools{open:!crate::utilities::incomplete(std::path::Path::new(&record_folder)).is_empty(),guide:(!project_path.exists()).then_some(0),..Default::default()};
+        let first_run = !project_path.exists();
+        let tools=crate::utilities::Tools{guide:first_run.then_some(0),..Default::default()};
+        // Recordings cut short by a crash are repaired in the background; the original files are kept.
+        let unfinished = crate::utilities::incomplete(std::path::Path::new(&record_folder));
+        let recovering = (!unfinished.is_empty()).then(|| {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let results = unfinished
+                    .into_iter()
+                    .map(|path| match crate::utilities::remux(path, false) {
+                        Ok(crate::utilities::Finished::Saved(saved)) => Ok(saved),
+                        Ok(_) => Err("Unexpected recovery result".into()),
+                        Err(e) => Err(format!("{e:#}")),
+                    })
+                    .collect();
+                let _ = tx.send(results);
+            });
+            rx
+        });
+        // Older projects named their videos "Canvas 1" and "Canvas 2".
+        for (canvas, name) in project.canvases.iter_mut().zip(["Main video", "Vertical video"]) {
+            if canvas.name == "Canvas 1" || canvas.name == "Canvas 2" {
+                canvas.name = name.into();
+            }
+        }
         let edit_history = crate::edit_history::History::new(&project);
         let recovery_path = crate::edit_history::recovery_path(&project_path);
         let newer = std::fs::metadata(&recovery_path)
@@ -433,6 +486,12 @@ impl Studio {
             edit_history,
             continuous_edit: false,
             readiness_open: false,
+            go_live_open: false,
+            mic_heard: None,
+            report_open: false,
+            first_run,
+            toast: None,
+            recovering,
             recovery_candidate,
             recovery_write: None,
             last_recovery: Instant::now(),
@@ -881,9 +940,7 @@ impl Studio {
             .show(ctx, |ui| {
                 crate::appearance::glass(ui, egui::CornerRadius::ZERO);
                 ui.horizontal_centered(|ui| {
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new("Rosorah Studio").size(22.).strong());
-                    });
+                    ui.label(RichText::new("Rosorah Studio").size(22.).strong());
                     ui.add_space(24.);
                     for (p, label) in [
                         (Page::Studio, "Studio"),
@@ -895,121 +952,203 @@ impl Studio {
                         }
                     }
                     if self.page == Page::Studio {
-                        self.widgets_menu(ui);
                         ui.menu_button("Edit", |ui| {
-                            if ui.button("Project & recording tools…").clicked(){self.tools.open=true;ui.close();}
-                            if ui.button("Monitoring & sync…").clicked(){self.tools.audio=true;ui.close();}
-                            if ui.button("Desktop compatibility…").clicked(){self.tools.compatibility=true;crate::desktop::refresh();ui.close();}
-                            if ui.button("Performance details…").clicked(){self.tools.performance=true;ui.close();}
-                            if ui.button("Setup guide…").clicked(){self.tools.guide=Some(0);ui.close();}
-                            if ui
-                                .add_enabled(
-                                    self.edit_history.can_undo(),
-                                    egui::Button::new("Undo · Ctrl+Z"),
-                                )
-                                .clicked()
-                            {
+                            if ui.add_enabled(self.edit_history.can_undo(), egui::Button::new("Undo · Ctrl+Z")).clicked() {
                                 self.undo_edit(false);
                                 ui.close();
                             }
-                            if ui
-                                .add_enabled(
-                                    self.edit_history.can_redo(),
-                                    egui::Button::new("Redo · Ctrl+Shift+Z"),
-                                )
-                                .clicked()
-                            {
+                            if ui.add_enabled(self.edit_history.can_redo(), egui::Button::new("Redo · Ctrl+Shift+Z")).clicked() {
                                 self.undo_edit(true);
                                 ui.close();
                             }
-                            ui.separator();
-                            if ui.button("Stream readiness & backups").clicked() {
-                                self.readiness_open = true;
-                                ui.close();
-                            }
                         });
-                        ui.menu_button("Panels", |ui| {
-                            note(ui, "Drag to an edge to snap; center to group tabs");
-                            note(ui, "Double-click a tab to float or dock it");
-                            note(ui, "Drag a tab out of the window, or right-click it, to give it its own window");
-                            for panel in Panel::ALL {
-                                let mut visible = self.workspace.contains(panel);
-                                if ui
-                                    .add_enabled(
-                                        panel != Panel::Preview,
-                                        egui::Checkbox::new(&mut visible, panel.title()),
-                                    )
-                                    .changed()
-                                {
-                                    self.workspace.set_visible(panel, visible);
+                        if self.advanced() {
+                            ui.menu_button("Panels", |ui| {
+                                note(ui, "Drag to an edge to snap; center to group tabs");
+                                note(ui, "Double-click a tab to float or dock it");
+                                note(ui, "Drag a tab out of the window, or right-click it, to give it its own window");
+                                for panel in Panel::ALL {
+                                    let mut visible = self.workspace.contains(panel);
+                                    if ui
+                                        .add_enabled(panel != Panel::Preview, egui::Checkbox::new(&mut visible, panel.title()))
+                                        .changed()
+                                    {
+                                        self.workspace.set_visible(panel, visible);
+                                    }
                                 }
-                            }
-                            ui.separator();
-                            if ui.button("Reset layout").clicked() {
-                                self.workspace.reset();
-                                ui.close();
-                            }
-                        });
+                                ui.separator();
+                                if ui.button("Reset layout").clicked() {
+                                    self.reset_layout();
+                                    ui.close();
+                                }
+                            });
+                        }
                     }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if self.live_stream.is_none()
-                            && ui
-                                .add(
-                                    egui::Button::new(
-                                        RichText::new("Go live")
-                                            .color(Color32::from_rgb(56, 30, 114)),
-                                    )
-                                    .fill(self.accent()),
-                                )
-                                .clicked()
-                        {
-                            self.start_streaming();
+                    ui.menu_button("Help", |ui| self.help_menu(ui));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.live_controls(ui));
+                });
+            });
+    }
+    /// Go live, Record and what is happening now, together at the right of the header.
+    fn live_controls(&mut self, ui: &mut egui::Ui) {
+        use crate::recording::Phase;
+        let clock = |d: Duration| format!("{}:{:02}", d.as_secs() / 60, d.as_secs() % 60);
+        if let Some(stream) = &self.live_stream {
+            let view = stream.view();
+            ui.add_enabled_ui(view.phase != Phase::Finishing, |ui| {
+                ui.menu_button("Stop streaming", |ui| {
+                    note(ui, "Your viewers will see the stream end.");
+                    if ui.button("Yes, end my stream").clicked() {
+                        stream.stop();
+                        ui.close();
+                    }
+                });
+            });
+            let destinations: Vec<_> = stream
+                .destinations()
+                .into_iter()
+                .filter(|d| d.path.is_none())
+                .map(|d| {
+                    let mark = match d.phase {
+                        crate::streaming::Phase::Sending => "✓",
+                        crate::streaming::Phase::Failed => "✕",
+                        _ => "…",
+                    };
+                    format!("{} {mark}", d.name)
+                })
+                .collect();
+            let (text, color) = if view.phase == Phase::Starting {
+                ("● STARTING…".to_owned(), Color32::from_rgb(230, 190, 90))
+            } else {
+                (format!("● LIVE {} · {}", clock(view.elapsed), destinations.join("  ")), Color32::from_rgb(255, 92, 92))
+            };
+            ui.label(RichText::new(text).strong().color(color))
+                .on_hover_text("✓ sending · … connecting · ✕ needs attention. Check your platform's dashboard to see what viewers get.");
+        } else if ui
+            .add(self.primary_button("Go live"))
+            .on_hover_text("Checks your setup, then starts the stream")
+            .clicked()
+        {
+            self.go_live_open = true;
+        }
+        let shared = self.live_stream.as_ref().is_some_and(|s| s.destinations().iter().any(|v| v.path.is_some()));
+        if let Some(r) = &self.live_recording {
+            let view = r.view();
+            if ui
+                .add_enabled(view.phase != Phase::Finishing, egui::Button::new(format!("Stop recording · {}", clock(view.elapsed))))
+                .clicked()
+            {
+                r.stop();
+            }
+            ui.label(RichText::new("● REC").strong().color(Color32::from_rgb(255, 92, 92)));
+        } else if shared {
+            ui.label(RichText::new("● Recording the stream").small().color(muted()));
+        } else if ui.add(self.primary_button("Record")).on_hover_text("Records the main video to your computer").clicked() {
+            self.start_recording();
+        }
+        if self.live_stream.is_none() && self.live_recording.is_none() {
+            ui.label(RichText::new("OFFLINE").size(11.).color(muted()));
+        }
+    }
+    fn help_menu(&mut self, ui: &mut egui::Ui) {
+        if ui.button("Setup guide…").clicked() {
+            self.tools.guide = Some(0);
+            ui.close();
+        }
+        if ui.button("Check my setup…").clicked() {
+            self.readiness_open = true;
+            ui.close();
+        }
+        if ui.button("Reset layout").on_hover_text("Put every panel back where it started").clicked() {
+            self.reset_layout();
+            self.page = Page::Studio;
+            ui.close();
+        }
+        if ui.button("Report a problem…").clicked() {
+            self.report_open = true;
+            ui.close();
+        }
+        if self.advanced() {
+            ui.separator();
+            if ui.button("Monitoring & sync…").clicked() {
+                self.tools.audio = true;
+                ui.close();
+            }
+            if ui.button("Project & recording tools…").clicked() {
+                self.tools.open = true;
+                ui.close();
+            }
+            if ui.button("Desktop compatibility…").clicked() {
+                self.tools.compatibility = true;
+                crate::desktop::refresh();
+                ui.close();
+            }
+            if ui.button("Performance details…").clicked() {
+                self.tools.performance = true;
+                ui.close();
+            }
+        }
+    }
+    /// Confirms a removal with an Undo button, so a slip is one click to reverse.
+    fn deleted(&mut self, text: String) {
+        self.toast = Some(Toast { text, undo: true, until: Instant::now() + Duration::from_secs(10) });
+    }
+    fn tell(&mut self, text: String) {
+        self.toast = Some(Toast { text, undo: false, until: Instant::now() + Duration::from_secs(8) });
+    }
+    fn toast_ui(&mut self, ctx: &egui::Context) {
+        let Some(toast) = &self.toast else { return };
+        if toast.until <= Instant::now() {
+            self.toast = None;
+            return;
+        }
+        let (text, undo) = (toast.text.clone(), toast.undo);
+        let mut action = 0;
+        egui::Area::new(egui::Id::new("toast"))
+            .anchor(egui::Align2::CENTER_BOTTOM, [0., -44.])
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::new().fill(crate::appearance::current().card).corner_radius(12).inner_margin(egui::Margin::symmetric(14, 8)).shadow(ui.visuals().popup_shadow).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(&text);
+                        if undo && ui.add(self.primary_button("Undo")).clicked() {
+                            action = 1;
                         }
-
-                        if let Some(r) = &self.live_recording {
-                            let view = r.view();
-                            if ui
-                                .add_enabled(
-                                    view.phase != crate::recording::Phase::Finishing,
-                                    egui::Button::new(format!(
-                                        "Stop recording · {}:{:02}",
-                                        view.elapsed.as_secs() / 60,
-                                        view.elapsed.as_secs() % 60
-                                    )),
-                                )
-                                .clicked()
-                            {
-                                r.stop();
-                            }
-                        } else if self.live_stream.is_none() {
-                            ui.label(RichText::new("OFFLINE").size(11.).color(muted()));
-                        }
-                        if let Some(stream) = &self.live_stream {
-                            let view = stream.view();
-                            if ui
-                                .add_enabled(
-                                    view.phase != crate::recording::Phase::Finishing,
-                                    egui::Button::new("Stop streaming"),
-                                )
-                                .clicked()
-                            {
-                                stream.stop();
-                            }
-                            let views = stream.destinations();
-                            let sending = views
-                                .iter()
-                                .filter(|v| {
-                                    v.path.is_none() && v.phase == crate::streaming::Phase::Sending
-                                })
-                                .count();
-                            ui.label(
-                                RichText::new(format!("STREAMING · {sending} connected"))
-                                    .color(Color32::LIGHT_GREEN),
-                            );
+                        if ui.small_button("✕").on_hover_text("Dismiss").clicked() {
+                            action = 2;
                         }
                     });
                 });
             });
+        if action == 1 {
+            self.undo_edit(false);
+        }
+        if action > 0 {
+            self.toast = None;
+        }
+        ctx.request_repaint_after(Duration::from_millis(500));
+    }
+    fn advanced(&self) -> bool {
+        self.project.preferences.workspace.advanced
+    }
+    /// The accent-colored button used only for main actions (Go live, Record, Add).
+    fn primary_button(&self, text: &str) -> egui::Button<'static> {
+        egui::Button::new(RichText::new(text.to_owned()).strong().color(Color32::from_rgb(40, 22, 84))).fill(self.accent())
+    }
+    fn reset_layout(&mut self) {
+        self.workspace.reset();
+        self.sync_vertical_panel();
+    }
+    /// Shows the vertical video panel only when vertical video is switched on.
+    fn sync_vertical_panel(&mut self) {
+        let wanted = self.project.preferences.workspace.vertical_video && self.project.canvases.len() > 1;
+        if self.workspace.contains(Panel::Vertical) != wanted {
+            self.workspace.set_visible(Panel::Vertical, wanted);
+        }
+        if !wanted && self.canvas > 0 {
+            self.canvas = 0;
+            self.layer = None;
+        }
     }
     fn footer(&mut self, ctx: &egui::Context) {
         ctx.request_repaint_after(Duration::from_secs(1));
@@ -1023,9 +1162,16 @@ impl Studio {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{note(ui,format!("RAM {}",fmt(self.resources.ram)));note(ui,format!("GPU {}",self.resources.gpu.iter().map(|(_,v)|*v).max().map_or("—".into(),|v|format!("{v}%"))));note(ui,format!("CPU {}",fmt(self.resources.cpu)));}).response.on_hover_text("System usage (all applications), updated once per second. GPU shows the busiest reported device/engine. Unsupported counters show —, never a fabricated zero.");
         });});
     }
+    /// Main/Vertical switch above Scenes and In this scene; hidden when only one video is in use.
     fn canvas_tabs(&mut self, ui: &mut egui::Ui) {
+        let shown: Vec<usize> = (0..self.project.canvases.len())
+            .filter(|i| *i == 0 || self.advanced() || (*i == 1 && self.project.preferences.workspace.vertical_video))
+            .collect();
+        if shown.len() < 2 {
+            return;
+        }
         ui.horizontal_wrapped(|ui| {
-            for index in 0..self.project.canvases.len() {
+            for index in shown {
                 let label = self.project.canvases[index].name.clone();
                 if ui.selectable_label(self.canvas == index, label).clicked() {
                     self.canvas = index;
@@ -1061,7 +1207,8 @@ impl Studio {
                 }
             }
         });
-        ui.menu_button("Link scene", |ui| {
+        let vertical_in_use = self.project.canvases.len() > 1 && (self.advanced() || self.project.preferences.workspace.vertical_video);
+        if vertical_in_use { ui.menu_button(if canvas == self.project.canvases[0].id { "Show on the vertical video" } else { "Show with main video scene" }, |ui| {
             let main = self.project.canvases[0].id;
             let other = if canvas == main {
                 self.project.canvases.get(1).map(|c| c.id)
@@ -1070,9 +1217,9 @@ impl Studio {
             };
             if let Some(other) = other {
                 ui.small(if canvas == main {
-                    "Canvas 2 scenes"
+                    "Pick the vertical scene to switch to with this one"
                 } else {
-                    "Canvas 1 scenes"
+                    "Pick the main video scene that switches to this one"
                 });
                 for target in self.project.canvas_scenes(other) {
                     let (from, to) = if canvas == main {
@@ -1098,7 +1245,7 @@ impl Studio {
                     }
                 }
                 ui.separator();
-                if ui.button("Unlink scene").clicked() {
+                if ui.button("Don't switch together").clicked() {
                     self.project
                         .preferences
                         .workspace
@@ -1110,12 +1257,14 @@ impl Studio {
             } else {
                 ui.label("Add another canvas first.");
             }
-        });
+        }); }
+        let on_air = self.project.canvases.iter().any(|c| c.scene == id) && (self.live_stream.is_some() || self.live_recording.is_some());
         if ui
             .add_enabled(
-                self.project.canvas_scenes(canvas).len() > 1,
+                self.project.canvas_scenes(canvas).len() > 1 && !on_air,
                 egui::Button::new("Delete"),
             )
+            .on_disabled_hover_text(if on_air { "This scene is on air. Switch to another scene first." } else { "A video needs at least one scene" })
             .clicked()
         {
             self.scene_dialog = Some((id, self.project.scene(id).unwrap().name.clone(), true));
@@ -1147,8 +1296,8 @@ impl Studio {
             });
         }
         ui.horizontal_wrapped(|ui| {
-            if ui.small_button("+ Scene").clicked() {let id=self.project.id();self.project.scenes.push(Scene{id,name:format!("Scene {id}"),layers:vec![]});self.project.preferences.workspace.scenes.entry(canvas).or_default().push(id);self.project.switch_scene(canvas,id);self.layer=None;self.changed();}
-            if ui.checkbox(&mut self.project.preferences.workspace.link_scenes,"Link scenes").on_hover_text("Switching a Canvas 1 scene also switches its linked Canvas 2 scene. Right-click a scene to choose its link.").changed() {self.changed();}
+            if ui.add(self.primary_button("+ Scene")).clicked() {let id=self.project.id();self.project.scenes.push(Scene{id,name:format!("Scene {id}"),layers:vec![]});self.project.preferences.workspace.scenes.entry(canvas).or_default().push(id);self.project.switch_scene(canvas,id);self.layer=None;self.changed();}
+            if self.project.canvases.len() > 1 && (self.advanced() || self.project.preferences.workspace.vertical_video) && ui.checkbox(&mut self.project.preferences.workspace.link_scenes,"Switch the vertical video too").on_hover_text("Switching a main video scene also switches the vertical video to its matching scene. Right-click a scene to choose which one.").changed() {self.changed();}
             ui.menu_button(format!("Transition · {}", self.project.preferences.transition.label()),|ui| self.transition_menu(ui));
         });
         if let Some(link) = self
@@ -1158,8 +1307,9 @@ impl Studio {
             .scene_links
             .get(&active)
             .and_then(|id| self.project.scene(*id))
+            .filter(|_| self.project.preferences.workspace.vertical_video || self.advanced())
         {
-            ui.small(format!("Linked to Canvas 2: {}", link.name));
+            ui.small(format!("Vertical video switches to: {}", link.name));
         }
     }
     fn scene_dialog_ui(&mut self, ctx: &egui::Context) {
@@ -1203,6 +1353,7 @@ impl Studio {
                         if let Some(owner) = owner {
                             self.project.delete_scene(owner, id);
                             self.layer = None;
+                            self.deleted(format!("Deleted the scene “{name}”"));
                         }
                     } else if let Some(s) = self.project.scenes.iter_mut().find(|s| s.id == id) {
                         s.name = name.trim().chars().take(80).collect();
@@ -1229,7 +1380,7 @@ impl Studio {
                 .map(|s| s.name.as_str())
                 .unwrap_or("Scene")
         ));
-        note(ui, "Top layer appears in front");
+        note(ui, "Things at the top of the list appear in front. Drag to reorder; double-click to change one.");
         let si = self
             .project
             .scenes
@@ -1372,8 +1523,30 @@ impl Studio {
             }
             self.changed();
         }
-        ui.menu_button("+ Add layer", |ui| {
-            if ui.button("Window / screen / game capture").clicked() {
+        if count == 0 {
+            card().show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label("This scene is empty. Start by adding what your viewers should see.");
+                ui.horizontal_wrapped(|ui| {
+                    if ui.add(self.primary_button("Add your game or screen")).clicked() {
+                        let id = self.add_source_layer(si, "Game or screen", SourceKind::ScreenCapture, [0., 0., 1., 1.]);
+                        #[cfg(windows)] self.captures.set_mode(id,rosorah_capture::Target::AutoFullscreen);
+                        #[cfg(not(windows))] self.captures.start(id);
+                        self.remember_capture_mode(id);
+                    }
+                    if ui.button("Add a camera").clicked() {
+                        let c = &self.project.canvases[self.canvas];
+                        let w = 0.28;
+                        let rect = [0.68, 0.05, w, w * c.width as f32 / c.height as f32 * 9. / 16.];
+                        self.add_source_layer(si, "Camera", SourceKind::VideoCamera(Default::default()), rect);
+                        self.layer_properties = Some((self.project.scenes[si].id, self.project.scenes[si].layers.len() - 1));
+                    }
+                });
+            });
+            ui.add_space(6.);
+        }
+        egui::containers::menu::MenuButton::from_button(self.primary_button("+ Add")).ui(ui, |ui| {
+            if ui.button("Game, window or screen").clicked() {
                 ui.close();
                 let id = self.add_source_layer(si, "Window / Screen", SourceKind::ScreenCapture, [0., 0., 1., 1.]);
                 #[cfg(windows)] self.captures.set_mode(id,rosorah_capture::Target::AutoFullscreen);
@@ -1414,7 +1587,18 @@ impl Studio {
                 self.add_source_layer(si, "Color source", SourceKind::Color([70, 170, 220, 255]), [0.1, 0.1, 0.3, 0.3]);
             }
             ui.separator();
-            if ui.button("Alerts").on_hover_text("Add or select the shared alert box for all visual alerts").clicked(){self.add_widget(widgets::Kind::AlertBox);ui.close();}
+            if ui.button("Alerts").on_hover_text("Shows follows, subs, donations and other alerts on screen").clicked(){self.add_widget(widgets::Kind::AlertBox);ui.close();}
+            ui.menu_button("Widgets", |ui| {
+                note(ui, "Goals, timers, counters, chat on screen and more");
+                egui::ScrollArea::vertical().max_height(430.).show(ui, |ui| {
+                    for kind in widgets::Kind::ALL.into_iter().filter(|k| !matches!(k, widgets::Kind::AlertBox | widgets::Kind::Text)) {
+                        if ui.button(kind.label()).clicked() {
+                            self.add_widget(kind);
+                            ui.close();
+                        }
+                    }
+                });
+            });
             // Captures and cameras already set up elsewhere, so one device can appear in several scenes.
             let here: Vec<_> = self.project.scenes[si].layers.iter().map(|l| l.source).collect();
             let reusable: Vec<_> = self
@@ -1927,12 +2111,10 @@ impl Studio {
         });
         if !crate::browser_source::ready() {
             ui.label(&self.browser_chat.status);
-            if ui
-                .add_enabled(
-                    !self.browser_chat.installing(),
-                    egui::Button::new("Prepare browser runtime"),
-                )
-                .clicked()
+            if self.advanced()
+                && ui
+                    .add_enabled(!self.browser_chat.installing(), egui::Button::new("Prepare browser runtime"))
+                    .clicked()
             {
                 self.browser_chat.setup();
             }
@@ -2047,7 +2229,7 @@ impl Studio {
             if let Some(stream) = &self.live_stream {
                 stream.stop();
             } else {
-                self.start_streaming();
+                self.go_live_open = true;
             }
         }
         if record_clicked {
@@ -2117,15 +2299,15 @@ impl Studio {
                 if dest.path.is_some(){ui.small("Local recording continues independently of network reconnection.");}
             }
         } else {
-            note(ui, "Choose services and canvases below.");
-            if !self.accounts.iter().any(|a| a.connected) && ui.button("Connect accounts").clicked()
+            note(ui, "Tick where to stream above, then press Go live.");
+            if !self.accounts.iter().any(|a| a.connected) && ui.button("Sign in to your accounts").clicked()
             {
                 self.page = Page::Settings;
                 self.settings = Settings::Accounts;
             }
         }
         if !self.stream_error.is_empty() {
-            ui.colored_label(Color32::LIGHT_RED, &self.stream_error);
+            self.error_line(ui, self.stream_error.clone());
         }
         ui.collapsing("Streaming details", |ui| {
             let detail = view.as_ref().map_or(self.stream_details.as_str(), |v| v.details.as_str());
@@ -2210,7 +2392,7 @@ impl Studio {
     }
     fn broadcast_routes(&mut self, ui: &mut egui::Ui) {
         ui.separator();
-        ui.strong("Destinations");
+        ui.strong("Where to stream");
         let before = self.stream_config.clone();
         let main = self.project.canvases.first().map(|c| c.id);
         let vertical = self
@@ -2224,6 +2406,7 @@ impl Studio {
             .map(|slot| self.stream_config.connection_name(slot))
             .collect::<Vec<_>>();
         names.extend(self.stream_config.services.iter().map(|s| s.name.clone()));
+        let several_videos = self.project.canvases.len() > 1 && (self.advanced() || self.project.preferences.workspace.vertical_video);
         ui.add_enabled_ui(self.live_stream.is_none(), |ui| {
             for (slot, name) in names.iter().enumerate() {
                 let connected = match slot {
@@ -2239,12 +2422,12 @@ impl Studio {
                 ui.push_id(("broadcast-service", slot), |ui| {
                     ui.horizontal_wrapped(|ui| {
                         ui.checkbox(&mut dest.enabled, name);
-                        if ui.small_button("Connection").clicked() {
+                        if ui.small_button("Set up…").clicked() {
                             self.broadcast_window = 100 + slot as u8;
                         }
                     });
-                    ui.horizontal_wrapped(|ui| {
-                        ui.small("Canvas");
+                    if several_videos { ui.horizontal_wrapped(|ui| {
+                        ui.small("Video");
                         let selected = dest.canvas.or(if slot == 2 { vertical } else { main });
                         for canvas in &self.project.canvases {
                             if ui
@@ -2255,9 +2438,9 @@ impl Studio {
                                 dest.canvas = Some(canvas.id);
                             }
                         }
-                    });
+                    }); }
                     if dest.key.is_empty() {
-                        ui.small("Connection needed before going live");
+                        ui.small("Sign in or add a stream key before going live");
                     }
                     ui.add_space(6.);
                 });
@@ -2265,7 +2448,7 @@ impl Studio {
             if ui
                 .add_enabled(
                     self.stream_config.services.len() < 16,
-                    egui::Button::new("+ Add service"),
+                    egui::Button::new("+ Add a platform"),
                 )
                 .clicked()
             {
@@ -2339,6 +2522,8 @@ impl Studio {
             let mut save = false;
             let mut remove = false;
             let mut account = false;
+            let advanced = self.advanced();
+            let several_videos = self.project.canvases.len() > 1 && (advanced || self.project.preferences.workspace.vertical_video);
             egui::Window::new(format!("{name} connection")).id(egui::Id::new(("service-connection",slot))).anchor(egui::Align2::CENTER_CENTER,egui::Vec2::ZERO).collapsible(false).open(&mut open).default_width(420.).show(ctx,|ui| {
                 ui.add_enabled_ui(self.live_stream.is_none(),|ui| {
                     if let Some(name)=self.stream_config.connection_name_mut(slot) {
@@ -2346,8 +2531,8 @@ impl Studio {
                         ui.add(egui::TextEdit::singleline(name).char_limit(64));
                     }
                     if slot<3 {
-                        if ui.button("Connect account").clicked(){account=true;}
-                        ui.label("Or use a stream key");
+                        if ui.add(self.primary_button(&format!("Sign in with {}",if slot==0{"Twitch"}else{"YouTube"}))).clicked(){account=true;}
+                        note(ui,"Signing in fills in everything below for you.");
                     } else {
                         ui.horizontal_wrapped(|ui| {
                             ui.label("Connection method");
@@ -2355,7 +2540,7 @@ impl Studio {
                             if provider == Some(crate::streaming::Provider::Kick) && ui.button("Connect account").clicked() {account=true;}
                         });
                         match provider {
-                            Some(crate::streaming::Provider::Kick)=>{ui.small("Connect Kick in Settings > Connections to retrieve your streaming server and key automatically, or enter a key here.");},
+                            Some(crate::streaming::Provider::Kick)=>{ui.small("Connect Kick in Settings > Accounts to retrieve your streaming server and key automatically, or enter a key here.");},
                             Some(crate::streaming::Provider::TikTok)=>{ui.small("TikTok account login does not supply LIVE streaming access here. Use a server and key if TikTok has granted your account access.");},
                             _=>{ui.small("Custom services connect using a server address and stream key.");}
                         }
@@ -2370,17 +2555,26 @@ impl Studio {
                                 if self.kick_account.connected {self.kick_account.send(crate::accounts::Command::Refresh);} else {account=true;}
                             }
                         }
-                        ui.label("Server address");ui.add(egui::TextEdit::singleline(&mut dest.server).desired_width(f32::INFINITY).hint_text("rtmps://…"));
-                        ui.label("Stream key");
-                        if ui.add(egui::TextEdit::singleline(&mut dest.key).password(!self.show_stream_keys).desired_width(f32::INFINITY)).changed(){dest.managed_by_account=false;}
-                        ui.checkbox(&mut self.show_stream_keys,"Show stream key");
-                        Self::destination_canvas(ui,dest,&self.project.canvases,slot==2);
-                        ui.horizontal(|ui|{
+                        let manual_open=!dest.managed_by_account&&!dest.key.is_empty();
+                        let show=&mut self.show_stream_keys;
+                        let mut manual=|ui:&mut egui::Ui|{
+                            ui.label("Server address");ui.add(egui::TextEdit::singleline(&mut dest.server).desired_width(f32::INFINITY).hint_text("rtmps://…"));
+                            ui.label("Stream key");
+                            if ui.add(egui::TextEdit::singleline(&mut dest.key).password(!*show).desired_width(f32::INFINITY)).changed(){dest.managed_by_account=false;}
+                            ui.checkbox(show,"Show stream key");
+                        };
+                        if slot<3||provider==Some(crate::streaming::Provider::Kick) {
+                            egui::CollapsingHeader::new("Or connect manually with a stream key").default_open(manual_open).show(ui,|ui|manual(ui));
+                        } else {
+                            manual(ui);
+                        }
+                        if several_videos {Self::destination_canvas(ui,dest,&self.project.canvases,slot==2);}
+                        if advanced {ui.horizontal(|ui|{
                             let mut own=dest.bitrate.is_some();
                             if ui.checkbox(&mut own,"Own video bitrate").changed(){dest.bitrate=own.then_some(if slot==0{shared_bitrate.min(6000)}else{shared_bitrate});}
                             if let Some(b)=&mut dest.bitrate{ui.add(egui::DragValue::new(b).range(1000..=if slot==0{6000}else{20_000}).speed(100).suffix(" kbps"));}
                         });
-                        if dest.bitrate.is_some(){ui.small("A different bitrate uses its own encoder, which adds GPU and CPU load while live.");}
+                        if dest.bitrate.is_some(){ui.small("A different bitrate uses its own encoder, which adds GPU and CPU load while live.");}}
                         ui.checkbox(&mut dest.enabled,"Include when going live");
                         ui.small("A stream-key connection sends video and audio; it does not connect chat or activity.");
                         ui.horizontal(|ui|{if ui.button("Save connection").clicked(){save=true;}
@@ -2418,13 +2612,16 @@ impl Studio {
         }
     }
     fn broadcast_panel(&mut self, ui: &mut egui::Ui) {
-        self.output_buttons(ui);
+        // Go live and Record live in the header; Advanced repeats them here.
+        if self.advanced() {
+            self.output_buttons(ui);
+        }
         self.broadcast_routes(ui);
         self.streaming_controls(ui);
         if ui.button("Stream title & thumbnail").clicked() {
             self.broadcast_window = 1;
         }
-        if ui.button("Quality & recording").clicked() {
+        if self.advanced() && ui.button("Quality & recording").clicked() {
             self.broadcast_window = 2;
         }
         ui.checkbox(&mut self.stream_config.record, "Record while streaming");
@@ -2516,7 +2713,7 @@ impl Studio {
             note(ui, if self.project.preferences.multitrack_recording{"Records the selected canvas with six separate audio tracks."}else{"Records the selected canvas and Track 1 mix."});
         }
         if !self.recording_error.is_empty() {
-            ui.colored_label(Color32::LIGHT_RED, &self.recording_error);
+            self.error_line(ui, self.recording_error.clone());
         }
         if let Some(path) = self.last_recording.clone() {
             if ui
@@ -2538,7 +2735,7 @@ impl Studio {
         }
         ui.collapsing("Recording details", |ui| {
             ui.label(format!("Folder: {}", self.record_folder));
-            note(ui, "Change encoder, folder, size and FPS in Settings > Canvases & recording. Missing audio is recorded as silence; the mixer shows what is connected.");
+            note(ui, "Change encoder, folder, size and FPS in Settings > Video & recording. Missing audio is recorded as silence; the mixer shows what is connected.");
             let details = view.as_ref().map_or(self.recording_details.as_str(), |v| v.details.as_str());
             if !details.is_empty() { ui.separator(); ui.label(details); }
         });
@@ -2845,7 +3042,7 @@ impl Studio {
                     ui.add_space(16.);
                     note(
                         ui,
-                        if self.accounts.iter().any(|a|a.connected) || self.kick_account.connected {"Chat is connected. Messages will appear here."}else{"Connect your accounts in Settings > Connections. Chat starts automatically."},
+                        if self.accounts.iter().any(|a|a.connected) || self.kick_account.connected {"Chat is connected. Messages will appear here."}else{"Connect your accounts in Settings > Accounts. Chat starts automatically."},
                     );
                     if !self.accounts.iter().any(|a| a.connected || a.busy) && !self.kick_account.connected && !self.kick_account.busy && ui.button("Connect accounts").clicked() {
                         self.page = Page::Settings;
@@ -2930,7 +3127,7 @@ impl Studio {
                 self.browser_chat.post_status = if account.moderate(action) {
                     format!("{}: working…", platform.name())
                 } else {
-                    format!("Connect {} in Settings > Connections to moderate.", platform.name())
+                    format!("Connect {} in Settings > Accounts to moderate.", platform.name())
                 };
             }
             Some(ChatAction::Hide(platform, id)) => self.chat.remove(platform, &id),
@@ -3107,7 +3304,7 @@ impl Studio {
             .map(|(i, c)| (i, c.id, c.name.clone()))
             .collect();
         if candidates.is_empty() {
-            ui.label("Add a canvas in Settings > Canvases & recording.");
+            ui.label("Add a canvas in Settings > Video & recording.");
             return;
         }
         let slot = usize::from(vertical);
@@ -3253,7 +3450,7 @@ impl Studio {
             ui.painter().text(
                 target.left_top() + Vec2::new(14., 14.),
                 egui::Align2::LEFT_TOP,
-                "CANVAS PREVIEW",
+                "PREVIEW",
                 egui::FontId::proportional(12.),
                 Color32::WHITE,
             );
@@ -3389,8 +3586,13 @@ impl Studio {
             style.overlay.selection_stroke_width = 2.;
             style.overlay.surface_fade_opacity = 0.85;
             dock.translations.tab_context_menu.eject_button = "Float panel".into();
+            // Simple mode keeps panels where they are; Advanced lets them be dragged, closed and floated.
+            let advanced = self.advanced();
             egui_dock::DockArea::new(&mut dock)
                 .style(style)
+                .draggable_tabs(advanced)
+                .show_close_buttons(advanced)
+                .tab_context_menus(advanced)
                 .window_bounds(ui.max_rect())
                 .show_leaf_close_all_buttons(false)
                 .show_leaf_collapse_buttons(false)
@@ -3459,12 +3661,13 @@ impl Studio {
     fn mixer_panel(&mut self, ui: &mut egui::Ui) {
         let view = self.audio.view();
         let scene_id = self.project.canvases[self.canvas].scene;
+        let advanced = self.advanced();
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Monitoring & sync…").clicked(){self.tools.audio=true;}
-            ui.strong(format!("Audio · {}",self.project.scene(scene_id).map(|s|s.name.as_str()).unwrap_or("Scene")));
+            if advanced && ui.button("Monitoring & sync…").clicked(){self.tools.audio=true;}
+            ui.strong(format!("Sound · {}",self.project.scene(scene_id).map(|s|s.name.as_str()).unwrap_or("Scene")));
             ui.menu_button("Options",|ui| {
         if !self.project.audio.iter().any(|c| c.name == "Desktop audio")
-            && ui.button("Add Desktop audio").clicked()
+            && ui.button("Add computer sound").on_hover_text("Everything playing on this computer").clicked()
         {
             let id = self.project.id();
             self.project.audio.push(auroracast_core::AudioChannel { monitor_only:false,
@@ -3482,18 +3685,18 @@ impl Studio {
             self.audio.refresh();
         }
                 if ui.button("Refresh inputs").clicked(){self.audio.refresh();}
-        ui.collapsing("Advanced audio",|ui|{
+        if advanced { ui.collapsing("Advanced audio",|ui|{
             let old=self.project.preferences.monitor_device.clone();
             egui::ComboBox::from_id_salt("monitor_device").selected_text(view.devices.iter().find(|d|d.target==old).map(|d|d.label.as_str()).unwrap_or(if old==crate::audio::DEFAULT_MONITOR{"System default output"}else{"Monitoring off"})).show_ui(ui,|ui|{ui.selectable_value(&mut self.project.preferences.monitor_device,String::new(),"Monitoring off");ui.selectable_value(&mut self.project.preferences.monitor_device,crate::audio::DEFAULT_MONITOR.into(),"System default output");for d in view.devices.iter().filter(|d|d.kind=="Audio/Sink"){ui.selectable_value(&mut self.project.preferences.monitor_device,d.target.clone(),&d.label);}});
             ui.small(&view.monitor_status);ui.small("Use headphones. Monitoring a desktop mix back to the same output can create feedback.");
             if ui.checkbox(&mut self.project.preferences.multitrack_recording,"Record six separate audio tracks in standalone MKV").changed()||old!=self.project.preferences.monitor_device{self.changed();}
             if ui.button("Separate game, microphone and music tracks").clicked(){for c in &mut self.project.audio{c.tracks=[false;6];c.tracks[0]=true;let t=if c.id==crate::game_audio::CHANNEL{1}else if c.name.to_lowercase().contains("mic"){2}else{3};c.tracks[t]=true;}self.project.preferences.multitrack_recording=true;self.changed();}
             ui.small("Track 1 is the stream mix. Route mic/game to other tracks below. The shared stream recording remains Track 1 only.");
-        });
+        }); }
                 ui.small("Volume and mute are saved separately for each scene.");
             });
         });
-        ui.horizontal(|ui| {
+        if advanced { ui.horizontal(|ui| {
             let old = self.project.preferences.workspace.vertical_audio;
             ui.selectable_value(
                 &mut self.project.preferences.workspace.vertical_audio,
@@ -3508,7 +3711,7 @@ impl Studio {
             if old != self.project.preferences.workspace.vertical_audio {
                 self.dirty = true;
             }
-        });
+        }); }
         let vertical_audio = self.project.preferences.workspace.vertical_audio;
         self.audio
             .monitor_device(&self.project.preferences.monitor_device);
@@ -3537,6 +3740,15 @@ impl Studio {
                 alert_members.push(channel.id);
             } else {
                 scene_channels.push(channel);
+            }
+        }
+        if scene_channels.is_empty() {
+            note(ui, "Nothing to hear yet. Add your microphone or your computer's sound.");
+            if ui.add(self.primary_button("Add computer sound")).clicked() {
+                let id = self.project.id();
+                self.project.audio.push(auroracast_core::AudioChannel { monitor_only: false, id, name: "Desktop audio".into(), gain_db: 0., muted: false, tracks: [true, false, false, false, false, false], delay_ms: 0, monitor: false, noise_suppression: Default::default(), media_source: None });
+                self.changed();
+                self.audio.refresh();
             }
         }
         let shown: Vec<Id> = scene_channels.iter().map(|c| c.id).collect();
@@ -3591,7 +3803,7 @@ impl Studio {
                             response.on_hover_text("Drag to reorder");
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.small(if gain <= -60. { "−∞ dB".into() } else {format!("{gain:.1} dB")});
+                            ui.small(if gain <= -60. { if advanced { "−∞ dB".into() } else { "Off".into() } } else if advanced {format!("{gain:.1} dB")} else {format!("{:.0}%", 10f32.powf(gain / 20.) * 100.)});
                         });
                     });
                     if !vertical_audio {crate::material::meter(ui,levels,false);}
@@ -3661,7 +3873,7 @@ impl Studio {
                         changed|=old!=channel.noise_suppression;
                         });
                     }
-                    ui.collapsing("Advanced audio & tracks", |ui| {
+                    if advanced { ui.collapsing("Advanced audio & tracks", |ui| {
                         changed |= ui.add(egui::DragValue::new(&mut channel.delay_ms).range(0..=2000).suffix(" ms audio delay")).changed();
                         ui.small("Delay this audio to match a late camera, e.g. DroidCam. Applies to recording and streaming.");
                         if ui.checkbox(&mut channel.monitor,"Listen on monitoring output").changed(){if !channel.monitor{channel.monitor_only=false;}changed=true;}
@@ -3671,7 +3883,7 @@ impl Studio {
                                 changed |= ui.checkbox(route, format!("{}", i + 1)).changed();
                             }
                         });
-                    });
+                    }); }
                     });
                     });
                 });
@@ -3816,78 +4028,131 @@ impl Studio {
                 ui.heading("Settings");
                 ui.add_space(14.);
                 for (p, label) in [
-                    (Settings::Appearance, "Appearance & chat"),
-                    (Settings::Accounts, "Connections"),
-                    (Settings::Donations, "Donations & PayPal setup"),
-                    (Settings::Video, "Canvases & recording"),
-                    (Settings::Audio, "Audio routing"),
-                    (Settings::Backups, "Backups"),
-                    (Settings::Profiles, "Profiles"),
+                    (Settings::Accounts, "Accounts"),
+                    (Settings::Video, "Video & recording"),
+                    (Settings::Audio, "Sound"),
+                    (Settings::Appearance, "Look & feel"),
+                    (Settings::Advanced, "Advanced"),
                 ] {
-                    if ui
-                        .add_sized(
-                            [ui.available_width(), 40.],
-                            egui::Button::new(label).selected(self.settings == p),
-                        )
-                        .clicked()
-                    {
+                    let selected = self.settings == p || (p == Settings::Accounts && self.settings == Settings::Donations);
+                    if ui.add_sized([ui.available_width(), 40.], egui::Button::new(label).selected(selected)).clicked() {
                         self.settings = p;
                     }
                 }
             });
+        let live = self.live_stream.is_some() || self.live_recording.is_some();
         egui::CentralPanel::default().show(ctx,|ui|{crate::appearance::glass(ui,egui::CornerRadius::ZERO);egui::ScrollArea::vertical().show(ui,|ui|{
             ui.add_space(16.);let mut changed=false;
+            if matches!(self.settings, Settings::Accounts | Settings::Donations) {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.settings, Settings::Accounts, "Streaming platforms");
+                    ui.selectable_value(&mut self.settings, Settings::Donations, "Donations");
+                });
+                ui.add_space(8.);
+            }
             match self.settings{
-                Settings::Appearance=>{ui.heading("Make it yours");note(ui,"Customize your workspace and unified chat.");ui.add_space(18.);card().show(ui,|ui|{
+                Settings::Appearance=>{ui.heading("Look & feel");note(ui,"Colors, background and chat text.");ui.add_space(18.);card().show(ui,|ui|{
                     changed|=ui.checkbox(&mut self.project.preferences.workspace.animations,"Smooth panel and layer movement").changed();ui.small("Short, on-demand animations; disable for reduced motion.");
                     ui.strong("Accent color");ui.horizontal(|ui|{for color in [[141,101,255],[66,148,255],[33,196,214],[238,99,157],[255,170,71]]{if ui.add(egui::Button::new("   ").fill(Color32::from_rgb(color[0],color[1],color[2]))).clicked(){self.project.preferences.accent=color;changed=true;}}changed|=ui.color_edit_button_srgb(&mut self.project.preferences.accent).changed();});ui.add_space(12.);ui.strong("Chat");changed|=ui.add(egui::Slider::new(&mut self.project.preferences.chat_font_size,10.0..=28.0).text("Text size")).changed();changed|=ui.checkbox(&mut self.project.preferences.timestamps_24h,"24-hour timestamps").changed();
                 });changed|=self.look_settings(ui);},
                 Settings::Accounts=>{ self.connections_settings(ui); },
-                Settings::Backups=>{ changed |= self.backups_settings(ui); },
-                Settings::Profiles=>{ self.profiles_settings(ui); },
+                Settings::Advanced=>{ changed |= self.advanced_settings(ui); },
                 Settings::Donations=>{ let (edited, preview) = crate::donations::ui(ui, &mut self.project.preferences.donations, &mut self.donations, &mut self.kofi); changed |= edited; if edited {self.donation_save_due=Some(Instant::now());}
                 if let Some(text) = preview { self.active_alert=Some((text,Instant::now()+Duration::from_secs(8))); self.page=Page::Studio; } },
                 Settings::Video=>{
-                    ui.heading("Canvases & recording");
-                    ui.horizontal_wrapped(|ui|{for vertical in [false,true]{if ui.button(if vertical{"Add portrait canvas"}else{"Add landscape canvas"}).clicked(){let id=self.project.id();let original=self.project.canvases[self.canvas].scene;let mut copy=self.project.scene(original).unwrap().clone();let scene=self.project.id();copy.id=scene;self.project.scenes.push(copy);self.project.preferences.workspace.scenes.insert(id,vec![scene]);self.project.canvases.push(Canvas{id,name:format!("Canvas {}",self.project.canvases.len()+1),width:if vertical{1080}else{1920},height:if vertical{1920}else{1080},fps:60,scene});self.preview_canvases[usize::from(vertical)]=Some(id);changed=true;}}});
-                    note(ui,"Choose a canvas in the preview before starting a recording. Its size and FPS stay fixed until you stop.");
+                    ui.heading("Video & recording");
+                    if live { note(ui, "Stop streaming and recording to change these."); }
                     ui.add_space(16.);
-                    ui.add_enabled_ui(self.live_recording.is_none() && self.live_stream.is_none(), |ui| {
-                        for canvas in &mut self.project.canvases {
-                            ui.push_id(canvas.id,|ui|{card().show(ui,|ui|{
-                                changed|=ui.text_edit_singleline(&mut canvas.name).changed();
-                                ui.horizontal(|ui|{
-                                    ui.label("Width"); changed|=ui.add(egui::DragValue::new(&mut canvas.width).range(16..=4096).speed(2.)).changed();
-                                    ui.label("Height"); changed|=ui.add(egui::DragValue::new(&mut canvas.height).range(16..=4096).speed(2.)).changed();
-                                    ui.label("FPS"); changed|=ui.add(egui::DragValue::new(&mut canvas.fps).range(1..=120)).changed();
-                                });
-                            });}); ui.add_space(10.);
+                    ui.add_enabled_ui(!live, |ui| {
+                        if self.project.canvases.len() > 1 {
+                            card().show(ui,|ui|{
+                                ui.set_width(ui.available_width());
+                                if ui.checkbox(&mut self.project.preferences.workspace.vertical_video, "Also make a vertical video (TikTok, YouTube Shorts, Reels)").changed() {
+                                    self.sync_vertical_panel();
+                                    changed = true;
+                                }
+                                note(ui, "Shows a second, phone-shaped video beside your main one. Leave it off if you only stream to one place.");
+                            });
+                            ui.add_space(10.);
                         }
                         card().show(ui,|ui|{
-                            ui.strong("Recording folder");
+                            ui.set_width(ui.available_width());
+                            ui.strong("Where recordings are saved");
                             if ui.text_edit_singleline(&mut self.record_folder).changed() {
                                 self.project.preferences.recording_directory = self.record_folder.clone(); changed = true;
                             }
-                            ui.add_space(10.);
-                            ui.strong("Output encoder");
-                            use auroracast_core::RecordingEncoder;
-                            egui::ComboBox::from_id_salt("recording-encoder")
-                                .selected_text(match self.project.preferences.recording_encoder {
-                                    RecordingEncoder::Auto => "Auto (prefer GPU)",
-                                    RecordingEncoder::Software => "Software",
-                                })
-                                .show_ui(ui, |ui| {
-                                    changed |= ui.selectable_value(&mut self.project.preferences.recording_encoder, RecordingEncoder::Auto, "Auto (prefer GPU)").changed();
-                                    changed |= ui.selectable_value(&mut self.project.preferences.recording_encoder, RecordingEncoder::Software, "Software").changed();
-                                });
-                            note(ui,"Auto checks available GPU encoders before recording or streaming and uses software if none work. Broadcast shows the chosen encoder; Recording details explains any fallback. MKV video includes the Track 1 audio mix.");
+                            if self.advanced() {
+                                ui.add_space(10.);
+                                ui.strong("Output encoder");
+                                use auroracast_core::RecordingEncoder;
+                                egui::ComboBox::from_id_salt("recording-encoder")
+                                    .selected_text(match self.project.preferences.recording_encoder {
+                                        RecordingEncoder::Auto => "Auto (prefer GPU)",
+                                        RecordingEncoder::Software => "Software",
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        changed |= ui.selectable_value(&mut self.project.preferences.recording_encoder, RecordingEncoder::Auto, "Auto (prefer GPU)").changed();
+                                        changed |= ui.selectable_value(&mut self.project.preferences.recording_encoder, RecordingEncoder::Software, "Software").changed();
+                                    });
+                                note(ui,"Auto checks available GPU encoders before recording or streaming and uses software if none work. The Stream panel shows the chosen encoder; Recording details explains any fallback. MKV video includes the Track 1 audio mix.");
+                            }
                         });
+                        if self.advanced() {
+                            ui.add_space(16.);
+                            ui.strong("Videos (canvases)");
+                            note(ui,"Choose a video in the preview before starting a recording. Its size and FPS stay fixed until you stop.");
+                            for canvas in &mut self.project.canvases {
+                                ui.push_id(canvas.id,|ui|{card().show(ui,|ui|{
+                                    changed|=ui.text_edit_singleline(&mut canvas.name).changed();
+                                    ui.horizontal(|ui|{
+                                        ui.label("Width"); changed|=ui.add(egui::DragValue::new(&mut canvas.width).range(16..=4096).speed(2.)).changed();
+                                        ui.label("Height"); changed|=ui.add(egui::DragValue::new(&mut canvas.height).range(16..=4096).speed(2.)).changed();
+                                        ui.label("FPS"); changed|=ui.add(egui::DragValue::new(&mut canvas.fps).range(1..=120)).changed();
+                                    });
+                                });}); ui.add_space(10.);
+                            }
+                            ui.horizontal_wrapped(|ui|{for vertical in [false,true]{if ui.button(if vertical{"Add portrait video"}else{"Add landscape video"}).clicked(){let id=self.project.id();let original=self.project.canvases[self.canvas].scene;let mut copy=self.project.scene(original).unwrap().clone();let scene=self.project.id();copy.id=scene;self.project.scenes.push(copy);self.project.preferences.workspace.scenes.insert(id,vec![scene]);self.project.canvases.push(Canvas{id,name:format!("Video {}",self.project.canvases.len()+1),width:if vertical{1080}else{1920},height:if vertical{1920}else{1080},fps:60,scene});self.preview_canvases[usize::from(vertical)]=Some(id);changed=true;}}});
+                        }
                     });
                 },
-                Settings::Audio=>{ui.heading("Audio routing");note(ui,"Assign each channel to up to six independent output tracks.");ui.add_space(18.);card().show(ui,|ui|{egui::Grid::new("routing").striped(true).spacing([24.,16.]).show(ui,|ui|{ui.strong("Source");for n in 1..=6{ui.strong(format!("Track {n}"));}ui.end_row();for channel in &mut self.project.audio{ui.label(&channel.name);for route in &mut channel.tracks{changed|=ui.checkbox(route,"").changed();}ui.end_row();}});ui.add_space(16.);note(ui,"Game audio follows automatic capture. Choose other inputs in Audio Mixer. Live video recordings use Track 1, including volume and mute. Enable separate tracks in Advanced audio to include Tracks 2–6 in standalone recordings. Monitoring is opt-in in the mixer.");});},
+                Settings::Audio=>{
+                    ui.heading("Sound");ui.add_space(18.);
+                    let view=self.audio.view();
+                    card().show(ui,|ui|{
+                        ui.set_width(ui.available_width());
+                        ui.strong("Hear yourself");
+                        note(ui,"Pick your headphones to hear what goes into the stream. Use headphones, not speakers, or viewers will hear an echo.");
+                        let before=self.project.preferences.monitor_device.clone();
+                        egui::ComboBox::from_id_salt("settings-headphones").selected_text(view.devices.iter().find(|d|d.target==before).map_or("Off",|d|d.label.as_str())).show_ui(ui,|ui|{ui.selectable_value(&mut self.project.preferences.monitor_device,String::new(),"Off");for d in view.devices.iter().filter(|d|d.kind=="Audio/Sink"){ui.selectable_value(&mut self.project.preferences.monitor_device,d.target.clone(),&d.label);}});
+                        if before!=self.project.preferences.monitor_device{self.audio.monitor_device(&self.project.preferences.monitor_device);changed=true;}
+                        if ui.button("Headphones & audio sync…").on_hover_text("Choose what you hear, and delay sound that arrives before the picture").clicked(){self.tools.audio=true;}
+                    });
+                    if self.advanced() {
+                        ui.add_space(16.);
+                        card().show(ui,|ui|{ui.strong("Audio tracks");note(ui,"Assign each channel to up to six independent output tracks.");egui::Grid::new("routing").striped(true).spacing([24.,16.]).show(ui,|ui|{ui.strong("Source");for n in 1..=6{ui.strong(format!("Track {n}"));}ui.end_row();for channel in &mut self.project.audio{ui.label(&channel.name);for route in &mut channel.tracks{changed|=ui.checkbox(route,"").changed();}ui.end_row();}});ui.add_space(16.);note(ui,"Game audio follows automatic capture. Choose other inputs in Sound. Live video recordings use Track 1, including volume and mute. Enable separate tracks in Advanced audio to include Tracks 2–6 in standalone recordings. Monitoring is opt-in in the mixer.");});
+                    }
+                },
             }
 if changed{self.changed();}
         });});
+    }
+    /// Settings > Advanced: the switch for advanced options, then backups, profiles and imports.
+    fn advanced_settings(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut changed = false;
+        ui.heading("Advanced");
+        ui.add_space(12.);
+        card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            if ui.checkbox(&mut self.project.preferences.workspace.advanced, "Show advanced options").changed() {
+                changed = true;
+            }
+            note(ui, "Adds audio tracks and decibels, encoder and video sizes, rearrangeable panels, capture details and troubleshooting tools. Leave it off to keep Rosorah simple.");
+        });
+        ui.add_space(20.);
+        changed |= self.backups_settings(ui);
+        ui.add_space(20.);
+        self.profiles_settings(ui);
+        changed
     }
     fn alerts(&mut self, ctx: &egui::Context) {
         if let Some((id,title))=self.rewards_ui.ui(ctx,&mut self.accounts[0]){self.automation_editor.guide.for_reward(&id,&title);}
@@ -4086,7 +4351,7 @@ if changed{self.changed();}
         if let Some(id)=self.project.sources.iter().find(|s|matches!(&s.kind,SourceKind::Widget(w) if w.kind==widgets::Kind::AlertBox)).map(|s|s.id){
             self.captures.widgets.target_alert(id,text,seconds,media);
         }else{
-            self.automation_queue.log("Visual alert skipped: add Alerts from Layers > + Add layer".into());
+            self.automation_queue.log("Visual alert skipped: add Alerts from In this scene > + Add".into());
         }
     }
     fn run_actions(&mut self, actions: Vec<Action>) {
@@ -4209,6 +4474,26 @@ impl eframe::App for Studio {
             self.appearance_picker = None;
         }
         self.appearance.frame(ctx, &self.project.preferences.workspace.appearance);
+        if self.ui_frames == 1 && !self.advanced() {
+            self.sync_vertical_panel();
+        }
+        self.browser_chat.runtime_wanted = self.project.sources.iter().any(|s| matches!(s.kind, SourceKind::Browser { .. }));
+        if let Some(rx) = &self.recovering
+            && let Ok(results) = rx.try_recv()
+        {
+            self.recovering = None;
+            let saved: Vec<_> = results.iter().filter_map(|r| r.as_ref().ok()).collect();
+            if let Some(path) = saved.last() {
+                self.last_recording = Some((*path).clone());
+                self.tell(if saved.len() == 1 {
+                    format!("We recovered your last recording: {}", path.display())
+                } else {
+                    format!("We recovered {} unfinished recordings in {}", saved.len(), self.record_folder)
+                });
+            } else if let Some(Err(e)) = results.first() {
+                self.message = format!("An unfinished recording couldn't be recovered: {e}");
+            }
+        }
         self.tick_transition(ctx);
         let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
         let preview_active = !minimized && (self.automation_editor.preview_open ||
@@ -4431,7 +4716,7 @@ impl eframe::App for Studio {
                 _ => self.accounts[0].post(id.clone(), text),
             };
             if !posted {
-                self.browser_chat.finish_post(serde_json::json!({"type":"post_result","platform":request["platform"],"request":id,"ok":false,"text":"Connect this account in Settings > Connections. Your draft was kept."}));
+                self.browser_chat.finish_post(serde_json::json!({"type":"post_result","platform":request["platform"],"request":id,"ok":false,"text":"Connect this account in Settings > Accounts. Your draft was kept."}));
             }
         }
         for account in self.accounts.iter_mut().chain(std::iter::once(&mut self.kick_account)) {
@@ -4718,6 +5003,9 @@ impl eframe::App for Studio {
 
         self.widget_editor_window(ctx);
         self.readiness_window(ctx);
+        self.go_live_window(ctx);
+        self.report_window(ctx);
+        self.toast_ui(ctx);
         if self.screenshot.is_some() && !self.screenshot_requested && self.ui_frames >= 4 && !self.appearance.busy() {
             self.screenshot_requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
@@ -4842,6 +5130,9 @@ impl egui_dock::TabViewer for StudioTabs<'_> {
         [false, false]
     }
     fn on_tab_button(&mut self, tab: &mut Panel, response: &egui::Response) {
+        if !self.0.advanced() {
+            return;
+        }
         if response.dragged() && *tab != Panel::Preview {
             self.0.dragging_panel = Some(*tab);
         }
@@ -5000,6 +5291,10 @@ include!("connections.rs");
 include!("appearance_settings.rs");
 
 include!("transitions.rs");
+
+include!("go_live.rs");
+
+include!("first_run.rs");
 
 include!("utility_windows.rs");
 include!("loading.rs");

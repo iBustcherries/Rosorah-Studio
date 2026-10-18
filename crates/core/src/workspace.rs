@@ -14,6 +14,10 @@ pub struct WorkspaceSettings {
     /// Kept separate from the Twitch/YouTube pair so existing projects keep loading.
     pub kick_chat: bool,
     pub appearance: Appearance,
+    /// Shows every option (tracks, docking, encoders…). Off keeps the studio simple.
+    pub advanced: bool,
+    /// Shows the second (vertical) video in the studio.
+    pub vertical_video: bool,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemeMode {
@@ -90,6 +94,8 @@ impl Default for WorkspaceSettings {
             chat_destinations: [true, true],
             kick_chat: true,
             appearance: Appearance::default(),
+            advanced: false,
+            vertical_video: true,
         }
     }
 }

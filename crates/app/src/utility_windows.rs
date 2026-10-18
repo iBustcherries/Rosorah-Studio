@@ -13,7 +13,7 @@ impl Studio {
  }
  fn project_recording_window(&mut self,ctx:&egui::Context){if !self.tools.open{return}let mut open=true;egui::Window::new("Project & recording tools").open(&mut open).default_width(650.).default_height(550.).show(ctx,|ui|{egui::ScrollArea::vertical().show(ui,|ui|{
   ui.heading("Portable project");ui.label("Bundle scenes, layouts, automations and local image/video/audio files. Account sign-ins and stream keys stay on this computer. Browser-source URLs remain in the project.");
-  ui.label("OBS and Firebot imports are in Settings > Backups.");ui.separator();
+  ui.label("OBS and Firebot imports are in Settings > Advanced.");ui.separator();
   ui.label("File path (optional; leave blank to use the file picker)");ui.text_edit_singleline(&mut self.tools.file);
   ui.label("Import destination folder (optional)");ui.text_edit_singleline(&mut self.tools.folder);
   ui.add_enabled_ui(self.tools.job.is_none()&&self.live_stream.is_none()&&self.live_recording.is_none(),|ui|{ui.horizontal(|ui|{
@@ -43,18 +43,6 @@ impl Studio {
   if let Some(stream)=&self.live_stream{ui.separator();for d in stream.destinations(){ui.label(format!("{}: {} · connection attempts {}",d.name,d.phase.label(),d.attempts));if !d.detail.is_empty(){ui.small(&d.detail);}}}
   ui.separator();ui.label("Missed render deadlines indicate compositor/scheduling pressure. Growing encoder backlog indicates output processing is falling behind. Destination reconnects indicate an output/network problem. GPU busy includes other apps and games.");
  });self.tools.performance=open;}
- fn setup_window(&mut self,ctx:&egui::Context){let Some(mut step)=self.tools.guide else{return};let mut open=true;egui::Window::new("Welcome to Rosorah").open(&mut open).default_width(520.).show(ctx,|ui|{
-  let titles=["Connect your accounts","Choose what to capture","Check your microphone","Add a camera (optional)","Make a local test recording"];
-  ui.heading(format!("{} / 5 · {}",step+1,titles[step]));
-  match step{
-   0=>{ui.label("Connect once to use broadcast controls, chat and activities throughout Rosorah.");for account in &self.accounts{ui.label(format!("{} · {}",account.platform.name(),if account.connected{"Connected"}else{"Not connected"}));}if ui.button("Open account connections").clicked(){self.page=Page::Settings;self.settings=Settings::Accounts;}},
-   1=>{ui.label("Automatic game capture watches supported game renderers. Launch a game and check the canvas. For a screen/window source, choose it from Add layer.");if ui.button("Open studio").clicked(){self.page=Page::Studio;}},
-   2=>{ui.label("In the Mixer, choose your microphone input and speak. Confirm the meter moves, then set a comfortable level.");if ui.button("Open audio settings").clicked(){self.page=Page::Settings;self.settings=Settings::Audio;}if ui.button("Monitoring & sync").clicked(){self.tools.audio=true;}},
-   3=>{ui.label("Use Layers > Add layer > Camera, then choose Webcam / USB or DroidCam in the window that opens. Check the preview and use automatic format detection where available. You can skip this step.");if ui.button("Open studio").clicked(){self.page=Page::Studio;}},
-   _=>{ui.label("Record ten seconds of the current canvas and audio. This stays on your computer and does not start a stream.");if ui.add_enabled(self.live_recording.is_none()&&self.live_stream.is_none(),egui::Button::new("Record 10-second test")).clicked(){self.start_recording();self.tools.test_pending=self.live_recording.is_some();}if self.tools.test_pending||self.tools.test_until.is_some(){ui.spinner();ui.label("Preparing / recording the local test…");}if !self.tools.recording_file.is_empty()&&std::path::Path::new(&self.tools.recording_file).is_file()&&ui.button("Play test recording").clicked(){if let Ok(mut child)=crate::desktop::open(&self.tools.recording_file){std::thread::spawn(move||{let _=child.wait();});}}ui.label(&self.tools.status);}
-  }
-  ui.separator();ui.horizontal(|ui|{if ui.add_enabled(step>0,egui::Button::new("Back")).clicked(){step-=1;}if step<4&&ui.button("Next").clicked(){step+=1;}else if step==4&&ui.button("Finish setup").clicked(){self.tools.guide=None;}});
- });if !open{self.tools.guide=None;}else if self.tools.guide.is_some(){self.tools.guide=Some(step);}}
 }
 
 impl Studio{

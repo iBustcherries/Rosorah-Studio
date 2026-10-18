@@ -58,7 +58,7 @@ cloned.insert(old,id);id};layer.source=id;}
  fn layer_tools_windows(&mut self,ctx:&egui::Context){
   self.layer_rename_window(ctx);
   self.layer_properties_window(ctx);
-  if let Some((scene,i))=self.pending_layer_delete.take(){if let Some(s)=self.project.scenes.iter_mut().find(|s|s.id==scene){if s.layers.get(i).is_some_and(|l|!l.locked){s.layers.remove(i);self.selections.remove(&scene);self.layer=None;self.crop_layer=None;self.changed();}}}
+  if let Some((scene,i))=self.pending_layer_delete.take(){if let Some(s)=self.project.scenes.iter_mut().find(|s|s.id==scene){if s.layers.get(i).is_some_and(|l|!l.locked){let source=s.layers.remove(i).source;self.selections.remove(&scene);self.layer=None;self.crop_layer=None;self.changed();let name=self.project.source(source).map(|s|s.name.clone()).unwrap_or_default();self.deleted(format!("Removed {name} from this scene"));}}}
   let Some((scene,index))=self.crop_layer else{return};let Some(si)=self.project.scenes.iter().position(|s|s.id==scene)else{self.crop_layer=None;return};let Some(layer)=self.project.scenes[si].layers.get(index).cloned()else{self.crop_layer=None;return};
   let size=self.captures.reader().latest().into_iter().find(|(id,_)|*id==layer.source).and_then(|(_,frame)|frame).map(|f|[f.width as f32,f.height as f32]).or_else(||match &self.project.source(layer.source)?.kind{SourceKind::Image{path}=>image::image_dimensions(path).ok().map(|(w,h)|[w as f32,h as f32]),_=>None});
   let mut crop=layer.crop;let mut open=true;let mut changed=false;

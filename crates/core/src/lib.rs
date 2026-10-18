@@ -765,7 +765,7 @@ pub struct BackupPolicy {
 }
 impl Default for BackupPolicy {
     fn default() -> Self {
-        Self { hourly: false, on_close: true, keep: 24, restore_on_start: true }
+        Self { hourly: true, on_close: true, keep: 24, restore_on_start: true }
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -909,7 +909,7 @@ impl Default for Project {
             canvases: vec![
                 Canvas {
                     id: 8,
-                    name: "Canvas 1".into(),
+                    name: "Main video".into(),
                     width: 1920,
                     height: 1080,
                     fps: 60,
@@ -917,7 +917,7 @@ impl Default for Project {
                 },
                 Canvas {
                     id: 9,
-                    name: "Canvas 2".into(),
+                    name: "Vertical video".into(),
                     width: 1080,
                     height: 1920,
                     fps: 60,

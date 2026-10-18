@@ -11,7 +11,7 @@ impl RewardsUi {
   let mut open=true;
   egui::Window::new("Twitch channel-point rewards").open(&mut open).default_width(640.).anchor(egui::Align2::CENTER_CENTER,egui::Vec2::ZERO).show(ctx,|ui|{
    ui.label("Manage rewards and connect them to alerts. Changes are saved to Twitch only when you click Save.");
-   if !a.connected{ui.label(&a.status);ui.label("Connect or approve Twitch in Settings > Connections. Your existing rewards are unchanged.");return;}
+   if !a.connected{ui.label(&a.status);ui.label("Connect or approve Twitch in Settings > Accounts. Your existing rewards are unchanged.");return;}
    ui.small("Twitch only allows this app to edit rewards it created. Other rewards can still trigger automations.");
    ui.add_enabled_ui(!a.reward_busy,|ui|{
     ui.horizontal(|ui|{if ui.button("Grant rewards access…").clicked(){a.grant_rewards();}if ui.button("Refresh").clicked(){self.refresh(a);}if ui.button("+ New reward").clicked(){self.id.clear();self.draft=Some(json!({"title":"","prompt":"","cost":100,"background_color":"#8B70F0","is_enabled":true,"is_user_input_required":false,"is_max_per_stream_enabled":false,"max_per_stream":1,"is_max_per_user_per_stream_enabled":false,"max_per_user_per_stream":1,"is_global_cooldown_enabled":false,"global_cooldown_seconds":60,"should_redemptions_skip_request_queue":false}));}});

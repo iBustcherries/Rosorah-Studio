@@ -547,12 +547,12 @@ fn run(
             Ok(next) => next,
             Err(_) if interactive => oauth::login(&client, &config, platform, tx, cancel)?,
             Err(e) if revoked(&e) => {
-                anyhow::bail!("Sign-in expired. Reconnect this account in Settings > Connections.")
+                anyhow::bail!("Sign-in expired. Reconnect this account in Settings > Accounts.")
             }
             Err(e) => return Err(e.context("Couldn't renew the saved sign-in; it is kept and tried again next time")),
         },
         None if interactive => oauth::login(&client, &config, platform, tx, cancel)?,
-        None => anyhow::bail!("Saved account unavailable. Reconnect in Settings > Connections."),
+        None => anyhow::bail!("Saved account unavailable. Reconnect in Settings > Accounts."),
     };
     if had_saved
         && interactive
@@ -591,7 +591,7 @@ fn run(
                     events.reset();
                     session.reset_chat();
                 }
-                Err(error) if revoked(&error) => {anyhow::bail!("Authorization expired or was revoked. Click Reconnect in Settings > Connections.");}
+                Err(error) if revoked(&error) => {anyhow::bail!("Authorization expired or was revoked. Click Reconnect in Settings > Accounts.");}
                 Err(_) => {
                     refresh_retry = Instant::now() + Duration::from_secs(30);
                     let _ = tx.try_send(Event::Status("Account refresh failed; retrying in 30 seconds. Sign in again if it persists.".into()));
@@ -615,7 +615,7 @@ fn run(
                 let _ = tx.send(Event::Moderated(text));
             }
             Ok(Command::Rewards(op))=>{
-                let result=if platform==Platform::Twitch{rewards::run(op,&client,&config,&token,session.user_id()).map_err(|e|format!("{e}. If permission is missing, reconnect Twitch in Settings > Connections."))}else{Err("Rewards require Twitch".into())};
+                let result=if platform==Platform::Twitch{rewards::run(op,&client,&config,&token,session.user_id()).map_err(|e|format!("{e}. If permission is missing, reconnect Twitch in Settings > Accounts."))}else{Err("Rewards require Twitch".into())};
                 let _=tx.send(Event::Rewards(result));
             },
             Ok(command) => {

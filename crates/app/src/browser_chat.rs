@@ -28,6 +28,8 @@ pub struct BrowserChat {
     youtube_owner: String,
     pub open_accounts: bool,
     setup_attempted: bool,
+    /// A browser source needs the runtime even when no account is connected.
+    pub runtime_wanted: bool,
     setup_retry: Retry,
     accounts_connected: bool,
     context: Option<eframe::egui::Context>,
@@ -298,7 +300,7 @@ impl BrowserChat {
         }
         anyhow::ensure!(
             python.is_file(),
-            "Chat is preparing automatically. Check Settings > Connections > Chat troubleshooting if it cannot start."
+            "Chat is preparing automatically. Check Settings > Accounts > Chat troubleshooting if it cannot start."
         );
         let mut command = Command::new(python);
         command.arg(script);
@@ -404,7 +406,7 @@ impl BrowserChat {
             };
             self.setup = None;
         }
-        if self.accounts_connected
+        if (self.accounts_connected || self.runtime_wanted)
             && (!python().is_file()
                 || !venv().join("rosorah-runtime-6.10.2.ready").is_file())
             && !self.setup_attempted
@@ -448,7 +450,7 @@ impl BrowserChat {
                 }
             } else {
                 self.status =
-                    "Chat setup needs attention. Open Settings > Connections > Chat troubleshooting."
+                    "Chat setup needs attention. Open Settings > Accounts > Chat troubleshooting."
                         .into();
                 self.retry.at = Some(Instant::now() + Duration::from_secs(5));
             }

@@ -354,6 +354,15 @@ impl Studio {
                     .map_or("Waiting for a captured game", String::as_str),
             );
         }
+        if !self.advanced() {
+            if crate::launch_hook::needs_permission() {
+                note(ui, "Some games need a one-time permission before Rosorah can show them.");
+                if ui.button("Allow game capture").clicked() {
+                    crate::launch_hook::authorize();
+                }
+            }
+            return;
+        }
         ui.collapsing("Capture details", |ui| {
             ui.label(crate::renderer_capture::installation_status());
             ui.label(crate::launch_hook::status());

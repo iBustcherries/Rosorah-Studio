@@ -30,11 +30,11 @@ impl Panel {
     pub fn title(self) -> &'static str {
         match self {
             Self::Scenes => "Scenes",
-            Self::Sources => "Layers",
-            Self::Preview => "Canvas 1",
-            Self::Vertical => "Canvas 2",
-            Self::Mixer => "Audio mixer",
-            Self::Broadcast => "Broadcast",
+            Self::Sources => "In this scene",
+            Self::Preview => "Main video",
+            Self::Vertical => "Vertical video",
+            Self::Mixer => "Sound",
+            Self::Broadcast => "Stream",
             Self::Chat => "Chat",
             Self::Activity => "Activity",
         }
@@ -297,7 +297,7 @@ impl Workspace {
         }
         self.homes.extend(homes);
     }
-    /// Puts a panel that is not in the dock back at its remembered home, or beside Canvas 1.
+    /// Puts a panel that is not in the dock back at its remembered home, or beside the main video.
     fn dock_home(&mut self, panel: Panel) {
         let main = egui_dock::SurfaceIndex::main();
         match self.homes.get(&panel).cloned() {

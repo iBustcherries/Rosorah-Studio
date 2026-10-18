@@ -78,7 +78,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "Rosorah Studio 0.32.0-preview.7 live streaming\n\n  rosorah-studio                       Open native studio\n  rosorah-studio --project FILE        Open a project\n  rosorah-studio --self-check          Validate GPU composition\n  rosorah-studio --snapshot --output DIR\n  rosorah-studio --render-demo --output DIR [--seconds 3] [--project FILE]\n\nRender-demo records synthetic video, not your screen. Requires ffmpeg with libx264.\nLive recording is available in the Broadcast panel (FFmpeg required). Auto prefers a tested VAAPI/NVENC GPU encoder with software fallback. Existing output files are never overwritten. Twitch and YouTube streaming is available in Broadcast; configure stream keys in Settings > Streaming services."
+            "Rosorah Studio 0.32.0-preview.8 live streaming\n\n  rosorah-studio                       Open native studio\n  rosorah-studio --project FILE        Open a project\n  rosorah-studio --self-check          Validate GPU composition\n  rosorah-studio --snapshot --output DIR\n  rosorah-studio --render-demo --output DIR [--seconds 3] [--project FILE]\n\nRender-demo records synthetic video, not your screen. Requires ffmpeg with libx264.\nRecord and Go live are at the top right (FFmpeg required). Auto prefers a tested VAAPI/NVENC GPU encoder with software fallback. Existing output files are never overwritten. Sign in to Twitch, YouTube and Kick in Settings > Accounts."
         );
         return Ok(());
     }
