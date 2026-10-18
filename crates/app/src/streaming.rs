@@ -106,6 +106,30 @@ impl Default for Config {
         }
     }
 }
+/// Kick hands out its server without the application path. Kick (like Twitch) streams through
+/// Amazon IVS, whose servers (*.live-video.net) always use "app", so it's added when missing.
+pub fn with_application_path(server: &str) -> String {
+    let server = server.trim().trim_end_matches('/');
+    let rest = server.strip_prefix("rtmps://").or_else(|| server.strip_prefix("rtmp://")).unwrap_or(server);
+    let host = rest.split(':').next().unwrap_or(rest);
+    if !rest.contains('/') && host.ends_with(".live-video.net") {
+        format!("{server}/app")
+    } else {
+        server.to_owned()
+    }
+}
+#[cfg(test)]
+mod application_path_tests {
+    use super::with_application_path;
+    #[test]
+    fn kick_servers_get_the_app_path_and_others_are_untouched() {
+        assert_eq!(with_application_path("rtmps://fa723fc1b171.global-contribute.live-video.net"), "rtmps://fa723fc1b171.global-contribute.live-video.net/app");
+        assert_eq!(with_application_path("rtmps://abc.global-contribute.live-video.net:443/"), "rtmps://abc.global-contribute.live-video.net:443/app");
+        assert_eq!(with_application_path("rtmp://ingest.global-contribute.live-video.net/app"), "rtmp://ingest.global-contribute.live-video.net/app");
+        assert_eq!(with_application_path("rtmps://a.rtmps.youtube.com:443/live2"), "rtmps://a.rtmps.youtube.com:443/live2");
+        assert_eq!(with_application_path("rtmp://example.com"), "rtmp://example.com");
+    }
+}
 impl Config {
     pub fn connection_name(&self, slot: usize) -> String {
         if slot < 3 {
@@ -341,7 +365,8 @@ impl Config {
                         .all(|b| b.is_ascii_alphanumeric() || b"_-?=&/%.:+~".contains(&b)),
                 "{name} stream key contains invalid characters"
             );
-            let server = dest.server.trim().trim_end_matches('/');
+            let server = with_application_path(dest.server.trim().trim_end_matches('/'));
+            let server = server.as_str();
             let rest = server
                 .strip_prefix("rtmps://")
                 .or_else(|| server.strip_prefix("rtmp://"))

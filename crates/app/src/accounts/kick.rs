@@ -39,7 +39,7 @@ fn refresh_channel(client: &Client, token: &Token, tx: &mpsc::SyncSender<Event>)
     let key = field(stream, "key").context("Kick connected, but stream-key permission is missing; reconnect")?;
     let url = reqwest::Url::parse(server)?;
     ensure!(matches!(url.scheme(), "rtmp" | "rtmps") && url.host_str().is_some(), "Kick returned an invalid streaming server");
-    let _ = tx.send(Event::Ingest(server.into(), key.into()));
+    let _ = tx.send(Event::Ingest(crate::streaming::with_application_path(server), key.into()));
     Ok(id)
 }
 
