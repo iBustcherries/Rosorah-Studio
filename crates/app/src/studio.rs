@@ -142,6 +142,13 @@ fn solid_window(ctx: &egui::Context) -> egui::Frame {
     let [r, g, b, _] = panel().to_srgba_unmultiplied();
     egui::Frame::window(&ctx.style()).fill(Color32::from_rgb(r, g, b))
 }
+/// What a file chooser's pick becomes.
+#[derive(Clone, Copy, PartialEq)]
+enum MediaPick {
+    File,
+    Slideshow,
+    Playlist,
+}
 /// What a sound strip's right-click menu asked for.
 enum SoundAction {
     Rename(String),
@@ -428,6 +435,10 @@ pub struct Studio {
     canvas_menu: Option<(Id, usize)>,
     /// Layers copied for pasting into any scene.
     layer_clipboard: Vec<CopiedLayer>,
+    /// A folder chooser re-pointing a slideshow.
+    slideshow_folder: Option<(Id, mpsc::Receiver<Option<PathBuf>>)>,
+    /// A file chooser for a layer's look-up table (true) or mask (false).
+    look_picker: Option<(Id, usize, bool, mpsc::Receiver<Option<PathBuf>>)>,
     /// A sound strip being renamed, and the name typed so far.
     sound_rename: Option<(Id, String)>,
     web_docks: crate::browser_dock::Docks,
@@ -508,8 +519,8 @@ pub struct Studio {
     active_alert: Option<(String, Instant)>,
     activity: VecDeque<String>,
     message: String,
-    /// A file chooser that is open, and the scene whatever is picked gets added to.
-    media_picker: Option<(Id, mpsc::Receiver<Option<PathBuf>>)>,
+    /// A file or folder chooser that is open, the scene the pick is added to, and what it becomes.
+    media_picker: Option<(Id, MediaPick, mpsc::Receiver<Option<PathBuf>>)>,
     video_aspects: std::collections::BTreeMap<Id, [u32; 2]>,
     recorder: Option<mpsc::Receiver<Result<PathBuf, String>>>,
     live_recording: Option<crate::recording::Recording>,
@@ -543,6 +554,7 @@ pub struct Studio {
     screenshot_requested: bool,
     /// When the studio opened; screenshots wait a moment so pages and fades can settle.
     started: Instant,
+    last_slideshow_check: Instant,
     /// Where the window is and how big, saved shortly after it changes and on exit.
     window_placement: crate::window_memory::Placement,
     window_changed: Option<Instant>,
@@ -820,6 +832,8 @@ impl Studio {
             sound_rename: None,
             canvas_menu: None,
             layer_clipboard: Vec::new(),
+            look_picker: None,
+            slideshow_folder: None,
             web_docks: Default::default(),
             announcer: Default::default(),
             announce_picker: None,
@@ -911,6 +925,7 @@ impl Studio {
             screenshot,
             screenshot_requested: false,
             started: Instant::now(),
+            last_slideshow_check: Instant::now(),
             window_placement: crate::window_memory::load(),
             window_changed: None,
             ui_frames: 0,
@@ -1565,6 +1580,32 @@ impl Studio {
         });});
     }
     fn scene_context(&mut self, ui: &mut egui::Ui, canvas: Id, id: Id) {
+        // Switching to this scene can use its own transition instead of the usual one.
+        let usual = self.project.preferences.transition;
+        let current = self.project.preferences.scene_transitions.get(&id).copied();
+        ui.menu_button(format!("Transition into this scene · {}", current.map_or("Usual".to_owned(), |t| t.kind.label().to_owned())), |ui| {
+            if ui.selectable_label(current.is_none(), format!("Usual ({})", usual.label())).clicked() {
+                self.project.preferences.scene_transitions.remove(&id);
+                self.changed();
+                ui.close();
+            }
+            for kind in [Transition::Cut, Transition::Fade, Transition::Wipe, Transition::Slide, Transition::Swipe, Transition::PatternWipe, Transition::FadeToColor, Transition::Move] {
+                if ui.selectable_label(current.is_some_and(|t| t.kind == kind), kind.label()).clicked() {
+                    let ms = current.map_or(self.project.preferences.transition_ms, |t| t.ms);
+                    self.project.preferences.scene_transitions.insert(id, auroracast_core::SceneTransition { kind, ms });
+                    self.changed();
+                    ui.close();
+                }
+            }
+            if let Some(mut t) = current.filter(|t| t.kind != Transition::Cut) {
+                ui.separator();
+                if ui.add(egui::DragValue::new(&mut t.ms).range(100..=3000).speed(10).prefix("Takes ").suffix(" ms")).changed() {
+                    self.project.preferences.scene_transitions.insert(id, t);
+                    self.changed();
+                }
+            }
+        });
+        ui.separator();
         if ui.button("Duplicate").clicked() {
             self.project.duplicate_scene(canvas, id);
             self.changed();
@@ -2302,12 +2343,34 @@ impl Studio {
             // Choosing a file adds it straight away; there's no separate Add step.
             if ui.button("Media file · video, GIF or sound").clicked() {
                 ui.close();
-                self.pick_media(self.project.scenes[si].id, "Choose a video, GIF or sound");
+                self.pick_media(self.project.scenes[si].id, MediaPick::File, "Choose a video, GIF or sound");
             }
             if ui.button("Image").clicked() {
                 ui.close();
-                self.pick_media(self.project.scenes[si].id, "Choose an image");
+                self.pick_media(self.project.scenes[si].id, MediaPick::File, "Choose an image");
             }
+            if ui.button("Image slideshow").on_hover_text("Every picture in a folder, in turn").clicked() {
+                ui.close();
+                self.pick_media(self.project.scenes[si].id, MediaPick::Slideshow, "Choose a folder of pictures");
+            }
+            if ui.button("Video playlist").on_hover_text("Every video in a folder, one after another").clicked() {
+                ui.close();
+                self.pick_media(self.project.scenes[si].id, MediaPick::Playlist, "Choose a folder of videos");
+            }
+            // Another scene as one layer; scenes that would contain this one are left out.
+            let here = self.project.scenes[si].id;
+            let others: Vec<(Id, String)> = self.project.scenes.iter().filter(|s| s.id != here && !self.project.scene_contains(s.id, here)).map(|s| (s.id, s.name.clone())).collect();
+            ui.add_enabled_ui(!others.is_empty(), |ui| {
+                ui.menu_button("Scene", |ui| {
+                    note(ui, "Shows another scene as one layer");
+                    for (scene, name) in others {
+                        if ui.button(&name).clicked() {
+                            self.add_source_layer(si, &name, SourceKind::Scene(scene), [0., 0., 1., 1.]);
+                            ui.close();
+                        }
+                    }
+                });
+            });
             if ui.button("Browser source").clicked() {
                 ui.close();
                 let id = self.add_source_layer(si, "Browser source", SourceKind::Browser { url: String::new() }, [0., 0., 1., 1.]);
@@ -2366,15 +2429,16 @@ impl Studio {
             }
         });
     }
-    /// Opens the file chooser; whatever is picked is added to `scene` straight away.
-    fn pick_media(&mut self, scene: Id, title: &'static str) {
+    /// Opens the file (or folder) chooser; whatever is picked is added to `scene` straight away.
+    fn pick_media(&mut self, scene: Id, kind: MediaPick, title: &'static str) {
         if self.media_picker.is_some() {
             return;
         }
         let (tx, rx) = mpsc::channel();
-        self.media_picker = Some((scene, rx));
+        self.media_picker = Some((scene, kind, rx));
+        let mode = if kind == MediaPick::File { crate::desktop::Pick::Open } else { crate::desktop::Pick::Folder };
         std::thread::spawn(move || {
-            let path = crate::desktop::pick(crate::desktop::Pick::Open, title, "").unwrap_or_else(|e| {
+            let path = crate::desktop::pick(mode, title, "").unwrap_or_else(|e| {
                 crate::capture_log::event(e.to_string());
                 None
             });
@@ -2616,6 +2680,39 @@ impl Studio {
                 let fitted = h / (ratio * 9. / 16.);
                 layer.rect = [x + (w - fitted) / 2., y, fitted, h];
             }
+        }
+    }
+    /// Folder, timing and order for slideshows and video playlists.
+    fn folder_source_controls(&mut self, ui: &mut egui::Ui, id: Id) {
+        let mut changed = false;
+        let mut pick = false;
+        match self.project.sources.iter_mut().find(|s| s.id == id).map(|s| &mut s.kind) {
+            Some(SourceKind::Slideshow(show)) => {
+                let count = auroracast_core::folder_files(&show.folder, &auroracast_core::PICTURE_EXTENSIONS).len();
+                note(ui, format!("{} · {count} pictures", show.folder));
+                changed |= ui.add(egui::Slider::new(&mut show.seconds, 1.0..=120.0).text("Seconds each").logarithmic(true)).changed();
+                changed |= ui.checkbox(&mut show.shuffle, "Shuffle").changed();
+                pick = ui.button("Choose another folder…").clicked();
+            }
+            Some(SourceKind::VideoFile(video)) if !video.folder.is_empty() => {
+                let count = auroracast_core::folder_files(&video.folder, &auroracast_core::VIDEO_EXTENSIONS).len();
+                note(ui, format!("Playlist · {} · {count} videos", video.folder));
+                changed |= ui.checkbox(&mut video.shuffle, "Shuffle").changed();
+                changed |= ui.checkbox(&mut video.looped, "Start over after the last video").changed();
+                note(ui, "Add or remove videos in the folder; the playlist picks them up the next time it starts.");
+            }
+            _ => {}
+        }
+        // Pointing a slideshow at another folder; the answer is applied when it comes back.
+        if pick && self.slideshow_folder.is_none() {
+            let (tx, rx) = mpsc::channel();
+            self.slideshow_folder = Some((id, rx));
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::desktop::pick(crate::desktop::Pick::Folder, "Choose a folder of pictures", "").ok().flatten());
+            });
+        }
+        if changed {
+            self.changed();
         }
     }
     fn video_controls(&mut self, ui: &mut egui::Ui, id: Id) {
@@ -5623,13 +5720,60 @@ impl eframe::App for Studio {
             self.donation_save_due = None;
             self.save();
         }
-        if let Some((scene, rx)) = &self.media_picker
+        if let Some((id, rx)) = &self.slideshow_folder
             && let Ok(path) = rx.try_recv()
         {
-            let scene = *scene;
+            let id = *id;
+            self.slideshow_folder = None;
+            if let Some(path) = path
+                && let Some(Source { kind: SourceKind::Slideshow(show), .. }) = self.project.sources.iter_mut().find(|s| s.id == id)
+            {
+                show.folder = path.display().to_string();
+                self.changed();
+            }
+        }
+        if let Some((scene, index, lut, rx)) = &self.look_picker
+            && let Ok(path) = rx.try_recv()
+        {
+            let (scene, index, lut) = (*scene, *index, *lut);
+            self.look_picker = None;
+            if let Some(path) = path
+                && let Some(layer) = self.project.scenes.iter_mut().find(|s| s.id == scene).and_then(|s| s.layers.get_mut(index))
+            {
+                let path = path.display().to_string();
+                if lut { layer.look.lut = path } else { layer.look.mask = path }
+                self.changed();
+            }
+        }
+        if let Some((scene, kind, rx)) = &self.media_picker
+            && let Ok(path) = rx.try_recv()
+        {
+            let (scene, kind) = (*scene, *kind);
             self.media_picker = None;
-            if let Some(path) = path {
-                self.add_media_file(scene, path);
+            if let Some(path) = path
+                && let Some(si) = self.project.scenes.iter().position(|s| s.id == scene)
+            {
+                let folder = path.display().to_string();
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Folder".into());
+                match kind {
+                    MediaPick::File => self.add_media_file(scene, path),
+                    MediaPick::Slideshow => {
+                        let count = auroracast_core::folder_files(&folder, &auroracast_core::PICTURE_EXTENSIONS).len();
+                        self.add_source_layer(si, &name, SourceKind::Slideshow(auroracast_core::Slideshow { folder, ..Default::default() }), [0.1, 0.1, 0.5, 0.5]);
+                        self.tell(format!("Slideshow of {count} pictures added"));
+                    }
+                    MediaPick::Playlist => {
+                        let files = auroracast_core::folder_files(&folder, &auroracast_core::VIDEO_EXTENSIONS);
+                        match files.first() {
+                            Some(first) => {
+                                let settings = auroracast_core::VideoSettings { path: first.clone(), folder, ..Default::default() };
+                                self.add_source_layer(si, &name, SourceKind::VideoFile(settings), [0., 0., 1., 1.]);
+                                self.tell(format!("Playlist of {} videos added", files.len()));
+                            }
+                            None => self.tell("That folder has no videos (MP4, MKV, WebM, MOV…)".into()),
+                        }
+                    }
+                }
             }
         }
 
@@ -6002,6 +6146,15 @@ impl eframe::App for Studio {
                 Ok(false) => (),
                 Err(e) => self.gpu_error = Some(format!("Capture upload failed: {e}")),
             }
+        }
+        // A slideshow on screen is re-checked twice a second so its pictures change on time.
+        if preview_active
+            && self.last_slideshow_check.elapsed() >= Duration::from_millis(500)
+            && self.project.sources.iter().any(|s| matches!(s.kind, SourceKind::Slideshow(_)))
+        {
+            self.last_slideshow_check = Instant::now();
+            self.revision = true;
+            ctx.request_repaint_after(Duration::from_millis(500));
         }
         if preview_active && self.gpu.as_ref().is_some_and(|g| g.animating()) {
             self.preview_size = [0, 0];

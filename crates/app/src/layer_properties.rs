@@ -85,6 +85,31 @@ impl Studio {
                 ui.close();
             }
         });
+        ui.add_enabled_ui(!locked, |ui| {
+            ui.menu_button("Rotate / Flip", |ui| {
+                let look = &mut self.project.scenes[si].layers[i].look;
+                let mut edited = true;
+                if ui.button("Rotate 90° right").clicked() {
+                    look.rotation = (look.rotation + 90.).rem_euclid(360.);
+                } else if ui.button("Rotate 90° left").clicked() {
+                    look.rotation = (look.rotation - 90.).rem_euclid(360.);
+                } else if ui.button("Flip horizontally").clicked() {
+                    look.flip_horizontal = !look.flip_horizontal;
+                } else if ui.button("Flip vertically").clicked() {
+                    look.flip_vertical = !look.flip_vertical;
+                } else if ui.add_enabled(look.rotation != 0. || look.flip_horizontal || look.flip_vertical, egui::Button::new("Reset")).clicked() {
+                    look.rotation = 0.;
+                    look.flip_horizontal = false;
+                    look.flip_vertical = false;
+                } else {
+                    edited = false;
+                }
+                if edited {
+                    self.changed();
+                    ui.close();
+                }
+            });
+        });
         ui.menu_button("Order", |ui| {
             for (label, to) in [
                 ("Bring to front", count - 1),
@@ -158,6 +183,7 @@ impl Studio {
             self.camera_controls(ui, id);
             self.video_controls(ui, id);
             self.browser_source_ui(ui, id);
+            self.folder_source_controls(ui, id);
         });
         egui::CollapsingHeader::new("Position & size").default_open(true).show(ui, |ui| {
             ui.add_enabled_ui(!locked, |ui| {
@@ -269,6 +295,133 @@ impl Studio {
                     changed = true;
                 }
             });
+        });
+        ui.add_enabled_ui(!locked, |ui| {
+            let scene_id = self.project.scenes[si].id;
+            let picking = self.look_picker.is_some();
+            let mut pick = None;
+            let look = &mut self.project.scenes[si].layers[i].look;
+            let before = look.clone();
+            egui::CollapsingHeader::new("Transform").default_open(look.rotation != 0. || look.flip_horizontal || look.flip_vertical || look.blend != auroracast_core::BlendMode::Normal).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Rotate");
+                    ui.add(egui::DragValue::new(&mut look.rotation).range(-360.0..=360.0).suffix("°").speed(0.5));
+                    for (label, step) in [("↺ 90°", -90.), ("↻ 90°", 90.)] {
+                        if ui.small_button(label).clicked() {
+                            look.rotation = ((look.rotation + step) % 360. + 360.) % 360.;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut look.flip_horizontal, "Flip horizontally");
+                    ui.checkbox(&mut look.flip_vertical, "Flip vertically");
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Blend");
+                    for mode in auroracast_core::BlendMode::ALL {
+                        ui.selectable_value(&mut look.blend, mode, mode.label());
+                    }
+                });
+            });
+            egui::CollapsingHeader::new("Filters").default_open(look.colour_adjusted() || !look.lut.is_empty() || look.sharpen > 0. || look.scroll != [0., 0.] || !look.mask.is_empty() || look.luma_key || look.delay_ms > 0).show(ui, |ui| {
+                // Each filter shows its settings only when it's in use.
+                let mut colour = look.colour_adjusted();
+                if ui.checkbox(&mut colour, "Colour correction").changed() && !colour {
+                    look.brightness = 0.;
+                    look.contrast = 0.;
+                    look.saturation = 1.;
+                    look.hue = 0.;
+                    look.gamma = 1.;
+                }
+                if colour || look.colour_adjusted() {
+                    ui.indent("colour", |ui| {
+                        ui.add(egui::Slider::new(&mut look.brightness, -1.0..=1.0).text("Brightness"));
+                        ui.add(egui::Slider::new(&mut look.contrast, -1.0..=1.0).text("Contrast"));
+                        ui.add(egui::Slider::new(&mut look.saturation, 0.0..=2.0).text("Saturation"));
+                        ui.add(egui::Slider::new(&mut look.hue, -180.0..=180.0).text("Hue").suffix("°"));
+                        ui.add(egui::Slider::new(&mut look.gamma, 0.2..=5.0).text("Gamma").logarithmic(true));
+                        if colour && !look.colour_adjusted() {
+                            note(ui, "Move a slider to start.");
+                        }
+                    });
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Colour grade (LUT)");
+                    if look.lut.is_empty() {
+                        if ui.add_enabled(!picking, egui::Button::new("Choose .cube file…")).clicked() {
+                            pick = Some(true);
+                        }
+                    } else {
+                        note(ui, std::path::Path::new(&look.lut).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                        if ui.small_button("Remove").clicked() {
+                            look.lut.clear();
+                        }
+                    }
+                });
+                if !look.lut.is_empty() {
+                    ui.add(egui::Slider::new(&mut look.lut_amount, 0.0..=1.0).text("Strength"));
+                }
+                ui.add(egui::Slider::new(&mut look.sharpen, 0.0..=1.0).text("Sharpen"));
+                ui.horizontal(|ui| {
+                    ui.label("Scroll");
+                    ui.add(egui::DragValue::new(&mut look.scroll[0]).range(-5.0..=5.0).speed(0.01).prefix("→ ").suffix("/s"));
+                    ui.add(egui::DragValue::new(&mut look.scroll[1]).range(-5.0..=5.0).speed(0.01).prefix("↓ ").suffix("/s"));
+                }).response.on_hover_text("Moves the picture continuously, wrapping around; in layer widths/heights per second");
+                ui.horizontal(|ui| {
+                    ui.label("Image mask");
+                    if look.mask.is_empty() {
+                        if ui.add_enabled(!picking, egui::Button::new("Choose picture…")).on_hover_text("White shows the layer, black hides it").clicked() {
+                            pick = Some(false);
+                        }
+                    } else {
+                        note(ui, std::path::Path::new(&look.mask).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                        ui.checkbox(&mut look.mask_invert, "Invert");
+                        if ui.small_button("Remove").clicked() {
+                            look.mask.clear();
+                        }
+                    }
+                });
+                ui.checkbox(&mut look.luma_key, "Luma key · remove dark or light areas");
+                if look.luma_key {
+                    ui.indent("luma", |ui| {
+                        ui.add(egui::Slider::new(&mut look.luma_min, 0.0..=1.0).text("Remove darker than"));
+                        ui.add(egui::Slider::new(&mut look.luma_max, 0.0..=1.0).text("Remove lighter than"));
+                        ui.add(egui::Slider::new(&mut look.luma_softness, 0.0..=0.5).text("Softness"));
+                    });
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Delay");
+                    ui.add(egui::DragValue::new(&mut look.delay_ms).range(0..=2000).speed(5).suffix(" ms"));
+                    if look.delay_ms > 0 {
+                        // About 8 MB per 1080p frame, at the source's frame rate.
+                        note(ui, format!("Uses about {} MB of graphics memory at 1080p 30 fps", (look.delay_ms as u64 * 30 / 1000 + 1) * 8));
+                    }
+                }).response.on_hover_text("Shows this source late, e.g. to line a camera up with your microphone");
+            });
+            egui::CollapsingHeader::new("Show and hide").default_open(look.show != auroracast_core::LayerTransition::None || look.hide != auroracast_core::LayerTransition::None).show(ui, |ui| {
+                for (label, value) in [("When shown", &mut look.show), ("When hidden", &mut look.hide)] {
+                    ui.horizontal(|ui| {
+                        ui.label(label);
+                        egui::ComboBox::from_id_salt(("layer-transition", label)).selected_text(value.label()).show_ui(ui, |ui| {
+                            for t in auroracast_core::LayerTransition::ALL {
+                                ui.selectable_value(value, t, t.label());
+                            }
+                        });
+                    });
+                }
+                ui.add(egui::DragValue::new(&mut look.transition_ms).range(50..=3000).speed(10).prefix("Takes ").suffix(" ms"));
+            });
+            if *look != before {
+                changed = true;
+            }
+            if let Some(lut) = pick {
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.look_picker = Some((scene_id, i, lut, rx));
+                std::thread::spawn(move || {
+                    let title = if lut { "Choose a .cube colour look-up table" } else { "Choose a mask picture (PNG or JPEG)" };
+                    let _ = tx.send(crate::desktop::pick(crate::desktop::Pick::Open, title, "").ok().flatten());
+                });
+            }
         });
         ui.separator();
         if ui.add_enabled(!locked, egui::Button::new("Remove from scene")).clicked() {

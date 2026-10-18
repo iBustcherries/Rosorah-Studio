@@ -51,6 +51,29 @@ impl Sources {
                 self.uploaded.remove(&source.id);
                 continue;
             }
+            // Nested scenes are drawn by the compositor; there's nothing to load.
+            if matches!(source.kind, SourceKind::Scene(_)) {
+                continue;
+            }
+            // A slideshow loads one picture at a time, only when it's time to change.
+            if let SourceKind::Slideshow(show) = &source.kind {
+                let files = auroracast_core::folder_files(&show.folder, &auroracast_core::PICTURE_EXTENSIONS);
+                if files.is_empty() {
+                    gpu.ensure_empty_source(source.id)?;
+                    continue;
+                }
+                let step = (crate::media::seconds_running() / show.seconds.max(0.5) as f64) as u64;
+                let round = step / files.len() as u64;
+                let index = auroracast_core::play_order(files.len(), round, show.shuffle)[(step % files.len() as u64) as usize];
+                let stamp = SourceStamp { kind: source.kind.clone(), file: None, frame: index as u32 + 1 };
+                if self.uploaded.get(&source.id) != Some(&stamp) {
+                    let picture = image::ImageReader::open(&files[index])?.with_guessed_format()?.decode().with_context(|| format!("Decode {}", files[index]))?;
+                    let picture = if picture.width() > 4096 || picture.height() > 4096 { picture.thumbnail(4096, 4096) } else { picture }.into_rgba8();
+                    gpu.upload(source.id, picture.width(), picture.height(), picture.as_raw())?;
+                    self.uploaded.insert(source.id, stamp);
+                }
+                continue;
+            }
             let stamp = SourceStamp {
                 kind: source.kind.clone(),
                 file: if let SourceKind::Image { path } = &source.kind {
@@ -468,4 +491,9 @@ mod cache_tests {
         std::fs::remove_file(file)?;
         Ok(())
     }
+}
+/// Seconds since Rosorah started, for things that change on a schedule (slideshows).
+pub fn seconds_running() -> f64 {
+    static START: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
+    START.elapsed().as_secs_f64()
 }

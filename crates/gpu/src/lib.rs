@@ -226,6 +226,8 @@ pub struct Compositor {
     rings: HashMap<Id, DelayRing>,
     /// Nested scenes drawn this frame, as pictures layers can show.
     nested: HashMap<Id, (wgpu::BindGroup, u32, u32)>,
+    /// Whether the last frame had something moving by itself (a scrolling layer).
+    continuous: bool,
     pub adapter_name: String,
     pub software_adapter: bool,
     pub uploads: u64,
@@ -375,6 +377,7 @@ impl Compositor {
             delays: HashMap::new(),
             rings: HashMap::new(),
             nested: HashMap::new(),
+            continuous: false,
             adapter_name: info.name,
             software_adapter: info.device_type == wgpu::DeviceType::Cpu,
             uploads: 0,
@@ -549,6 +552,7 @@ impl Compositor {
                 || t.motion.as_ref().is_some_and(|m| m.started.elapsed() < m.duration)
                 || t.shown.values().any(|(_, at)| at.elapsed() < Duration::from_secs(2))
         }) || !self.delays.is_empty()
+            || self.continuous
     }
 
     /// Draws `scene` into a target of its own (Studio Mode's preview, Multiview thumbnails).
@@ -578,6 +582,7 @@ impl Compositor {
             }
             self.rings.retain(|id, _| self.delays.contains_key(id));
             self.nested.clear();
+            self.continuous = scene.layers.iter().any(|l| l.visible && l.look.scroll != [0., 0.]);
             // Scratch targets nobody has drawn for a while (closed thumbnails, old previews) are freed.
             self.targets.retain(|_, t| t.used.elapsed() < Duration::from_secs(5));
         }

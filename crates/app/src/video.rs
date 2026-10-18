@@ -77,9 +77,20 @@ impl rosorah_capture::Backend for VideoBackend {
                 feature.set_rank(gst::Rank::NONE);
             }
         }
-        let path = std::fs::canonicalize(&self.settings.path).context("Video file not found")?;
-        anyhow::ensure!(path.is_file(), "Choose a video file");
-        let uri = gst::glib::filename_to_uri(path, None)?;
+        // A playlist plays a folder's videos in turn; otherwise the one file.
+        let playlist = if self.settings.folder.is_empty() { Vec::new() } else { auroracast_core::folder_files(&self.settings.folder, &auroracast_core::VIDEO_EXTENSIONS) };
+        let mut round = 0u64;
+        let mut position = 0usize;
+        let mut order = auroracast_core::play_order(playlist.len(), round, self.settings.shuffle);
+        let file_uri = |file: &str| -> Result<String> {
+            let path = std::fs::canonicalize(file).with_context(|| format!("Video file not found: {file}"))?;
+            anyhow::ensure!(path.is_file(), "Choose a video file");
+            Ok(gst::glib::filename_to_uri(path, None)?.to_string())
+        };
+        let uri = match playlist.first() {
+            Some(_) => file_uri(&playlist[order[0]])?,
+            None => file_uri(&self.settings.path)?,
+        };
         let sink = gst_app::AppSink::builder()
             .caps(
                 &gst::Caps::builder("video/x-raw")
@@ -168,6 +179,22 @@ impl rosorah_capture::Backend for VideoBackend {
                             "Video: {}. Install the GStreamer codec for this file or try another format.",
                             e.error()
                         );
+                    }
+                    gst::MessageView::Eos(..) if !playlist.is_empty() => {
+                        // Next video; after the last one, start over (reshuffled) or stop.
+                        self.audio.clear(id);
+                        position += 1;
+                        if position >= playlist.len() {
+                            if !self.settings.looped {
+                                break;
+                            }
+                            position = 0;
+                            round += 1;
+                            order = auroracast_core::play_order(playlist.len(), round, self.settings.shuffle);
+                        }
+                        player.set_state(gst::State::Ready)?;
+                        player.set_property("uri", file_uri(&playlist[order[position]])?);
+                        player.set_state(gst::State::Playing)?;
                     }
                     gst::MessageView::Eos(..) => {
                         self.audio.clear(id);

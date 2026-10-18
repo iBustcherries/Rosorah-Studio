@@ -583,6 +583,7 @@ fn run(
     let mut gpu =
         pollster::block_on(Compositor::new()).context("Initialize recording compositor")?;
     let (mut revision, initial) = project.lock().unwrap().clone();
+    let mut slideshow_check = Instant::now();
     let (mut current, mut active_canvas) = selected_project(&initial, &canvas)?;
     let mut source_uploads = crate::media::Sources::default();
     source_uploads.upload(&mut gpu, &current, 0, false)?;
@@ -669,6 +670,14 @@ fn run(
                             source_uploads.upload(&mut gpu, &current, 0, false)?;
                             used = live_sources(&current);
                             revision = p.0;
+                            slideshow_check = Instant::now();
+                        }
+                    }
+                    // Slideshows change pictures on a timer, not when the project changes.
+                    if slideshow_check.elapsed() >= Duration::from_millis(500) {
+                        slideshow_check = Instant::now();
+                        if current.sources.iter().any(|s| matches!(s.kind, auroracast_core::SourceKind::Slideshow(_))) {
+                            source_uploads.upload(&mut gpu, &current, 0, false)?;
                         }
                     }
                     upload_frames(&mut gpu, frames.latest(), &used, &mut previous)?;

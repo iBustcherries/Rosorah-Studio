@@ -32,6 +32,7 @@ pub enum SourceKind {
     Widget(widgets::Settings),
     /// Another scene, shown as one layer (nested scene).
     Scene(Id),
+    Slideshow(Slideshow),
 }
 
 impl SourceKind {
@@ -47,6 +48,7 @@ impl SourceKind {
                 | Self::Color(_)
                 | Self::Image { .. }
                 | Self::Scene(_)
+                | Self::Slideshow(_)
         )
     }
     pub fn label(&self) -> &'static str {
@@ -62,6 +64,7 @@ impl SourceKind {
             Self::ChatOverlay => "Chat overlay",
             Self::Widget(_) => "Widget",
             Self::Scene(_) => "Scene",
+            Self::Slideshow(_) => "Image slideshow",
         }
     }
 }
@@ -79,6 +82,52 @@ pub struct VideoSettings {
     pub audio: bool,
     pub trigger: Option<EventKind>,
     pub platform: Option<Platform>,
+    /// A folder of videos played one after another (a playlist); empty plays `path` alone.
+    pub folder: String,
+    pub shuffle: bool,
+}
+/// Media files in a folder, sorted by name: the videos of a playlist or pictures of a slideshow.
+pub fn folder_files(folder: &str, extensions: &[&str]) -> Vec<String> {
+    let mut files: Vec<String> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| extensions.contains(&e.to_string_lossy().to_lowercase().as_str())))
+        .map(|p| p.display().to_string())
+        .collect();
+    files.sort_by_key(|f| f.to_lowercase());
+    files
+}
+pub const VIDEO_EXTENSIONS: [&str; 8] = ["mp4", "mkv", "webm", "mov", "avi", "m4v", "gif", "ogv"];
+pub const PICTURE_EXTENSIONS: [&str; 4] = ["png", "jpg", "jpeg", "bmp"];
+/// The order a folder's files play in: as sorted, or shuffled differently each round.
+pub fn play_order(len: usize, round: u64, shuffle: bool) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..len).collect();
+    if shuffle {
+        // A small seeded shuffle: the same round always gives the same order.
+        let mut seed = round.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        for i in (1..len).rev() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            order.swap(i, (seed % (i as u64 + 1)) as usize);
+        }
+    }
+    order
+}
+/// Pictures from a folder shown in turn, each for `seconds`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Slideshow {
+    pub folder: String,
+    pub seconds: f32,
+    pub shuffle: bool,
+}
+impl Default for Slideshow {
+    fn default() -> Self {
+        Self { folder: String::new(), seconds: 6., shuffle: false }
+    }
 }
 impl Default for VideoSettings {
     fn default() -> Self {
@@ -93,6 +142,8 @@ impl Default for VideoSettings {
             audio: false,
             trigger: None,
             platform: None,
+            folder: String::new(),
+            shuffle: false,
         }
     }
 }
@@ -1282,6 +1333,25 @@ impl Project {
         triggered || in_alert_box || in_rule
     }
     /// Channels as the mixer shows them for a scene, before the shared alert control.
+    /// Whether `outer` shows `inner`, directly or through scenes it nests.
+    pub fn scene_contains(&self, outer: Id, inner: Id) -> bool {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut todo = vec![outer];
+        while let Some(id) = todo.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            for layer in self.scene(id).map(|s| s.layers.as_slice()).unwrap_or_default() {
+                if let Some(SourceKind::Scene(next)) = self.source(layer.source).map(|s| &s.kind) {
+                    if *next == inner {
+                        return true;
+                    }
+                    todo.push(*next);
+                }
+            }
+        }
+        false
+    }
     pub fn mixer_channels(&self, scene: Id) -> Vec<AudioChannel> {
         let mut channels = self.audio.clone();
         if let Some(volumes) = self.preferences.scene_audio.get(&scene) {
