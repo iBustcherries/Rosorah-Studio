@@ -4708,6 +4708,8 @@ impl Studio {
         // Apps added to the automatic music list; edited from the Music strip's settings.
         let music_apps = &mut self.project.preferences.music_apps;
         let mut music_apps_changed = false;
+        // Each strip's filters, edited in its Sound settings window.
+        let audio_filters = &mut self.project.preferences.audio_filters;
         let mut refresh = false;
         // Draws one strip; returns what picks it up for reordering (its grip and name).
         let mut draw_channel = |ui: &mut egui::Ui, channel: &mut auroracast_core::AudioChannel| -> egui::Response {
@@ -4886,6 +4888,50 @@ impl Studio {
                             }
                         });
                         note(ui, "Reduces steady background noise like fans or hum.");
+                    }
+                    if channel.id != ALERTS_STRIP {
+                        ui.add_space(6.);
+                        ui.label(RichText::new("Filters").strong());
+                        let f = audio_filters.entry(channel.id).or_default();
+                        let before = f.clone();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.checkbox(&mut f.gate, "Noise gate");
+                            ui.checkbox(&mut f.compressor, "Compressor");
+                            ui.checkbox(&mut f.limiter, "Limiter");
+                            ui.checkbox(&mut f.expander, "Expander");
+                            ui.checkbox(&mut f.eq, "EQ");
+                            ui.checkbox(&mut f.mono, "Mono");
+                        });
+                        if f.gate {
+                            ui.add(egui::Slider::new(&mut f.gate_open, -80.0..=0.0).text("Gate opens above").suffix(" dB"));
+                            ui.add(egui::Slider::new(&mut f.gate_release, 20.0..=1000.0).text("Closes over").suffix(" ms").logarithmic(true));
+                        }
+                        if f.expander {
+                            ui.add(egui::Slider::new(&mut f.expand_below, -80.0..=0.0).text("Expand below").suffix(" dB"));
+                            ui.add(egui::Slider::new(&mut f.expand_ratio, 1.0..=10.0).text("Ratio"));
+                        }
+                        if f.compressor {
+                            ui.add(egui::Slider::new(&mut f.compress_above, -60.0..=0.0).text("Compress above").suffix(" dB"));
+                            ui.add(egui::Slider::new(&mut f.compress_ratio, 1.0..=20.0).text("Ratio").logarithmic(true));
+                            ui.add(egui::Slider::new(&mut f.compress_attack, 0.5..=100.0).text("Attack").suffix(" ms").logarithmic(true));
+                            ui.add(egui::Slider::new(&mut f.compress_release, 10.0..=1000.0).text("Release").suffix(" ms").logarithmic(true));
+                            ui.add(egui::Slider::new(&mut f.makeup, 0.0..=24.0).text("Make-up gain").suffix(" dB"));
+                        }
+                        if f.eq {
+                            ui.add(egui::Slider::new(&mut f.bass, -15.0..=15.0).text("Bass").suffix(" dB"));
+                            ui.add(egui::Slider::new(&mut f.middle, -15.0..=15.0).text("Middle").suffix(" dB"));
+                            ui.add(egui::Slider::new(&mut f.treble, -15.0..=15.0).text("Treble").suffix(" dB"));
+                        }
+                        if f.limiter {
+                            ui.add(egui::Slider::new(&mut f.limit_to, -30.0..=0.0).text("Never louder than").suffix(" dB"));
+                        }
+                        ui.add(egui::Slider::new(&mut f.balance, -1.0..=1.0).text("Balance (left ↔ right)").show_value(false));
+                        if *f != before {
+                            changed = true;
+                        }
+                        if !f.active() {
+                            audio_filters.remove(&channel.id);
+                        }
                     }
                     if advanced {
                         ui.add_space(6.);
@@ -6129,6 +6175,7 @@ impl eframe::App for Studio {
             self.changed();
         }
         self.audio.music_apps(&self.project.preferences.music_apps);
+        self.audio.filters(&self.project.preferences.audio_filters);
         self.audio.sync(
             &self.project.audio,
             self.project.preferences.auto_game_audio,

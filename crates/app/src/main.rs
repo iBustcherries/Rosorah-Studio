@@ -2,6 +2,7 @@ mod system_monitor;
 mod accounts;
 mod activity;
 mod audio;
+mod audio_fx;
 mod automations;
 mod automation_preview;
 mod backups;

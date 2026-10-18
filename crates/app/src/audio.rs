@@ -56,6 +56,8 @@ struct Control {
     targets: Arc<BTreeMap<Id, String>>,
     /// Apps the user added to the automatic music list.
     music_apps: Arc<Vec<String>>,
+    /// Each strip's filters.
+    filters: Arc<BTreeMap<Id, auroracast_core::AudioFilters>>,
     refresh: bool,
     record: Option<bool>,
     automatic: bool,
@@ -135,6 +137,12 @@ impl Audio {
             .filter(|(id, _)| self.enabled.get(id) == Some(&true) && channels.iter().any(|c| c.id == **id));
         if !c.targets.iter().eq(selected.clone()) {
             c.targets = Arc::new(selected.map(|(id, target)| (*id, target.clone())).collect());
+        }
+    }
+    pub fn filters(&self, filters: &BTreeMap<Id, auroracast_core::AudioFilters>) {
+        let mut c = self.control.lock().unwrap();
+        if c.filters.as_ref() != filters {
+            c.filters = Arc::new(filters.clone());
         }
     }
     pub fn music_apps(&self, apps: &[String]) {
@@ -898,6 +906,7 @@ fn worker(control: Arc<Mutex<Control>>, view: Arc<Mutex<View>>, stop: Arc<Atomic
     let mut writers: Vec<Wav> = Vec::new();
     let mut next = Instant::now();
     let mut delays = BTreeMap::new();
+    let mut chains: BTreeMap<Id, crate::audio_fx::Chain> = BTreeMap::new();
     let mut monitor: Option<Monitor> = None;
     let mut monitor_retry = Instant::now();
     while !stop.load(Ordering::Relaxed) {
@@ -968,6 +977,13 @@ fn worker(control: Arc<Mutex<Control>>, view: Arc<Mutex<View>>, stop: Arc<Atomic
                 frames,
                 pcm,
             );
+        }
+        // Each strip's own filters, before levels are measured and the mix is made.
+        chains.retain(|id, _| c.filters.get(id).is_some_and(|f| f.active()));
+        for (id, pcm) in &mut pcms {
+            if let Some(f) = c.filters.get(id).filter(|f| f.active()) {
+                chains.entry(*id).or_default().process(f, pcm);
+            }
         }
         let stereo_peaks: BTreeMap<Id, [f32; 2]> = pcms
             .iter()

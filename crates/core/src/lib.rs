@@ -147,6 +147,68 @@ impl Default for VideoSettings {
         }
     }
 }
+/// A sound strip's filters. Each is off until switched on; levels are in dB, times in ms.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioFilters {
+    /// Silences the strip below `gate_open` (mic hiss between words, keyboard noise).
+    pub gate: bool,
+    pub gate_open: f32,
+    pub gate_release: f32,
+    /// Evens out loud and quiet parts above `compress_above`.
+    pub compressor: bool,
+    pub compress_above: f32,
+    pub compress_ratio: f32,
+    pub compress_attack: f32,
+    pub compress_release: f32,
+    pub makeup: f32,
+    /// Never lets the strip go louder than `limit_to`.
+    pub limiter: bool,
+    pub limit_to: f32,
+    /// Turns quiet sounds below `expand_below` down further (gentler than a gate).
+    pub expander: bool,
+    pub expand_below: f32,
+    pub expand_ratio: f32,
+    /// Three-band EQ: bass (around 120 Hz), middle (1 kHz) and treble (6 kHz), in dB.
+    pub eq: bool,
+    pub bass: f32,
+    pub middle: f32,
+    pub treble: f32,
+    /// Both sides the same (for a one-sided mic), and left/right placement (-1…1).
+    pub mono: bool,
+    pub balance: f32,
+}
+impl Default for AudioFilters {
+    fn default() -> Self {
+        Self {
+            gate: false,
+            gate_open: -45.,
+            gate_release: 150.,
+            compressor: false,
+            compress_above: -18.,
+            compress_ratio: 4.,
+            compress_attack: 6.,
+            compress_release: 120.,
+            makeup: 0.,
+            limiter: false,
+            limit_to: -1.,
+            expander: false,
+            expand_below: -40.,
+            expand_ratio: 2.,
+            eq: false,
+            bass: 0.,
+            middle: 0.,
+            treble: 0.,
+            mono: false,
+            balance: 0.,
+        }
+    }
+}
+impl AudioFilters {
+    pub fn active(&self) -> bool {
+        self.gate || self.compressor || self.limiter || self.expander || self.eq || self.mono || self.balance != 0.
+    }
+}
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum NoiseSuppression {
     #[default]
@@ -1086,6 +1148,9 @@ pub struct Preferences {
     /// Apps added to the automatic music-app list, by app identity.
     #[serde(default)]
     pub music_apps: Vec<String>,
+    /// Each sound strip's filters (gate, compressor, limiter, expander, EQ, mono/balance).
+    #[serde(default)]
+    pub audio_filters: std::collections::BTreeMap<Id, AudioFilters>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1267,6 +1332,7 @@ impl Default for Project {
                 // New projects: the Music strip follows music apps on its own.
                 audio_inputs: [(12, "auto:music".to_owned())].into(),
                 music_apps: Vec::new(),
+                audio_filters: Default::default(),
                 recording_encoder: RecordingEncoder::Auto,
                 auto_game_audio: true,
             },
