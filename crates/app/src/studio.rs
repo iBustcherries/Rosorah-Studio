@@ -438,6 +438,9 @@ pub struct Studio {
     canvas_menu: Option<(Id, usize)>,
     /// Open projector windows.
     projectors: Vec<Projector>,
+    /// The virtual camera's output while it's on, and ones still finishing.
+    virtual_camera: Option<crate::recording::Recording>,
+    camera_stopping: Vec<crate::recording::Recording>,
     /// Replay buffer: on or off, its own encoder when not live, and a save in progress.
     replay_on: bool,
     replay_stream: Option<crate::streaming::Stream>,
@@ -856,6 +859,8 @@ impl Studio {
             sound_rename: None,
             canvas_menu: None,
             projectors: Vec::new(),
+            virtual_camera: None,
+            camera_stopping: Vec::new(),
             replay_on: false,
             replay_stream: None,
             replay_stopping: Vec::new(),
@@ -2238,8 +2243,52 @@ impl Studio {
             note(ui, "Not live, so the replay buffer runs its own encoder (about the cost of recording).");
         }
     }
+    /// Starts or stops sending the main video to Rosorah's virtual camera.
     fn toggle_virtual_camera(&mut self) {
-        self.tell("The virtual camera isn't available yet.".into());
+        if let Some(camera) = self.virtual_camera.take() {
+            camera.stop();
+            self.camera_stopping.push(camera);
+            return;
+        }
+        let Some(device) = crate::virtual_camera::device() else {
+            self.tell("Set up the virtual camera first (Stream panel).".into());
+            return;
+        };
+        match crate::recording::Recording::start_camera(&self.project, 0, self.captures.reader(), device) {
+            Ok(camera) => {
+                self.virtual_camera = Some(camera);
+                self.tell("Virtual camera on: pick “Rosorah Virtual Camera” in Discord, Zoom or your browser.".into());
+            }
+            Err(e) => self.tell(format!("The virtual camera couldn't start: {e:#}")),
+        }
+    }
+    /// Virtual camera controls for the Stream panel.
+    fn virtual_camera_controls(&mut self, ui: &mut egui::Ui) {
+        self.camera_stopping.retain(|c| c.view().result.is_none());
+        if let Some(camera) = &self.virtual_camera
+            && let Some(Err(e)) = camera.view().result
+        {
+            self.tell(format!("The virtual camera stopped: {e}"));
+            self.virtual_camera = None;
+        }
+        ui.horizontal_wrapped(|ui| {
+            let ready = crate::virtual_camera::device().is_some();
+            let mut on = self.virtual_camera.is_some();
+            if ready {
+                if ui.toggle_value(&mut on, "📷 Virtual camera").on_hover_text("Rosorah's main video as a webcam for Discord, Zoom or a browser").changed() {
+                    self.toggle_virtual_camera();
+                }
+            } else if crate::virtual_camera::supported() {
+                if ui.button("📷 Set up virtual camera").on_hover_text("Adds “Rosorah Virtual Camera” (asks for your password once; lasts until restart)").clicked() {
+                    match crate::virtual_camera::set_up() {
+                        Ok(()) => self.tell("Virtual camera added. Switch it on whenever you want.".into()),
+                        Err(e) => self.tell(format!("{e:#}")),
+                    }
+                }
+            } else {
+                note(ui, if cfg!(windows) { "Virtual camera: reinstall with “Virtual camera” ticked (Windows 11)." } else { "Virtual camera: install v4l2loopback (Fedora: sudo dnf install v4l2loopback; Ubuntu: sudo apt install v4l2loopback-dkms)." });
+            }
+        });
     }
     /// Whether Studio Mode applies to `canvas` (the main, landscape video).
     fn studio_mode_for(&self, canvas: &auroracast_core::Canvas) -> bool {
@@ -3416,6 +3465,7 @@ impl Studio {
     fn broadcast_routes(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         self.replay_controls(ui);
+        self.virtual_camera_controls(ui);
         ui.separator();
         ui.strong("Where to stream");
         let before = self.stream_config.clone();

@@ -276,12 +276,15 @@ pub(crate) fn output_path(folder: &Path) -> Result<PathBuf> {
 enum Output {
     Recording(PathBuf),
     Streaming(crate::streaming::Setup),
+    /// A virtual camera device (Linux) or pipe (Windows).
+    Camera(String),
 }
 impl Output {
     fn path(&self) -> PathBuf {
         match self {
             Self::Recording(path) => path.clone(),
             Self::Streaming(setup) => setup.recording.clone().unwrap_or_default(),
+            Self::Camera(_) => PathBuf::new(),
         }
     }
 }
@@ -313,6 +316,10 @@ impl Recording {
         setup: crate::streaming::Setup,
     ) -> Result<Self> {
         Self::start_output(project, canvas, frames, Output::Streaming(setup))
+    }
+    /// Sends the canvas to a virtual camera until stopped.
+    pub fn start_camera(project: &Project, canvas: usize, frames: FrameReader, device: String) -> Result<Self> {
+        Self::start_output(project, canvas, frames, Output::Camera(device))
     }
     fn start_output(
         project: &Project,
@@ -366,7 +373,7 @@ impl Recording {
         let worker = thread::Builder::new()
             .name("rosorah-recording".into())
             .spawn(move || {
-                let recovery=match &output{Output::Recording(path)=>Some(path.clone()),Output::Streaming(setup)=>setup.recording.clone()};if let Some(path)=&recovery{crate::utilities::mark_recording(path);}
+                let recovery=match &output{Output::Recording(path)=>Some(path.clone()),Output::Streaming(setup)=>setup.recording.clone(),Output::Camera(_)=>None};if let Some(path)=&recovery{crate::utilities::mark_recording(path);}
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run(&s, p, c, frames, &output)
                 }))
@@ -572,6 +579,8 @@ fn run(
         Output::Streaming(setup) => {
             encoding::select_stream(&canvas, mode, setup.bitrate, cancelled, report)
         }
+        // A camera takes plain frames: nothing to choose.
+        Output::Camera(_) => Ok(encoding::Selection { codecs: encoding::Codecs::software("rawvideo", "pcm_f32le"), details: "Virtual camera (no encoding)".into() }),
     }?;
     let codec = selection.codecs;
     s.view.lock().unwrap().details = selection.details.clone();
@@ -600,13 +609,14 @@ fn run(
             encoding::launch_tracks(&canvas, &codec, path, s.audio_channels / 2)
         }
         Output::Streaming(_) => encoding::launch_stream(&canvas, &codec),
+        Output::Camera(device) => encoding::launch_camera(&canvas, device),
     }?;
     let hub = match output {
         Output::Streaming(setup) => Some(crate::streaming::Hub::start(
             encoder.0.stdout.take().unwrap(),
             setup,
         )),
-        Output::Recording(_) => None,
+        Output::Recording(_) | Output::Camera(_) => None,
     };
     let mut stderr = encoder.0.stderr.take().unwrap();
     let log = Arc::new(Mutex::new(VecDeque::new()));
@@ -1109,6 +1119,37 @@ mod tests {
         let p: serde_json::Value = serde_json::from_slice(&output.stdout)?;
         assert_eq!(p["streams"][0]["codec_name"], "vp8");
         assert_eq!(p["streams"][1]["codec_name"], "flac");
+        Ok(())
+    }
+    /// Sends a red canvas to a loopback camera and reads a frame back:
+    /// ROSORAH_TEST_CAMERA=/dev/videoN cargo test -- --ignored virtual_camera_delivers_frames
+    #[test]
+    #[ignore = "Requires a v4l2loopback device, FFmpeg and Vulkan"]
+    fn virtual_camera_delivers_frames_without_audio() -> Result<()> {
+        let device = std::env::var("ROSORAH_TEST_CAMERA").context("Set ROSORAH_TEST_CAMERA")?;
+        let mut project = Project::default();
+        project.sources[0].kind = auroracast_core::SourceKind::ScreenCapture;
+        project.scenes[0].layers.retain(|l| l.source == 1);
+        project.canvases[0].width = 320;
+        project.canvases[0].height = 180;
+        let mut engine = rosorah_capture::Engine::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        engine.start(1, Box::new(Controlled(tx)), rosorah_capture::Options::default())?;
+        let source = rx.recv_timeout(Duration::from_secs(2))?;
+        source.publish(Frame { width: 1, height: 1, rgba: vec![255, 0, 0, 255] })?;
+        // No audio is pushed at all: video must still flow.
+        let camera = Recording::start_camera(&project, 0, engine.reader(), device.clone())?;
+        wait_ready(&camera);
+        thread::sleep(Duration::from_secs(2));
+        let view = camera.view();
+        eprintln!("camera phase {:?} result {:?} details {:?}", view.phase, view.result, view.details);
+        let grab = Command::new("ffmpeg")
+            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-f", "v4l2", "-i", &device, "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", "4x4", "-"])
+            .output()?;
+        camera.stop();
+        assert!(grab.stdout.len() >= 48, "no frame read: {}", String::from_utf8_lossy(&grab.stderr));
+        let (r, g, b) = (grab.stdout[0], grab.stdout[1], grab.stdout[2]);
+        assert!(r > 180 && g < 80 && b < 80, "red canvas came through as {r},{g},{b}");
         Ok(())
     }
     #[test]

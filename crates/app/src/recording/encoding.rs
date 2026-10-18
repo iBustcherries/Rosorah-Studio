@@ -446,6 +446,13 @@ enum Target<'a> {
     File(&'a Path),
     Probe,
     Stream,
+    /// Plain frames to a virtual camera device (no encoding; audio is read and dropped).
+    Camera(&'a str),
+}
+/// Sends the canvas to a virtual camera: on Linux a v4l2loopback device, on Windows the pipe the
+/// Rosorah camera component reads.
+pub(super) fn launch_camera(canvas: &Canvas, device: &str) -> Result<(Encoder, InputWriter, InputWriter)> {
+    launch_target(canvas, &Codecs::software("rawvideo", "pcm_f32le"), Target::Camera(device))
 }
 #[cfg(test)]
 pub(super) fn launch(
@@ -535,7 +542,18 @@ fn launch_target_tracks(
         "-i",
     ])
     .arg(&audio_input);
-    if tracks == 1 {
+    let camera = matches!(target, Target::Camera(_));
+    if camera {
+        // Video to the camera as plain YUV; the audio input is still read (so it never blocks) and dropped.
+        let Target::Camera(device) = &target else { unreachable!() };
+        #[cfg(not(windows))]
+        cmd.args(["-map", "0:v:0", "-vf", "format=yuv420p", "-f", "v4l2"]).arg(device);
+        #[cfg(windows)]
+        cmd.args(["-map", "0:v:0", "-vf", "format=nv12", "-f", "rawvideo", "-y"]).arg(device);
+        cmd.args(["-map", "1:a:0", "-f", "null", "-"]).stderr(Stdio::piped()).stdout(Stdio::null());
+        #[cfg(unix)]
+        cmd.stdin(Stdio::from(video_read.try_clone()?));
+    } else if tracks == 1 {
         cmd.args(["-map", "0:v:0", "-map", "1:a:0"]);
     } else {
         let split = format!(
@@ -563,6 +581,7 @@ fn launch_target_tracks(
             ]);
         }
     }
+    if !camera {
     codec.video_args(&mut cmd, canvas.fps);
     cmd.args([
         "-c:a",
@@ -608,6 +627,8 @@ fn launch_target_tracks(
             cmd.args(["-progress", "pipe:1", "-y", if cfg!(windows) { "NUL" } else { "/dev/null" }])
                 .stdout(Stdio::piped());
         }
+        Target::Camera(_) => {}
+    }
     }
     // Only the audio read end crosses exec. fcntl is async-signal-safe; no fd
     // number is guessed or overwritten, and all writer ends remain CLOEXEC.

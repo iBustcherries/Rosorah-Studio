@@ -65,6 +65,7 @@ mod streaming;
 mod updates;
 mod studio;
 mod video;
+mod virtual_camera;
 mod widgets;
 mod window_memory;
 #[path = "dock_workspace.rs"]
