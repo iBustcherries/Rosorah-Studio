@@ -66,6 +66,16 @@ Description: Streaming and recording studio
  multistreaming, unified chat, alerts and automations. This is an unsigned
  development package.
 CONTROL
+# Menus and launchers re-read the app icon when the icon folder changes.
+cat > "$pkg/DEBIAN/postinst" <<'POSTINST'
+#!/bin/sh
+set -e
+touch --no-create /usr/share/icons/hicolor 2>/dev/null || true
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+    gtk-update-icon-cache -q -f /usr/share/icons/hicolor 2>/dev/null || true
+fi
+POSTINST
+chmod 0755 "$pkg/DEBIAN/postinst"
 out="/dist/rosorah-studio_${debversion}-1_amd64.deb"
 dpkg-deb --root-owner-group --build "$pkg" "$out" >/dev/null
 echo "Built $out"

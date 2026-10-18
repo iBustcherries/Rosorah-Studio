@@ -142,6 +142,11 @@ fn solid_window(ctx: &egui::Context) -> egui::Frame {
     let [r, g, b, _] = panel().to_srgba_unmultiplied();
     egui::Frame::window(&ctx.style()).fill(Color32::from_rgb(r, g, b))
 }
+/// Text that reads on the accent colour: black, or white when the accent is (nearly) black.
+fn on_accent(accent: Color32) -> Color32 {
+    let brightness = (0.2126 * accent.r() as f32 + 0.7152 * accent.g() as f32 + 0.0722 * accent.b() as f32) / 255.;
+    if brightness < 0.18 { Color32::WHITE } else { Color32::BLACK }
+}
 /// The cursor over something that can be dragged. Windows has no open-hand cursor (it would show
 /// the four-arrow "move" cross), so it gets the pointing hand there.
 pub(crate) fn grab_cursor() -> egui::CursorIcon {
@@ -149,7 +154,113 @@ pub(crate) fn grab_cursor() -> egui::CursorIcon {
 }
 /// The cursor while dragging; the pointing hand on Windows for the same reason.
 pub(crate) fn grabbing_cursor() -> egui::CursorIcon {
-    if cfg!(windows) { egui::CursorIcon::PointingHand } else { grabbing_cursor() }
+    if cfg!(windows) { egui::CursorIcon::PointingHand } else { egui::CursorIcon::Grabbing }
+}
+/// Drag-to-reorder for lists laid out normally by egui, with items of any size, down or across.
+/// While an item is held the others slide aside to show where it will land and the held one
+/// follows the pointer. Only painting moves (the layout stays put), so it costs almost nothing.
+pub(crate) struct ShiftDrag {
+    key: egui::Id,
+    horizontal: bool,
+    animate: bool,
+    /// The held item and where the pointer was when it was picked up.
+    held: Option<(usize, egui::Pos2)>,
+    target: Option<usize>,
+    previous: Vec<egui::Rect>,
+    rects: Vec<egui::Rect>,
+    next: Option<(usize, egui::Pos2)>,
+}
+impl ShiftDrag {
+    pub(crate) fn begin(ui: &egui::Ui, key: egui::Id, horizontal: bool, animate: bool, count: usize) -> Self {
+        let held = ui.data(|d| d.get_temp::<(usize, egui::Pos2)>(key)).filter(|(from, _)| *from < count);
+        let previous: Vec<egui::Rect> = ui.data(|d| d.get_temp(key.with("rects"))).unwrap_or_default();
+        let along = |p: egui::Pos2| if horizontal { p.x } else { p.y };
+        // Where the held item would land: past every other item whose middle the pointer has passed.
+        let target = held.zip(ui.ctx().pointer_interact_pos()).filter(|_| previous.len() == count).map(|((from, start), pointer)| {
+            let centre = along(previous[from].center()) + along(pointer) - along(start);
+            let mut to = 0;
+            for (i, r) in previous.iter().enumerate() {
+                if i != from && centre > along(r.center()) {
+                    to += 1;
+                }
+            }
+            to
+        });
+        Self { key, horizontal, animate, held, target, previous, rects: Vec::with_capacity(count), next: held }
+    }
+    /// How far item `p` is drawn from its place in the layout.
+    fn offset(&self, ui: &egui::Ui, p: usize) -> egui::Vec2 {
+        let axis = |v: f32| if self.horizontal { egui::vec2(v, 0.) } else { egui::vec2(0., v) };
+        if let Some((from, start)) = self.held
+            && from == p
+            && let Some(pointer) = ui.ctx().pointer_interact_pos()
+        {
+            return axis(if self.horizontal { pointer.x - start.x } else { pointer.y - start.y });
+        }
+        let shift = match (self.held, self.target) {
+            (Some((from, _)), Some(to)) if self.previous.len() > from.max(p) => {
+                // The gap the held item leaves: its size plus the space to its neighbour.
+                let size = |r: egui::Rect| if self.horizontal { r.width() } else { r.height() };
+                let gap = self.previous.get(from + 1).or(from.checked_sub(1).and_then(|i| self.previous.get(i))).map_or(0., |n| {
+                    let r = self.previous[from];
+                    if self.horizontal { (n.left() - r.right()).max(r.left() - n.right()).max(0.) } else { (n.top() - r.bottom()).max(r.top() - n.bottom()).max(0.) }
+                });
+                let step = size(self.previous[from]) + gap;
+                if from < p && p <= to { -step } else if to <= p && p < from { step } else { 0. }
+            }
+            _ => 0.,
+        };
+        let duration = if self.animate { 0.12 } else { 0. };
+        axis(ui.ctx().animate_value_with_time(self.key.with(("shift", p)), shift, duration))
+    }
+    /// Draws item `p`; `add` returns the response that picks the item up when dragged.
+    pub(crate) fn item(&mut self, ui: &mut egui::Ui, p: usize, add: impl FnOnce(&mut egui::Ui) -> egui::Response) {
+        let offset = self.offset(ui, p);
+        let held = self.held.is_some_and(|(from, _)| from == p);
+        let inner = ui.with_visual_transform(egui::emath::TSTransform::from_translation(offset), |ui| {
+            if held {
+                ui.multiply_opacity(0.85);
+            }
+            add(ui)
+        });
+        self.rects.push(inner.response.rect);
+        let handle = inner.inner;
+        if handle.drag_started()
+            && let Some(pointer) = ui.ctx().pointer_interact_pos()
+        {
+            self.next = Some((p, pointer));
+        }
+        if held {
+            ui.ctx().set_cursor_icon(grabbing_cursor());
+        }
+    }
+    /// Returns (from, to) when the held item is let go somewhere new.
+    pub(crate) fn finish(self, ui: &egui::Ui) -> Option<(usize, usize)> {
+        let mut next = self.next;
+        let mut dropped = None;
+        if self.held.is_some() && !ui.input(|i| i.pointer.any_down()) {
+            dropped = self.held.zip(self.target).map(|((from, _), to)| (from, to)).filter(|(from, to)| from != to);
+            next = None;
+        }
+        let key = self.key;
+        ui.data_mut(|d| {
+            match next {
+                Some(h) => d.insert_temp(key, h),
+                None => d.remove::<(usize, egui::Pos2)>(key),
+            }
+            d.insert_temp(key.with("rects"), self.rects);
+        });
+        if next.is_some() {
+            ui.ctx().request_repaint();
+        }
+        if dropped.is_some() {
+            // The list is renumbered, so nothing should slide back from an old shift.
+            for p in 0..self.previous.len() {
+                ui.ctx().animate_value_with_time(key.with(("shift", p)), 0., 0.);
+            }
+        }
+        dropped
+    }
 }
 /// A list whose rows can be picked up and moved: the held row follows the pointer and the
 /// others slide out of its way. `row` draws one row (by position, top first) and returns the
@@ -309,6 +420,10 @@ pub struct Studio {
     sound_settings: Option<Id>,
     web_docks: crate::browser_dock::Docks,
     announcer: crate::announce::Announcer,
+    /// A file chooser open for the announcement image.
+    announce_picker: Option<mpsc::Receiver<Option<PathBuf>>>,
+    /// The announcement image's thumbnail, and the file it was made from.
+    announce_thumb: Option<(String, Option<egui::TextureHandle>)>,
     /// Whether this stream has been announced yet.
     announced: bool,
     /// Announcements switched off in the Go live checklist, for this stream only ([Discord, Bluesky]).
@@ -381,10 +496,8 @@ pub struct Studio {
     active_alert: Option<(String, Instant)>,
     activity: VecDeque<String>,
     message: String,
-    image_path: String,
-    adding_image: bool,
-    adding_video: bool,
-    video_picker: Option<mpsc::Receiver<Option<PathBuf>>>,
+    /// A file chooser that is open, and the scene whatever is picked gets added to.
+    media_picker: Option<(Id, mpsc::Receiver<Option<PathBuf>>)>,
     video_aspects: std::collections::BTreeMap<Id, [u32; 2]>,
     recorder: Option<mpsc::Receiver<Result<PathBuf, String>>>,
     live_recording: Option<crate::recording::Recording>,
@@ -689,6 +802,8 @@ impl Studio {
             sound_settings,
             web_docks: Default::default(),
             announcer: Default::default(),
+            announce_picker: None,
+            announce_thumb: None,
             announced: false,
             announce_skip: [false; 2],
             updates: Default::default(),
@@ -745,10 +860,7 @@ impl Studio {
             active_alert: None,
             activity: VecDeque::new(),
             message: "Ready".into(),
-            image_path: String::new(),
-            adding_image: false,
-            adding_video: false,
-            video_picker: None,
+            media_picker: None,
             video_aspects: Default::default(),
             recorder: None,
             live_recording: None,
@@ -1747,6 +1859,38 @@ impl Studio {
                 }
             });
             ui.add_space(6.);
+            ui.label(RichText::new("Image (optional)").small().strong());
+            ui.horizontal(|ui| {
+                if let Some((_, Some(texture))) = &self.announce_thumb {
+                    let size = texture.size_vec2();
+                    let scale = (120. / size.x).min(68. / size.y);
+                    ui.add(egui::Image::new((texture.id(), size * scale)).corner_radius(6));
+                }
+                ui.vertical(|ui| {
+                    if a.image.is_empty() {
+                        note(ui, "A picture posted with the announcement: attached on Discord, and the link card's thumbnail on Bluesky.");
+                    } else {
+                        note(ui, std::path::Path::new(&a.image).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(self.announce_picker.is_none(), egui::Button::new("Choose image…")).clicked() {
+                            let (tx, rx) = mpsc::channel();
+                            self.announce_picker = Some(rx);
+                            std::thread::spawn(move || {
+                                let path = crate::desktop::pick(crate::desktop::Pick::Open, "Choose an announcement image (PNG or JPEG)", "").unwrap_or_else(|e| {
+                                    crate::capture_log::event(e.to_string());
+                                    None
+                                });
+                                let _ = tx.send(path);
+                            });
+                        }
+                        if !a.image.is_empty() && ui.button("Remove").clicked() {
+                            a.image.clear();
+                        }
+                    });
+                });
+            });
+            ui.add_space(6.);
             ui.label(RichText::new("Preview").small().strong());
             let text = crate::announce::fill(&a.message, &preview_stream);
             egui::Frame::group(ui.style()).show(ui, |ui| {
@@ -1794,6 +1938,32 @@ impl Studio {
             }
         });
         note(ui, "The webhook address and app password are kept in your system's keyring with your stream keys.");
+        if let Some(rx) = &self.announce_picker
+            && let Ok(path) = rx.try_recv()
+        {
+            self.announce_picker = None;
+            if let Some(path) = path {
+                let path = path.display().to_string();
+                // Checked now, so a file that can't be posted is caught here rather than at go-live.
+                match crate::announce::load_picture(&path) {
+                    Ok(_) => self.stream_config.announce.image = path,
+                    Err(e) => self.tell(format!("{e:#}")),
+                }
+            }
+        }
+        // The thumbnail is made once per picture, small, and only while this page is open.
+        let image = self.stream_config.announce.image.clone();
+        if self.announce_thumb.as_ref().map(|(p, _)| p.as_str()) != Some(image.as_str()) {
+            let texture = (!image.is_empty())
+                .then(|| image::open(&image).ok())
+                .flatten()
+                .map(|picture| {
+                    let small = picture.thumbnail(240, 240).to_rgba8();
+                    let pixels = egui::ColorImage::from_rgba_unmultiplied([small.width() as usize, small.height() as usize], &small);
+                    ui.ctx().load_texture("announcement-thumbnail", pixels, egui::TextureOptions::LINEAR)
+                });
+            self.announce_thumb = Some((image, texture));
+        }
         if let Some(which) = test {
             self.announcer.send(&self.stream_config.announce, preview_stream, which, ui.ctx());
             self.tell("Sending a test announcement…".into());
@@ -1935,12 +2105,20 @@ impl Studio {
                     self.changed();
                 }
                 let label = if locked { format!("🔒 {name}") } else { name.clone() };
+                let selected = self.selections.get(&active).is_some_and(|v| v.contains(&i));
+                // On the accent-coloured selection, text is black (white if the accent itself is black).
+                let color = match (selected, visible) {
+                    (true, true) => on_accent(self.accent()),
+                    (true, false) => on_accent(self.accent()).gamma_multiply(0.6),
+                    (false, true) => ui.visuals().text_color(),
+                    (false, false) => muted(),
+                };
                 let response = ui
                     .add_sized(
                         [(ui.available_width() - 28.).max(30.), 26.],
-                        egui::Button::new(RichText::new(label).color(if visible { ui.visuals().text_color() } else { muted() }))
+                        egui::Button::new(RichText::new(label).color(color))
                             .sense(if locked { egui::Sense::click() } else { egui::Sense::click_and_drag() })
-                            .selected(self.selections.get(&active).is_some_and(|v| v.contains(&i)))
+                            .selected(selected)
                             .truncate(),
                     )
                     .on_hover_text(if locked { "Locked · right-click to unlock" } else { "Drag to reorder (top appears in front) · double-click to change" });
@@ -2024,15 +2202,14 @@ impl Studio {
                 self.layer_properties = Some((self.project.scenes[si].id, self.project.scenes[si].layers.len() - 1));
             }
             ui.separator();
+            // Choosing a file adds it straight away; there's no separate Add step.
             if ui.button("Media file · video, GIF or sound").clicked() {
-                self.adding_video = true;
-                self.adding_image = false;
-                self.image_path.clear();
                 ui.close();
+                self.pick_media(self.project.scenes[si].id, "Choose a video, GIF or sound");
             }
             if ui.button("Image").clicked() {
                 ui.close();
-                self.adding_image = !self.adding_image;
+                self.pick_media(self.project.scenes[si].id, "Choose an image");
             }
             if ui.button("Browser source").clicked() {
                 ui.close();
@@ -2080,7 +2257,7 @@ impl Studio {
                 ui.menu_button("Reuse a capture or camera", |ui| {
                     for (id, label) in reusable {
                         if ui.button(label).clicked() {
-                            self.project.scenes[si].layers.push(Layer { crop: [0.;4], group: 0, source: id, rect: [0., 0., 1., 1.], visible: true, locked: false, opacity: 1. });
+                            self.project.scenes[si].layers.push(Layer { crop: [0.;4], group: 0, frame: Default::default(), source: id, rect: [0., 0., 1., 1.], visible: true, locked: false, opacity: 1. });
                             let index = self.project.scenes[si].layers.len() - 1;
                             self.layer = Some(index);
                             self.selections.insert(self.project.scenes[si].id, vec![index]);
@@ -2091,100 +2268,44 @@ impl Studio {
                 });
             }
         });
-        if self.adding_video {
-            ui.label("Video file");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.image_path)
-                    .hint_text("Choose an MP4, WebM or MOV file"),
-            );
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(
-                        self.video_picker.is_none(),
-                        egui::Button::new("Choose file…"),
-                    )
-                    .clicked()
-                {
-                    let (tx, rx) = mpsc::channel();
-                    self.video_picker = Some(rx);
-                    std::thread::spawn(move || {
-                        let path=crate::desktop::pick(crate::desktop::Pick::Open,"Choose video or audio","").unwrap_or_else(|e|{crate::capture_log::event(e.to_string());None});
-                        let _ = tx.send(path);
-                    });
-                }
-                if ui
-                    .add_enabled(
-                        std::path::Path::new(&self.image_path).is_file(),
-                        egui::Button::new("Add video"),
-                    )
-                    .clicked()
-                {
-                    let id = self.project.id();
-                    self.project.sources.push(Source {
-                        id,
-                        name: std::path::Path::new(&self.image_path)
-                            .file_name()
-                            .unwrap()
-                            .to_string_lossy()
-                            .into_owned(),
-                        kind: SourceKind::VideoFile(auroracast_core::VideoSettings {
-                            path: self.image_path.clone(),
-                            ..Default::default()
-                        }),
-                    });
-                    self.project.scenes[si].layers.push(Layer { crop: [0.;4], group: 0,
-                        source: id,
-                        rect: [0., 0., 1., 1.],
-                        visible: true,
-                        locked: false,
-                        opacity: 1.,
-                    });
-                    self.layer = Some(self.project.scenes[si].layers.len() - 1);
-                    self.selections.insert(self.project.scenes[si].id, vec![self.project.scenes[si].layers.len()-1]);
-                    self.adding_video = false;
-                    self.changed();
-                }
-                if ui.button("Cancel").clicked() {
-                    self.adding_video = false;
-                }
+    }
+    /// Opens the file chooser; whatever is picked is added to `scene` straight away.
+    fn pick_media(&mut self, scene: Id, title: &'static str) {
+        if self.media_picker.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        self.media_picker = Some((scene, rx));
+        std::thread::spawn(move || {
+            let path = crate::desktop::pick(crate::desktop::Pick::Open, title, "").unwrap_or_else(|e| {
+                crate::capture_log::event(e.to_string());
+                None
             });
-            ui.small("Videos loop by default. Choose an event below to use the video as an alert.");
-        }
-        if self.adding_image {
-            note(ui, "PNG or JPEG path");
-            ui.text_edit_singleline(&mut self.image_path);
-            if ui.button("Import image").clicked() {
-                match image::image_dimensions(&self.image_path) {
-                    Ok((w, h)) if w > 0 && h > 0 && w <= 4096 && h <= 4096 => {
-                        let id = self.project.id();
-                        let name = PathBuf::from(&self.image_path)
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_else(|| "Image".into());
-                        self.project.sources.push(Source {
-                            id,
-                            name,
-                            kind: SourceKind::Image {
-                                path: self.image_path.clone(),
-                            },
-                        });
-                        self.project.scenes[si].layers.push(Layer { crop: [0.;4], group: 0,
-                            source: id,
-                            rect: [0.1, 0.1, 0.5, 0.5],
-                            visible: true,
-                            locked: false,
-                            opacity: 1.,
-                        });
-                        self.layer = Some(self.project.scenes[si].layers.len() - 1);
-                    self.selections.insert(self.project.scenes[si].id, vec![self.project.scenes[si].layers.len()-1]);
-                        self.adding_image = false;
-                        self.changed();
-                    }
-                    Ok(_) => self.message = "Images must be at most 4096 × 4096".into(),
-                    Err(e) => self.message = format!("Image could not be opened: {e}"),
-                }
+            let _ = tx.send(path);
+        });
+    }
+    /// Adds a picked file as a layer: pictures as images, anything else (video, GIF, sound) as media.
+    fn add_media_file(&mut self, scene: Id, path: PathBuf) {
+        let Some(si) = self.project.scenes.iter().position(|s| s.id == scene) else { return };
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "Media".into());
+        let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let (kind, rect) = if matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp" | "bmp") {
+            match image::image_dimensions(&path) {
+                Ok((w, h)) if w > 0 && h > 0 && w <= 4096 && h <= 4096 => (SourceKind::Image { path: path.display().to_string() }, [0.1, 0.1, 0.5, 0.5]),
+                Ok(_) => return self.tell("Images can be at most 4096 × 4096".into()),
+                Err(e) => return self.tell(format!("That image couldn't be opened: {e}")),
             }
-        }
+        } else {
+            (SourceKind::VideoFile(auroracast_core::VideoSettings { path: path.display().to_string(), ..Default::default() }), [0., 0., 1., 1.])
+        };
+        let id = self.project.id();
+        self.project.sources.push(Source { id, name: name.clone(), kind });
+        self.project.scenes[si].layers.push(Layer { crop: [0.; 4], group: 0, frame: Default::default(), source: id, rect, visible: true, locked: false, opacity: 1. });
+        let index = self.project.scenes[si].layers.len() - 1;
+        self.layer = Some(index);
+        self.selections.insert(scene, vec![index]);
+        self.changed();
+        self.tell(format!("Added {name}"));
     }
     fn widget_controls(&mut self, ui: &mut egui::Ui, id: Id) {
         let Some(Source {
@@ -2211,6 +2332,13 @@ impl Studio {
                 &mut next.fit_media,
                 "Fit media inside box (off = fill and crop)",
             );
+            // Older alert boxes were a wide strip; this reshapes the box to 16:9 everywhere it's shown.
+            if (next.layout_width, next.layout_height) != (960, 540)
+                && ui.button("Make 16:9").on_hover_text("Reshape the alert box to 16:9 so videos fit without stretching").clicked()
+            {
+                next.layout_width = 960;
+                next.layout_height = 540;
+            }
             ui.small("Alerts use this source's canvas rectangle. Add media as a Media file source and enable Controlled by automation. Remove its ordinary canvas layer if it should only appear here. Set this box's background opacity to zero to reveal media.");
             let media: Vec<_> = self
                 .project
@@ -2359,13 +2487,38 @@ impl Studio {
             );
         }
         if next != *saved {
+            let reshaped = next.kind == widgets::Kind::AlertBox && (saved.layout_width, saved.layout_height) != (next.layout_width, next.layout_height);
             self.project
                 .sources
                 .iter_mut()
                 .find(|s| s.id == id)
                 .unwrap()
                 .kind = SourceKind::Widget(next);
+            if reshaped {
+                self.fit_layers_to_16_9(id);
+            }
             self.changed();
+        }
+    }
+    /// Gives every layer showing `source` a 16:9 shape on its canvas, keeping its width and centre.
+    fn fit_layers_to_16_9(&mut self, source: Id) {
+        let ratios: Vec<(Id, f32)> = self
+            .project
+            .scenes
+            .iter()
+            .filter_map(|scene| {
+                let canvas = self.project.canvases.iter().find(|c| c.scene == scene.id || self.project.canvas_scenes(c.id).contains(&scene.id))?;
+                Some((scene.id, canvas.width.max(1) as f32 / canvas.height.max(1) as f32))
+            })
+            .collect();
+        for (scene, ratio) in ratios {
+            let Some(scene) = self.project.scenes.iter_mut().find(|s| s.id == scene) else { continue };
+            for layer in scene.layers.iter_mut().filter(|l| l.source == source) {
+                let [x, y, w, _] = layer.rect;
+                let h = (w * ratio * 9. / 16.).min(1. - y);
+                let fitted = h / (ratio * 9. / 16.);
+                layer.rect = [x + (w - fitted) / 2., y, fitted, h];
+            }
         }
     }
     fn video_controls(&mut self, ui: &mut egui::Ui, id: Id) {
@@ -4264,10 +4417,7 @@ impl Studio {
                 ui.colored_label(Color32::LIGHT_RED, error);
             }
         }
-        #[derive(Clone, Copy)]
-        struct MixerDrag(Id);
         let mut changed = false;
-        let dragged = egui::DragAndDrop::payload::<MixerDrag>(ui.ctx()).map(|p| p.0);
         // Vertical strips are sized to the panel so meters and buttons never fall
         // below it; the non-meter height of a strip is measured on the previous frame.
         let overhead_id = ui.id().with("mixer-strip-overhead");
@@ -4278,14 +4428,12 @@ impl Studio {
         let strip_height = (ui.available_height() - ui.spacing().scroll.allocated_width() - 4.).max(0.);
         let meter_height = (strip_height - overhead).max(24.);
         let automatic = self.project.preferences.auto_game_audio;
-        let accent = self.accent();
         let sound_settings = &mut self.sound_settings;
         let mut refresh = false;
-        let mut draw_channel = |ui: &mut egui::Ui, channel: &mut auroracast_core::AudioChannel| {
-            ui.push_id(channel.id, |ui| {
-                if dragged == Some(channel.id) {
-                    ui.multiply_opacity(0.45);
-                }
+        // Draws one strip; returns what picks it up for reordering (its grip and name).
+        let mut draw_channel = |ui: &mut egui::Ui, channel: &mut auroracast_core::AudioChannel| -> egui::Response {
+            let mut grab = None;
+            let strip = ui.push_id(channel.id, |ui| {
                 egui::Frame::new().inner_margin(egui::Margin::symmetric(0,4)).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y=4.;
                     let levels = view.stereo_peaks.get(&channel.id).copied().unwrap_or([0.;2]);
@@ -4303,15 +4451,11 @@ impl Studio {
                             ui.set_max_width(if vertical_audio { ui.available_width() } else { (ui.available_width() - 52.).max(24.) });
                             ui.add(egui::Label::new(egui::RichText::new(&channel.name).strong()).truncate().sense(egui::Sense::drag()))
                         }).inner;
-                        for response in [handle, name] {
-                            response.dnd_set_drag_payload(MixerDrag(channel.id));
-                            if response.dragged() {
-                                ui.ctx().set_cursor_icon(grabbing_cursor());
-                            } else if response.hovered() {
-                                ui.ctx().set_cursor_icon(grab_cursor());
-                            }
-                            response.on_hover_text("Drag to reorder");
+                        let handle = handle.union(name);
+                        if handle.hovered() && !handle.dragged() {
+                            ui.ctx().set_cursor_icon(grab_cursor());
                         }
+                        grab = Some(handle.on_hover_text("Drag to reorder"));
                         if !vertical_audio {
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.small(&level_text);
@@ -4447,45 +4591,14 @@ impl Studio {
                     }
                 });
                 ui.add_space(4.);
-            }).response.rect
+            }).response;
+            grab.unwrap_or(strip)
         };
         let mut reorder = None;
-        let mut drop_target = |ui: &mut egui::Ui, rects: &[egui::Rect]| {
-            let Some(id) = dragged else { return };
-            let Some(pointer) = ui.ctx().pointer_interact_pos() else { return };
-            if !ui.clip_rect().contains(pointer) || rects.is_empty() {
-                return;
-            }
-            let index = rects
-                .iter()
-                .position(|r| if vertical_audio { pointer.x < r.center().x } else { pointer.y < r.center().y })
-                .unwrap_or(rects.len());
-            let (before, after) = (index.checked_sub(1).map(|i| rects[i]), rects.get(index).copied());
-            let stroke = egui::Stroke::new(3., accent);
-            if vertical_audio {
-                let x = match (before, after) {
-                    (Some(b), Some(a)) => (b.right() + a.left()) / 2.,
-                    (Some(b), None) => b.right() + 2.,
-                    (None, Some(a)) => a.left() - 2.,
-                    (None, None) => return,
-                };
-                let r = after.or(before).unwrap();
-                ui.painter().vline(x, r.y_range(), stroke);
-            } else {
-                let y = match (before, after) {
-                    (Some(b), Some(a)) => (b.bottom() + a.top()) / 2.,
-                    (Some(b), None) => b.bottom(),
-                    (None, Some(a)) => a.top(),
-                    (None, None) => return,
-                };
-                let r = after.or(before).unwrap();
-                ui.painter().hline(r.x_range(), y, stroke);
-            }
-            if ui.input(|i| i.pointer.any_released()) {
-                egui::DragAndDrop::clear_payload(ui.ctx());
-                reorder = Some((id, index));
-            }
-        };
+        let animate = self.project.preferences.workspace.animations;
+        let shift_key = ui.id().with(("mixer-shift", vertical_audio));
+        // The old index style counts the insertion point before the strip is taken out.
+        let to_reorder = |(from, to): (usize, usize)| (shown[from], if to > from { to + 1 } else { to });
         let mut rects = Vec::with_capacity(scene_channels.len());
         if vertical_audio {
             // One row of strips; extra channels scroll sideways instead of wrapping
@@ -4495,9 +4608,10 @@ impl Studio {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.horizontal_top(|ui| {
-                        for channel in &mut scene_channels {
-                            let rect = ui
-                                .allocate_ui_with_layout(
+                        let mut shift = ShiftDrag::begin(ui, shift_key, true, animate, scene_channels.len());
+                        for (p, channel) in scene_channels.iter_mut().enumerate() {
+                            shift.item(ui, p, |ui| {
+                                ui.allocate_ui_with_layout(
                                     egui::vec2(108., strip_height),
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| {
@@ -4505,11 +4619,12 @@ impl Studio {
                                         draw_channel(ui, channel)
                                     },
                                 )
-                                .inner;
-                            rects.push(rect);
+                                .inner
+                            });
                         }
+                        rects.extend_from_slice(&shift.rects);
+                        reorder = shift.finish(ui).map(to_reorder);
                     });
-                    drop_target(ui, &rects);
                 });
             if let Some(rect) = rects.first() {
                 let measured = (rect.height() - meter_height).max(0.);
@@ -4523,10 +4638,11 @@ impl Studio {
                 .id_salt("mixer-rows")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    for channel in &mut scene_channels {
-                        rects.push(draw_channel(ui, channel));
+                    let mut shift = ShiftDrag::begin(ui, shift_key, false, animate, scene_channels.len());
+                    for (p, channel) in scene_channels.iter_mut().enumerate() {
+                        shift.item(ui, p, |ui| draw_channel(ui, channel));
                     }
-                    drop_target(ui, &rects);
+                    reorder = shift.finish(ui).map(to_reorder);
                 });
         }
         if refresh {
@@ -5173,13 +5289,14 @@ impl eframe::App for Studio {
             self.donation_save_due = None;
             self.save();
         }
-        if let Some(rx) = &self.video_picker
+        if let Some((scene, rx)) = &self.media_picker
             && let Ok(path) = rx.try_recv()
         {
-            if let Some(p) = path {
-                self.image_path = p.display().to_string();
+            let scene = *scene;
+            self.media_picker = None;
+            if let Some(path) = path {
+                self.add_media_file(scene, path);
             }
-            self.video_picker = None;
         }
 
         self.captures.sync_widgets(&self.project);
@@ -5833,7 +5950,7 @@ fn ensure_automatic_source(project: &mut Project) -> bool {
     });
     for scene in &mut project.scenes {
         if project.canvases.iter().any(|c| c.scene == scene.id) {
-            scene.layers.push(Layer { crop: [0.;4], group: 0,
+            scene.layers.push(Layer { crop: [0.;4], group: 0, frame: Default::default(),
                 source: id,
                 rect: [0., 0., 1., 1.],
                 visible: true,
@@ -5941,6 +6058,52 @@ mod sortable_rows_tests {
         });
         tops
     }
+    /// Three 30-point items; returns where each was drawn and any finished move.
+    fn shift_frame(ctx: &egui::Context, time: f64, events: Vec<egui::Event>) -> (Vec<f32>, Option<(usize, usize)>) {
+        let mut moved = None;
+        let input = egui::RawInput { time: Some(time), events, screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400., 600.))), ..Default::default() };
+        let output = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let mut shift = ShiftDrag::begin(ui, egui::Id::new("shift"), false, false, 3);
+                for p in 0..3 {
+                    shift.item(ui, p, |ui| {
+                        let (rect, response) = ui.allocate_exact_size(egui::vec2(200., 30.), egui::Sense::drag());
+                        ui.painter().rect_filled(rect, 0., Color32::WHITE);
+                        response
+                    });
+                }
+                moved = shift.finish(ui);
+            });
+        });
+        // The painted white boxes carry the visual shift: their tops are where each item was drawn.
+        let drawn = output
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                // The held item is drawn a little see-through, so match any light grey too.
+                egui::Shape::Rect(r) if r.fill.r() > 150 && r.fill.r() == r.fill.g() && r.fill.g() == r.fill.b() => Some(r.rect.top()),
+                _ => None,
+            })
+            .collect();
+        (drawn, moved)
+    }
+    #[test]
+    fn dragged_item_slides_others_aside_and_lands_where_dropped() {
+        use egui::{Event, PointerButton, pos2};
+        let ctx = egui::Context::default();
+        let press = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        let (rest, _) = shift_frame(&ctx, 0.0, vec![]);
+        let item0 = pos2(50., rest[0] + 15.);
+        shift_frame(&ctx, 0.1, vec![Event::PointerMoved(item0), press(item0, true)]);
+        shift_frame(&ctx, 0.2, vec![Event::PointerMoved(item0 + egui::vec2(0., 20.))]);
+        let below = item0 + egui::vec2(0., 75.);
+        let (held, _) = shift_frame(&ctx, 0.3, vec![Event::PointerMoved(below)]);
+        let (held, _) = if held[1] >= rest[1] { shift_frame(&ctx, 0.4, vec![Event::PointerMoved(below)]) } else { (held, None) };
+        assert!(held[1] < rest[1] - 10., "item 1 slid up: {held:?} vs {rest:?}");
+        assert!(held[0] > rest[0] + 40., "held item follows the pointer: {held:?}");
+        let (_, moved) = shift_frame(&ctx, 0.5, vec![press(below, false)]);
+        assert_eq!(moved, Some((0, 2)));
+    }
     #[test]
     fn rows_move_with_their_panel_without_lagging() {
         let ctx = egui::Context::default();
@@ -5951,5 +6114,22 @@ mod sortable_rows_tests {
         for (b, a) in before.iter().zip(&after) {
             assert!((a - b - 120.).abs() < 0.01, "row lagged: {b} → {a}");
         }
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+    #[test]
+    fn selected_text_is_black_unless_the_accent_is_black() {
+        assert_eq!(on_accent(Color32::from_rgb(196, 170, 255)), Color32::BLACK);
+        assert_eq!(on_accent(Color32::from_rgb(255, 230, 0)), Color32::BLACK);
+        assert_eq!(on_accent(Color32::BLACK), Color32::WHITE);
+        assert_eq!(on_accent(Color32::from_rgb(20, 20, 30)), Color32::WHITE);
+    }
+    #[test]
+    fn drag_cursors_return() {
+        let expected = if cfg!(windows) { [egui::CursorIcon::PointingHand; 2] } else { [egui::CursorIcon::Grab, egui::CursorIcon::Grabbing] };
+        assert_eq!([grab_cursor(), grabbing_cursor()], expected);
     }
 }

@@ -742,7 +742,8 @@ fn render_frame(s: &Settings, text: &str, value: u64, elapsed: f32) -> anyhow::R
     if !matches!(s.kind, Kind::QrCode | Kind::Sports | Kind::Credits) {
         return Ok(polished_info(s, text));
     }
-    let (width, height) = (960, 400);
+    // An alert box without text is a clear picture at the box's own size, so media fits its shape.
+    let (width, height) = if s.kind == Kind::AlertBox { (s.layout_width.clamp(96, 960), s.layout_height.clamp(96, 960)) } else { (960, 400) };
     let mut p = Paint {
         pixels: vec![0; (width * height * 4) as usize],
         width,

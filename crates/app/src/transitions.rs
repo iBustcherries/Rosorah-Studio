@@ -142,13 +142,17 @@ impl Studio {
             }
         }
         let before = (self.project.preferences.transition, self.project.preferences.transition_ms, self.project.preferences.transition_media.clone());
-        for kind in [Transition::Cut, Transition::Fade, Transition::Wipe, Transition::Stinger, Transition::Screen] {
+        for kind in [Transition::Cut, Transition::Fade, Transition::Wipe, Transition::Move, Transition::Stinger, Transition::Screen] {
             ui.selectable_value(&mut self.project.preferences.transition, kind, kind.label());
         }
         ui.separator();
         match self.project.preferences.transition {
             Transition::Fade | Transition::Wipe => {
                 ui.add(egui::DragValue::new(&mut self.project.preferences.transition_ms).range(0..=2000).suffix(" ms"));
+            }
+            Transition::Move => {
+                ui.add(egui::DragValue::new(&mut self.project.preferences.transition_ms).range(100..=2000).suffix(" ms"));
+                note(ui, "Layers showing the same thing in both scenes (your camera, a game, an image) glide to their new place and size. Everything else fades.");
             }
             Transition::Stinger => {
                 self.transition_file_row(ui, true);

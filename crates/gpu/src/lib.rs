@@ -12,8 +12,62 @@ struct Vertex {
     opacity: f32,
     key: [f32; 4],
     key_options: [f32; 2],
+    /// Position from the layer's centre in pixels, for the frame outline.
+    local: [f32; 2],
+    /// Frame: half width, half height, corner radius and edge fade in pixels; x below 0 is off.
+    frame: [f32; 4],
 }
 
+const NO_FRAME: [f32; 4] = [-1., 0., 0., 0.];
+/// Between two scenes with the Move transition: layers glide from where they were.
+struct Motion {
+    from: Id,
+    started: std::time::Instant,
+    duration: std::time::Duration,
+}
+/// Smooth start and finish.
+fn ease(p: f32) -> f32 {
+    if p < 0.5 { 4. * p * p * p } else { 1. - (-2. * p + 2.).powi(3) / 2. }
+}
+fn mix(a: f32, b: f32, t: f32) -> f32 {
+    a + (b - a) * t
+}
+/// The layers to draw `p` of the way from `old` to `new`. A layer showing the same source in
+/// both scenes moves between its two places; the rest fade out (under) or in.
+fn moving_layers(old: &[auroracast_core::Layer], new: &[auroracast_core::Layer], p: f32) -> Vec<auroracast_core::Layer> {
+    let t = ease(p);
+    let mut used = vec![false; old.len()];
+    let mut arriving = Vec::with_capacity(new.len());
+    for layer in new.iter().filter(|l| l.visible) {
+        let mut l = layer.clone();
+        match old.iter().enumerate().position(|(i, o)| !used[i] && o.visible && o.source == layer.source) {
+            Some(i) => {
+                used[i] = true;
+                let o = &old[i];
+                for k in 0..4 {
+                    l.rect[k] = mix(o.rect[k], layer.rect[k], t);
+                    l.crop[k] = mix(o.crop[k], layer.crop[k], t);
+                }
+                l.opacity = mix(o.opacity, layer.opacity, t);
+                l.frame.radius = mix(o.frame.radius, layer.frame.radius, t);
+                l.frame.feather = mix(o.frame.feather, layer.frame.feather, t);
+                if o.frame.shape != layer.frame.shape && t < 0.5 {
+                    l.frame.shape = o.frame.shape;
+                }
+            }
+            None => l.opacity *= t,
+        }
+        arriving.push(l);
+    }
+    let mut out: Vec<_> = old
+        .iter()
+        .enumerate()
+        .filter(|(i, o)| !used[*i] && o.visible)
+        .map(|(_, o)| auroracast_core::Layer { opacity: o.opacity * (1. - t), ..o.clone() })
+        .collect();
+    out.extend(arriving);
+    out
+}
 struct SharedSource {
     texture: wgpu::Texture,
     binding: wgpu::BindGroup,
@@ -30,6 +84,7 @@ struct TransitionFrame {
 struct Target {
     scene: Option<Id>,
     transition: Option<TransitionFrame>,
+    motion: Option<Motion>,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     display: wgpu::TextureView,
@@ -114,7 +169,7 @@ impl Compositor {
             bind_group_layouts: &[&layout],
             push_constant_ranges: &[],
         });
-        let attributes = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32x4, 4 => Float32x2];
+        let attributes = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32x4, 4 => Float32x2, 5 => Float32x2, 6 => Float32x4];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Canvas compositing"),
             layout: Some(&pipeline_layout),
@@ -253,6 +308,7 @@ impl Compositor {
             t.transition
                 .as_ref()
                 .is_some_and(|f| f.started.elapsed() < f.duration)
+                || t.motion.as_ref().is_some_and(|m| m.started.elapsed() < m.duration)
         })
     }
     /// GPU-only canvas presentation: no map, CPU copy, or blocking device poll.
@@ -306,6 +362,7 @@ impl Compositor {
                 Target {
                     scene: None,
                     transition: None,
+                    motion: None,
                     texture,
                     view,
                     display,
@@ -368,8 +425,14 @@ impl Compositor {
                 ),
                 kind: project.preferences.transition,
             });
-        } else if target.scene != Some(canvas.scene) {
+        } else if let Some(from) = target.scene.filter(|s| *s != canvas.scene) {
             target.transition = None;
+            // Move needs no snapshot: the old scene's layers are interpolated as they are drawn.
+            target.motion = (project.preferences.transition == auroracast_core::Transition::Move).then(|| Motion {
+                from,
+                started: std::time::Instant::now(),
+                duration: std::time::Duration::from_millis(project.preferences.transition_ms.clamp(100, 2000) as u64),
+            });
         }
         target.scene = Some(canvas.scene);
         if target
@@ -379,12 +442,20 @@ impl Compositor {
         {
             target.transition = None;
         }
+        if target.motion.as_ref().is_some_and(|m| m.started.elapsed() >= m.duration) {
+            target.motion = None;
+        }
+        let moving = target.motion.as_ref().and_then(|m| {
+            let old = project.scene(m.from)?;
+            Some(moving_layers(&old.layers, &scene.layers, m.started.elapsed().as_secs_f32() / m.duration.as_secs_f32()))
+        });
+        let layers = moving.as_deref().unwrap_or(&scene.layers);
 
         let vertices = &mut self.vertices;
         let draws = &mut self.draws;
         vertices.clear();
         draws.clear();
-        for layer in scene.layers.iter().filter(|l| l.visible) {
+        for layer in layers.iter().filter(|l| l.visible) {
             if project.source(layer.source).is_some_and(|s|matches!(&s.kind,auroracast_core::SourceKind::VideoFile(v) if !v.canvases.is_empty() && !v.canvases.contains(&canvas.id))){continue;}
             if !self.sources.contains_key(&layer.source) {
                 bail!("Source {} has no uploaded frame", layer.source);
@@ -396,35 +467,37 @@ impl Compositor {
             let x1 = (x + w) * 2. - 1.;
             let y0 = 1. - y * 2.;
             let y1 = 1. - (y + h) * 2.;
+            // Frame outline in output pixels; plain rectangles skip the outline work entirely.
+            let (hw, hh) = (w * width as f32 / 2., h * height as f32 / 2.);
+            let short = hw.min(hh);
+            let frame = if layer.frame.plain() {
+                NO_FRAME
+            } else {
+                let feather = layer.frame.feather.clamp(0., 0.5) * short * 2.;
+                match layer.frame.shape {
+                    auroracast_core::FrameShape::Circle => [short, short, short, feather],
+                    auroracast_core::FrameShape::Rounded => [hw, hh, layer.frame.radius.clamp(0., 0.5) * short * 2., feather],
+                    auroracast_core::FrameShape::Square => [hw, hh, 0., feather],
+                }
+            };
+            let key = project.preferences.chroma_keys.get(&layer.source).cloned().unwrap_or_default().shader();
             let start = vertices.len() as u32;
-            for (position, uv) in [
-                ([x0, y0], [u0,v0]),
-                ([x0, y1], [u0,v1]),
-                ([x1, y1], [u1,v1]),
-                ([x0, y0], [u0,v0]),
-                ([x1, y1], [u1,v1]),
-                ([x1, y0], [u1,v0]),
+            for (position, uv, local) in [
+                ([x0, y0], [u0,v0], [-hw, -hh]),
+                ([x0, y1], [u0,v1], [-hw, hh]),
+                ([x1, y1], [u1,v1], [hw, hh]),
+                ([x0, y0], [u0,v0], [-hw, -hh]),
+                ([x1, y1], [u1,v1], [hw, hh]),
+                ([x1, y0], [u1,v0], [hw, -hh]),
             ] {
                 vertices.push(Vertex {
+                    local,
+                    frame,
                     position,
                     uv,
                     opacity: layer.opacity,
-                    key: project
-                        .preferences
-                        .chroma_keys
-                        .get(&layer.source)
-                        .cloned()
-                        .unwrap_or_default()
-                        .shader()
-                        .0,
-                    key_options: project
-                        .preferences
-                        .chroma_keys
-                        .get(&layer.source)
-                        .cloned()
-                        .unwrap_or_default()
-                        .shader()
-                        .1,
+                    key: key.0,
+                    key_options: key.1,
                 });
             }
             draws.push((Some(layer.source), start..start + 6));
@@ -450,6 +523,8 @@ impl Compositor {
                     opacity,
                     key: [0., 0., 0., -1.],
                     key_options: [0.001, 0.],
+                    local: [0., 0.],
+                    frame: NO_FRAME,
                 });
             }
             draws.push((None, start..start + 6));
@@ -487,6 +562,8 @@ impl Compositor {
                     opacity: o.opacity.clamp(0., 1.),
                     key: [0., 0., 0., -1.],
                     key_options: [0.001, 0.],
+                    local: [0., 0.],
+                    frame: NO_FRAME,
                 });
             }
             draws.push((Some(o.source), start..start + 6));
@@ -648,7 +725,7 @@ mod transition_tests {
         use auroracast_core::{Layer, Overlay, SourceKind, Transition};
         let mut p = Project::default();
         p.sources[0].kind = SourceKind::Color([255, 0, 0, 255]);
-        p.scenes[0].layers = vec![Layer { crop: [0.; 4], group: 0, source: 1, rect: [0., 0., 1., 1.], visible: true, locked: false, opacity: 1. }];
+        p.scenes[0].layers = vec![Layer { crop: [0.; 4], group: 0, frame: Default::default(), source: 1, rect: [0., 0., 1., 1.], visible: true, locked: false, opacity: 1. }];
         p.scenes[1].layers = p.scenes[0].layers.clone();
         p.canvases[1].scene = p.scenes[0].id;
         let mut g = pollster::block_on(Compositor::new())?;
@@ -677,14 +754,14 @@ mod transition_tests {
         let mut p = Project::default();
         p.sources[0].kind = SourceKind::Color([255, 0, 0, 255]);
         p.sources[1].kind = SourceKind::Color([0, 255, 0, 255]);
-        p.scenes[0].layers = vec![Layer { crop: [0.;4], group: 0,
+        p.scenes[0].layers = vec![Layer { crop: [0.;4], group: 0, frame: Default::default(),
             source: 1,
             rect: [0., 0., 1., 1.],
             visible: true,
             locked: false,
             opacity: 1.,
         }];
-        p.scenes[1].layers = vec![Layer { crop: [0.;4], group: 0,
+        p.scenes[1].layers = vec![Layer { crop: [0.;4], group: 0, frame: Default::default(),
             source: 2,
             rect: [0., 0., 1., 1.],
             visible: true,
@@ -785,7 +862,7 @@ mod alert_canvas_tests {
             canvases: vec![p.canvases[0].id],
             ..Default::default()
         });
-        p.scenes[0].layers = vec![Layer { crop: [0.;4], group: 0,
+        p.scenes[0].layers = vec![Layer { crop: [0.;4], group: 0, frame: Default::default(),
             source: p.sources[0].id,
             rect: [0., 0., 1., 1.],
             visible: true,
@@ -817,7 +894,7 @@ mod chroma_tests {
         use auroracast_core::{Layer, browser::ChromaKey};
         let mut p = Project::default();
         let id = p.sources[0].id;
-        p.scenes[0].layers = vec![Layer { crop: [0.;4], group: 0,
+        p.scenes[0].layers = vec![Layer { crop: [0.;4], group: 0, frame: Default::default(),
             source: id,
             rect: [0., 0., 1., 1.],
             visible: true,
@@ -855,4 +932,73 @@ mod chroma_tests {
   gpu.upload(p.sources[0].id,8,8,&pixels)?;let cropped=gpu.render(&p,&p.canvases[0],64,64)?;let full=gpu.render(&p,&p.canvases[1],64,64)?;
   let at=|f:&[u8],x:usize|f[(32*64+x)*4..(32*64+x)*4+4].to_vec();assert_eq!(at(&cropped,16),vec![0,255,0,255]);assert_eq!(at(&full,16),vec![255,0,0,255]);Ok(())
  }
+}
+
+#[cfg(test)]
+mod frame_key_move_tests {
+    use super::*;
+    use auroracast_core::{FrameShape, Layer, browser::ChromaKey};
+    fn full(source: Id) -> Layer {
+        Layer { crop: [0.; 4], group: 0, frame: Default::default(), source, rect: [0., 0., 1., 1.], visible: true, locked: false, opacity: 1. }
+    }
+    fn at(f: &[u8], size: usize, x: usize, y: usize) -> [u8; 4] {
+        let i = (y * size + x) * 4;
+        [f[i], f[i + 1], f[i + 2], f[i + 3]]
+    }
+    #[test]
+    #[ignore = "requires Vulkan; exercised in release validation"]
+    fn green_screen_removes_green_and_keeps_skin_and_red() -> Result<()> {
+        let mut p = Project::default();
+        let id = p.sources[0].id;
+        p.scenes[0].layers = vec![full(id)];
+        p.preferences.chroma_keys.insert(id, ChromaKey { enabled: true, ..Default::default() });
+        let mut g = pollster::block_on(Compositor::new())?;
+        // Studio green, a skin tone, red.
+        g.upload(id, 3, 1, &[40, 200, 60, 255, 224, 172, 140, 255, 220, 30, 30, 255])?;
+        let px = g.render(&p, &p.canvases[0], 30, 30)?;
+        // Removed means the canvas's dark navy background (about 16, 24, 33) shows through.
+        let green = at(&px, 30, 4, 15);
+        assert!(green[1] < 30 && green[0] < 25 && green[2] < 40, "green removed: {green:?}");
+        let skin = at(&px, 30, 15, 15);
+        assert!(skin[0] > 180 && skin[1] > 130, "skin kept: {skin:?}");
+        let red = at(&px, 30, 25, 15);
+        assert!(red[0] > 180, "red kept: {red:?}");
+        Ok(())
+    }
+    #[test]
+    #[ignore = "requires Vulkan; exercised in release validation"]
+    fn circle_frame_clears_corners_and_keeps_centre() -> Result<()> {
+        let mut p = Project::default();
+        let id = p.sources[0].id;
+        let mut layer = full(id);
+        layer.frame.shape = FrameShape::Circle;
+        p.scenes[0].layers = vec![layer];
+        let mut g = pollster::block_on(Compositor::new())?;
+        g.upload(id, 1, 1, &[255, 255, 255, 255])?;
+        let px = g.render(&p, &p.canvases[0], 64, 64)?;
+        assert!(at(&px, 64, 32, 32)[0] > 240, "centre drawn");
+        assert!(at(&px, 64, 2, 2)[0] < 20, "corner cleared");
+        // A feathered edge is partly see-through between the two.
+        p.scenes[0].layers[0].frame.feather = 0.3;
+        let soft = g.render(&p, &p.canvases[0], 64, 64)?;
+        let edge = at(&soft, 64, 32, 4)[0];
+        assert!(edge > 10 && edge < 200, "edge fades: {edge}");
+        Ok(())
+    }
+    #[test]
+    fn move_glides_shared_layers_and_fades_the_rest() {
+        let mut a = full(1);
+        a.rect = [0., 0., 0.2, 0.2];
+        let mut b = full(1);
+        b.rect = [0.8, 0.8, 0.2, 0.2];
+        let only_old = full(2);
+        let only_new = full(3);
+        let mid = moving_layers(&[a.clone(), only_old], &[b.clone(), only_new], 0.5);
+        // Old-only first (underneath), then the new scene's layers in order.
+        assert_eq!(mid.iter().map(|l| l.source).collect::<Vec<_>>(), vec![2, 1, 3]);
+        assert!((mid[1].rect[0] - 0.4).abs() < 1e-5, "halfway: {:?}", mid[1].rect);
+        assert!((mid[0].opacity - 0.5).abs() < 1e-5 && (mid[2].opacity - 0.5).abs() < 1e-5);
+        let end = moving_layers(&[a], &[b.clone()], 1.);
+        assert_eq!(end[0].rect, b.rect);
+    }
 }

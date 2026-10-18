@@ -184,7 +184,7 @@ mod tests {
     use auroracast_core::{Layer, Project};
     fn scene() -> Scene {
         let mut scene = Project::default().scenes.remove(0);
-        scene.layers = vec![Layer { crop: [0.;4], group: 0,
+        scene.layers = vec![Layer { crop: [0.;4], group: 0, frame: Default::default(),
             source: 1,
             rect: [0.2, 0.2, 0.2, 0.2],
             visible: true,
@@ -230,7 +230,7 @@ mod tests {
     #[test]
     fn adjacent_sources_locked_targets_and_hidden_exclusion() {
         let mut scene = scene();
-        scene.layers.push(Layer { crop: [0.;4], group: 0,
+        scene.layers.push(Layer { crop: [0.;4], group: 0, frame: Default::default(),
             source: 2,
             rect: [0.61, 0.2, 0.2, 0.2],
             visible: true,

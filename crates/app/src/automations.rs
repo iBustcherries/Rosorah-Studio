@@ -455,7 +455,7 @@ fn add_sample_source(p: &mut Project, sample: &crate::alert_samples::Sample, lay
     if sample.sound || layer {
         let scenes: Vec<Id> = p.canvases.iter().map(|c| c.scene).collect();
         for scene in p.scenes.iter_mut().filter(|s| scenes.contains(&s.id)) {
-            scene.layers.push(auroracast_core::Layer { source: id, rect, visible: true, locked: sample.sound, opacity: if sample.sound { 0. } else { 1. }, crop: [0.; 4], group: 0 });
+            scene.layers.push(auroracast_core::Layer { frame: Default::default(), source: id, rect, visible: true, locked: sample.sound, opacity: if sample.sound { 0. } else { 1. }, crop: [0.; 4], group: 0 });
         }
     }
     id
@@ -1039,35 +1039,36 @@ impl Editor {
             ui.checkbox(&mut r.options.missed_alerts, "Also play for events that happened while Rosorah was closed");
             ui.add_space(8.);
             ui.strong("Then");
-            let mut move_action = None;
             let mut remove = None;
             let action_count = r.actions.len();
+            // Steps slide aside while one is dragged, showing where it will land.
+            let mut shift = crate::studio::ShiftDrag::begin(ui, ui.id().with("automation-steps"), false, p.preferences.workspace.animations, action_count);
             for (i, a) in r.actions.iter_mut().enumerate() {
-                ui.push_id(i, |ui| {
-                    egui::Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(10).inner_margin(10).show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.horizontal(|ui| {
-                            let handle = ui
-                                .add(egui::Label::new(RichText::new(format!("↕  {} · {}", i + 1, action_label(a))).strong()).sense(egui::Sense::click_and_drag()))
-                                .on_hover_text("Drag onto another step to reorder")
-                                .on_hover_cursor(crate::studio::grab_cursor());
-                            if handle.drag_started() {
-                                handle.dnd_set_drag_payload(i);
-                            }
-                            if let Some(from) = handle.dnd_release_payload::<usize>() {
-                                move_action = Some((*from, i));
-                            }
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.small_button("Remove").clicked() {
-                                    remove = Some(i);
-                                }
+                shift.item(ui, i, |ui| {
+                    let mut grab = None;
+                    ui.push_id(i, |ui| {
+                        egui::Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(10).inner_margin(10).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                let handle = ui
+                                    .add(egui::Label::new(RichText::new(format!("↕  {} · {}", i + 1, action_label(a))).strong()).sense(egui::Sense::click_and_drag()))
+                                    .on_hover_text("Drag to reorder")
+                                    .on_hover_cursor(crate::studio::grab_cursor());
+                                grab = Some(handle);
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.small_button("Remove").clicked() {
+                                        remove = Some(i);
+                                    }
+                                });
                             });
+                            changed |= self.action_body(ui, i, a, &mut p.sources, &p.canvases, &p.scenes, &mut p.audio, &mut p.preferences.monitor_device, cmds, &mut sample_choice);
                         });
-                        changed |= self.action_body(ui, i, a, &mut p.sources, &p.canvases, &p.scenes, &mut p.audio, &mut p.preferences.monitor_device, cmds, &mut sample_choice);
+                        ui.add_space(4.);
                     });
+                    grab.unwrap()
                 });
-                ui.add_space(4.);
             }
+            let move_action = shift.finish(ui);
             if let Some(i) = remove {
                 r.actions.remove(i);
             } else if let Some((from, to)) = move_action

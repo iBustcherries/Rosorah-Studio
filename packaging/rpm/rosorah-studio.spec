@@ -44,6 +44,13 @@ for size in 16 24 32 48 64 128 256 512; do
     install -Dm 0644 %{stagedir}/../icons/io.rosorah.Studio-$size.png %{buildroot}%{_datadir}/icons/hicolor/${size}x${size}/apps/io.rosorah.Studio.png
 done
 
+%post
+# Menus and launchers re-read the app icon when the icon folder changes.
+touch --no-create %{_datadir}/icons/hicolor &>/dev/null || :
+
+%posttrans
+gtk-update-icon-cache -q %{_datadir}/icons/hicolor &>/dev/null || :
+
 %files
 /opt/rosorah-studio
 %{_bindir}/rosorah-studio

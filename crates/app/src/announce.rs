@@ -24,6 +24,8 @@ pub struct Settings {
     pub bluesky_handle: String,
     /// Secret: a Bluesky app password, kept in the keyring with the stream keys.
     pub bluesky_password: String,
+    /// An optional picture (PNG or JPEG) posted with the announcement.
+    pub image: String,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -34,6 +36,7 @@ impl Default for Settings {
             bluesky: false,
             bluesky_handle: String::new(),
             bluesky_password: String::new(),
+            image: String::new(),
         }
     }
 }
@@ -44,6 +47,49 @@ impl Settings {
     pub fn bluesky_ready(&self) -> bool {
         self.bluesky && !handle(&self.bluesky_handle).is_empty() && !self.bluesky_password.trim().is_empty()
     }
+}
+/// Bluesky refuses images over about 1 MB; Discord allows far more, so one size suits both.
+const IMAGE_LIMIT: usize = 950_000;
+/// An image ready to post: its bytes, type and file name.
+pub struct Picture {
+    pub bytes: Vec<u8>,
+    pub mime: &'static str,
+    pub name: String,
+}
+/// Reads the announcement image, shrinking it (as a JPEG) when it's too big to post.
+pub fn load_picture(path: &str) -> Result<Picture> {
+    let path = std::path::Path::new(path.trim());
+    let extension = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    ensure!(matches!(extension.as_str(), "png" | "jpg" | "jpeg"), "Use a PNG or JPEG image");
+    let bytes = std::fs::read(path).with_context(|| format!("Couldn't read {}", path.display()))?;
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "announcement".into());
+    if bytes.len() <= IMAGE_LIMIT {
+        let mime = if extension == "png" { "image/png" } else { "image/jpeg" };
+        return Ok(Picture { bytes, mime, name: path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or(stem) });
+    }
+    let image = image::load_from_memory(&bytes).context("That image couldn't be opened")?;
+    let mut image = image.resize(1600, 1600, image::imageops::FilterType::Triangle).to_rgb8();
+    for quality in [85u8, 75, 65, 55, 45] {
+        let mut out = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, quality).encode_image(&image)?;
+        if out.len() <= IMAGE_LIMIT {
+            return Ok(Picture { bytes: out, mime: "image/jpeg", name: format!("{stem}.jpg") });
+        }
+        if quality == 55 {
+            image = image::imageops::resize(&image, image.width() * 3 / 4, image.height() * 3 / 4, image::imageops::FilterType::Triangle);
+        }
+    }
+    bail!("That image is too large to post; try a smaller one")
+}
+/// A multipart form body (for Discord's file upload): JSON settings plus one file.
+fn multipart(boundary: &str, json: &Value, picture: &Picture) -> Vec<u8> {
+    let mut body = Vec::with_capacity(picture.bytes.len() + 1024);
+    let name = picture.name.replace(['"', '\r', '\n'], "_");
+    body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"payload_json\"\r\nContent-Type: application/json\r\n\r\n{json}\r\n").as_bytes());
+    body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"files[0]\"; filename=\"{name}\"\r\nContent-Type: {}\r\n\r\n", picture.mime).as_bytes());
+    body.extend_from_slice(&picture.bytes);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    body
 }
 /// What the stream is about, for filling in the message.
 #[derive(Clone, Default)]
@@ -88,15 +134,20 @@ fn failure(response: reqwest::blocking::Response) -> anyhow::Error {
     let message = body["message"].as_str().filter(|m| !m.is_empty()).map(str::to_owned);
     anyhow::anyhow!(message.unwrap_or_else(|| format!("HTTP {status}")))
 }
-fn post_discord(webhook: &str, text: &str) -> Result<()> {
+fn post_discord(webhook: &str, text: &str, picture: Option<&Picture>) -> Result<()> {
     ensure!(valid_webhook(webhook), "That isn't a Discord webhook address");
     let text: String = text.chars().take(DISCORD_LIMIT).collect();
-    let response = client()?
-        .post(webhook.trim())
-        // @everyone and role mentions work when the message includes them.
-        .json(&json!({"content": text, "allowed_mentions": {"parse": ["everyone", "roles", "users"]}}))
-        .send()
-        .context("Couldn't reach Discord")?;
+    // @everyone and role mentions work when the message includes them.
+    let payload = json!({"content": text, "allowed_mentions": {"parse": ["everyone", "roles", "users"]}});
+    let request = client()?.post(webhook.trim());
+    let request = match picture {
+        Some(picture) => {
+            let boundary = format!("rosorah{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+            request.header("Content-Type", format!("multipart/form-data; boundary={boundary}")).body(multipart(&boundary, &payload, picture))
+        }
+        None => request.json(&payload),
+    };
+    let response = request.send().context("Couldn't reach Discord")?;
     if !response.status().is_success() {
         return Err(failure(response));
     }
@@ -119,7 +170,7 @@ fn link_facets(text: &str) -> Vec<Value> {
     }
     facets
 }
-fn post_bluesky(name: &str, password: &str, text: &str, stream: &Stream) -> Result<()> {
+fn post_bluesky(name: &str, password: &str, text: &str, stream: &Stream, picture: Option<&Picture>) -> Result<()> {
     let handle = handle(name);
     ensure!(!handle.is_empty(), "Enter your Bluesky handle");
     ensure!(text.chars().count() <= BLUESKY_LIMIT, "The message is longer than Bluesky's {BLUESKY_LIMIT} characters");
@@ -137,13 +188,31 @@ fn post_bluesky(name: &str, password: &str, text: &str, stream: &Stream) -> Resu
     }
     let session: Value = session.json()?;
     let (token, did) = (session["accessJwt"].as_str().context("Bluesky sign-in failed")?, session["did"].as_str().context("Bluesky sign-in failed")?);
+    // The picture is uploaded first; the post then refers to it.
+    let blob = match picture {
+        Some(picture) => {
+            let uploaded = client
+                .post("https://bsky.social/xrpc/com.atproto.repo.uploadBlob")
+                .bearer_auth(token)
+                .header("Content-Type", picture.mime)
+                .body(picture.bytes.clone())
+                .send()
+                .context("Couldn't upload the image to Bluesky")?;
+            if !uploaded.status().is_success() {
+                return Err(failure(uploaded));
+            }
+            Some(uploaded.json::<Value>()?["blob"].clone())
+        }
+        None => None,
+    };
     let mut record = json!({
         "$type": "app.bsky.feed.post",
         "text": text,
         "createdAt": chrono_now(),
         "facets": link_facets(text),
     });
-    // A link card for the first place to watch.
+    // A link card for the first place to watch, with the picture as its thumbnail; without a
+    // link the picture is attached on its own.
     if let Some((platform, url)) = stream.links.first() {
         record["embed"] = json!({
             "$type": "app.bsky.embed.external",
@@ -153,6 +222,11 @@ fn post_bluesky(name: &str, password: &str, text: &str, stream: &Stream) -> Resu
                 "description": if stream.category.trim().is_empty() { format!("Live now on {platform}") } else { format!("{} · live now on {platform}", stream.category.trim()) },
             },
         });
+        if let Some(blob) = &blob {
+            record["embed"]["external"]["thumb"] = blob.clone();
+        }
+    } else if let Some(blob) = blob {
+        record["embed"] = json!({"$type": "app.bsky.embed.images", "images": [{"image": blob, "alt": stream.title.trim()}]});
     }
     let response = client
         .post("https://bsky.social/xrpc/com.atproto.repo.createRecord")
@@ -182,14 +256,26 @@ impl Announcer {
         std::thread::spawn(move || {
             let text = fill(&settings.message, &stream);
             let mut out = Vec::new();
+            // A missing or broken picture shouldn't stop the announcement itself.
+            let picture = if settings.image.trim().is_empty() {
+                None
+            } else {
+                match load_picture(&settings.image) {
+                    Ok(p) => Some(p),
+                    Err(e) => {
+                        out.push(format!("The announcement image was left out: {e:#}"));
+                        None
+                    }
+                }
+            };
             if which[0] {
-                out.push(match post_discord(&settings.discord_webhook, &text) {
+                out.push(match post_discord(&settings.discord_webhook, &text, picture.as_ref()) {
                     Ok(()) => "Announced on Discord".to_owned(),
                     Err(e) => format!("Discord announcement failed: {e:#}"),
                 });
             }
             if which[1] {
-                out.push(match post_bluesky(&settings.bluesky_handle, &settings.bluesky_password, &text, &stream) {
+                out.push(match post_bluesky(&settings.bluesky_handle, &settings.bluesky_password, &text, &stream, picture.as_ref()) {
                     Ok(()) => "Announced on Bluesky".to_owned(),
                     Err(e) => format!("Bluesky announcement failed: {e:#}"),
                 });
@@ -225,6 +311,32 @@ mod tests {
         assert_eq!(&text[s..e], "https://twitch.tv/moe");
         let (s, e) = range(&facets[1]);
         assert_eq!(&text[s..e], "https://kick.com/moe");
+    }
+    #[test]
+    fn multipart_body_carries_json_and_file() {
+        let picture = Picture { bytes: vec![1, 2, 3], mime: "image/png", name: "live.png".into() };
+        let body = multipart("XYZ", &json!({"content": "hi"}), &picture);
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.starts_with("--XYZ\r\nContent-Disposition: form-data; name=\"payload_json\""));
+        assert!(text.contains("{\"content\":\"hi\"}"));
+        assert!(text.contains("name=\"files[0]\"; filename=\"live.png\"\r\nContent-Type: image/png\r\n\r\n\u{1}\u{2}\u{3}\r\n--XYZ--"));
+    }
+    #[test]
+    fn big_pictures_shrink_below_the_limit() {
+        let dir = std::env::temp_dir().join(format!("rosorah-announce-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Noise doesn't compress, so this PNG is well over the limit.
+        let mut seed = 12345u32;
+        let noisy = image::RgbImage::from_fn(1400, 1000, |_, _| {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            image::Rgb([(seed >> 24) as u8, (seed >> 16) as u8, (seed >> 8) as u8])
+        });
+        let path = dir.join("big.png");
+        noisy.save(&path).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() as usize > IMAGE_LIMIT);
+        let picture = load_picture(path.to_str().unwrap()).unwrap();
+        assert!(picture.bytes.len() <= IMAGE_LIMIT && picture.mime == "image/jpeg" && picture.name == "big.jpg");
+        let _ = std::fs::remove_dir_all(&dir);
     }
     #[test]
     fn only_discord_webhooks_are_accepted() {

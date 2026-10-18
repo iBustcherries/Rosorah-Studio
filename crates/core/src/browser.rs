@@ -45,9 +45,9 @@ impl Default for ChromaKey {
         Self {
             enabled: false,
             color: [0, 255, 0],
-            similarity: 0.12,
-            smoothness: 0.08,
-            spill: 0.2,
+            similarity: 0.55,
+            smoothness: 0.15,
+            spill: 0.6,
         }
     }
 }

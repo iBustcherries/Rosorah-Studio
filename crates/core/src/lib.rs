@@ -124,6 +124,9 @@ pub enum Transition {
     Stinger,
     /// Fade to a picture, hold, switch, fade back.
     Screen,
+    /// Layers showing the same source in both scenes glide to their new place and size;
+    /// the others fade out or in.
+    Move,
 }
 impl Transition {
     pub fn label(self) -> &'static str {
@@ -133,6 +136,7 @@ impl Transition {
             Self::Wipe => "Wipe",
             Self::Stinger => "Stinger video",
             Self::Screen => "Transition screen",
+            Self::Move => "Move",
         }
     }
     /// Fade and Wipe blend a snapshot of the old scene in the compositor; the others switch
@@ -230,11 +234,36 @@ pub struct Source {
     pub kind: SourceKind,
 }
 
+/// The outline a layer is drawn in, mostly for cameras.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FrameShape {
+    #[default]
+    Square,
+    Rounded,
+    Circle,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Frame {
+    pub shape: FrameShape,
+    /// Corner size for Rounded, as a share of the layer's shorter side (0–0.5).
+    pub radius: f32,
+    /// How far the edges fade into what's behind, as a share of the shorter side (0–0.5).
+    pub feather: f32,
+}
+impl Frame {
+    /// Whether the layer is drawn as a plain rectangle (no outline work needed).
+    pub fn plain(&self) -> bool {
+        self.feather <= 0. && (self.shape == FrameShape::Square || (self.shape == FrameShape::Rounded && self.radius <= 0.))
+    }
+}
 /// Normalized canvas coordinates. A source can be referenced by many layers.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Layer {
     #[serde(default)]
     pub crop: [f32;4],
+    #[serde(default)]
+    pub frame: Frame,
     #[serde(default)]
     pub group: u64,
     pub source: Id,
@@ -846,7 +875,7 @@ pub struct Project {
 }
 
 fn layer(source: Id, rect: [f32; 4]) -> Layer {
-    Layer { crop: [0.;4], group: 0,
+    Layer { crop: [0.;4], group: 0, frame: Default::default(),
         source,
         rect,
         visible: true,
@@ -1449,7 +1478,7 @@ mod layer_edit_tests {
             id: 10,
             name: "Layers".into(),
             layers: (1..=4)
-                .map(|source| Layer { crop: [0.;4], group: 0,
+                .map(|source| Layer { crop: [0.;4], group: 0, frame: Default::default(),
                     source,
                     rect: [0.1, 0.2, 0.3, 0.4],
                     opacity: 0.6,

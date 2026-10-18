@@ -211,22 +211,42 @@ impl Studio {
                 self.restore_layer_proportions(si, i);
             }
         });
-        egui::CollapsingHeader::new("Appearance").default_open(false).show(ui, |ui| {
+        egui::CollapsingHeader::new("Appearance").default_open(true).show(ui, |ui| {
             ui.add_enabled_ui(!locked, |ui| {
                 changed |= ui.add(egui::Slider::new(&mut self.project.scenes[si].layers[i].opacity, 0.0..=1.0).text("Opacity")).changed();
+                // The frame this layer is drawn in: square, rounded or a circle, with edges that can fade out.
+                let frame = &mut self.project.scenes[si].layers[i].frame;
+                ui.horizontal(|ui| {
+                    ui.label("Frame");
+                    for (shape, label) in [(FrameShape::Square, "Square"), (FrameShape::Rounded, "Rounded"), (FrameShape::Circle, "Circle")] {
+                        if ui.selectable_value(&mut frame.shape, shape, label).changed() {
+                            if shape == FrameShape::Rounded && frame.radius <= 0. {
+                                frame.radius = 0.15;
+                            }
+                            changed = true;
+                        }
+                    }
+                });
+                if frame.shape == FrameShape::Rounded {
+                    changed |= ui.add(egui::Slider::new(&mut frame.radius, 0.0..=0.5).text("Corner roundness").show_value(false)).changed();
+                }
+                changed |= ui.add(egui::Slider::new(&mut frame.feather, 0.0..=0.5).text("Fade edges").show_value(false)).on_hover_text("Blends the edges into what's behind this layer").changed();
             });
             let key = self.project.preferences.chroma_keys.entry(id).or_default();
-            changed |= ui.checkbox(&mut key.enabled, "Chroma key · remove a background color").changed();
+            ui.horizontal(|ui| {
+                changed |= ui.checkbox(&mut key.enabled, "Green screen · remove a background colour").changed();
+                ui.label(RichText::new("EXPERIMENTAL").small().strong().color(Color32::from_rgb(230, 190, 90)));
+            });
             if key.enabled {
                 ui.horizontal(|ui| {
                     changed |= ui.color_edit_button_srgb(&mut key.color).changed();
                     if ui.button("Green").clicked() { key.color = [0, 255, 0]; changed = true; }
                     if ui.button("Blue").clicked() { key.color = [0, 0, 255]; changed = true; }
                 });
-                changed |= ui.add(egui::Slider::new(&mut key.similarity, 0.0..=1.0).text("Similarity")).changed();
-                changed |= ui.add(egui::Slider::new(&mut key.smoothness, 0.001..=1.0).text("Edge softness")).changed();
-                changed |= ui.add(egui::Slider::new(&mut key.spill, 0.0..=1.0).text("Spill reduction")).changed();
-                ui.small("Use a solid background in your avatar app. This filter is shared by every layer using this source.");
+                changed |= ui.add(egui::Slider::new(&mut key.similarity, 0.0..=1.0).text("Remove").show_value(false)).on_hover_text("More removes shades further from the screen colour").changed();
+                changed |= ui.add(egui::Slider::new(&mut key.smoothness, 0.001..=0.5).text("Edge softness").show_value(false)).changed();
+                changed |= ui.add(egui::Slider::new(&mut key.spill, 0.0..=1.0).text("Fringe removal").show_value(false)).on_hover_text("Takes the green tint out of hair and edges").changed();
+                ui.small("Light the screen evenly and keep some distance from it. Applies to every layer showing this source. Still experimental: please report how it works for you.");
             }
             ui.horizontal(|ui| {
                 let scene = self.project.scenes[si].id;
@@ -424,7 +444,7 @@ impl Studio {
     fn add_source_layer(&mut self, si: usize, name: &str, kind: SourceKind, rect: [f32; 4]) -> Id {
         let id = self.project.id();
         self.project.sources.push(Source { id, name: name.into(), kind });
-        self.project.scenes[si].layers.push(Layer { crop: [0.; 4], group: 0, source: id, rect, visible: true, locked: false, opacity: 1. });
+        self.project.scenes[si].layers.push(Layer { crop: [0.; 4], group: 0, frame: Default::default(), source: id, rect, visible: true, locked: false, opacity: 1. });
         let index = self.project.scenes[si].layers.len() - 1;
         self.layer = Some(index);
         self.selections.insert(self.project.scenes[si].id, vec![index]);
