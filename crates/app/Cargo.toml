@@ -46,5 +46,5 @@ windows = { version = "0.58", features = ["Foundation", "Foundation_Collections"
 rfd = { version = "0.15", default-features = false }
 
 [target.'cfg(not(windows))'.dependencies]
-ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "screencast", "file_chooser"] }
+ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "screencast", "file_chooser", "global_shortcuts"] }
 zbus = { version = "5.19", default-features = false, features = ["blocking-api", "tokio"] }

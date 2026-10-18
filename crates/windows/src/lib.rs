@@ -17,4 +17,7 @@ pub mod pipe;
 #[cfg(windows)]
 pub mod window;
 
+#[cfg(windows)]
+pub mod hotkeys;
+
 pub mod capture_policy;

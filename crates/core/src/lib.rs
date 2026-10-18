@@ -147,6 +147,30 @@ impl Default for VideoSettings {
         }
     }
 }
+/// Something a hotkey does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HotkeyAction {
+    /// Switches the main video to a scene (prepares it, in Studio Mode).
+    Scene(Id),
+    /// Studio Mode: sends the preview live.
+    Transition,
+    StudioMode,
+    Streaming,
+    Recording,
+    SaveReplay,
+    ReplayBuffer,
+    VirtualCamera,
+    /// A sound strip: toggle mute, unmute only while held, or mute only while held.
+    Mute(Id),
+    PushToTalk(Id),
+    PushToMute(Id),
+}
+/// A key combination bound to an action. `keys` reads like "Ctrl+Shift+F5".
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Hotkey {
+    pub action: HotkeyAction,
+    pub keys: String,
+}
 /// A sound strip's filters. Each is off until switched on; levels are in dB, times in ms.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1151,6 +1175,8 @@ pub struct Preferences {
     /// Each sound strip's filters (gate, compressor, limiter, expander, EQ, mono/balance).
     #[serde(default)]
     pub audio_filters: std::collections::BTreeMap<Id, AudioFilters>,
+    #[serde(default)]
+    pub hotkeys: Vec<Hotkey>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1333,6 +1359,7 @@ impl Default for Project {
                 audio_inputs: [(12, "auto:music".to_owned())].into(),
                 music_apps: Vec::new(),
                 audio_filters: Default::default(),
+                hotkeys: Vec::new(),
                 recording_encoder: RecordingEncoder::Auto,
                 auto_game_audio: true,
             },

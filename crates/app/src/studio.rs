@@ -374,6 +374,7 @@ enum Settings {
     Announcements,
     Video,
     Audio,
+    Hotkeys,
     /// The advanced-options switch, backups, profiles and imports.
     Advanced,
 }
@@ -437,6 +438,12 @@ pub struct Studio {
     canvas_menu: Option<(Id, usize)>,
     /// Open projector windows.
     projectors: Vec<Projector>,
+    /// Hotkeys registered with the system, the list they were made from, and when it last changed.
+    global_hotkeys: Option<crate::hotkeys::Global>,
+    hotkeys_bound: Vec<auroracast_core::Hotkey>,
+    hotkeys_changed: Option<Instant>,
+    /// The action waiting for its key combination on the Hotkeys page.
+    hotkey_capture: Option<auroracast_core::HotkeyAction>,
     /// Studio Mode: the scene being prepared, and the Program view's picture.
     studio_preview: Option<Id>,
     studio_taking: bool,
@@ -809,7 +816,7 @@ impl Studio {
             project,
             project_path,
             page: match page.as_str() {
-                "settings" | "streaming" | "accounts" | "donations" | "announcements" => Page::Settings,
+                "settings" | "streaming" | "accounts" | "donations" | "announcements" | "hotkeys" => Page::Settings,
                 "automation-preview" | "alerts" | "alert-guide" | "alert-guide-media" | "alert-guide-finish" => Page::Alerts,
                 _ => Page::Studio,
             },
@@ -817,6 +824,8 @@ impl Studio {
                 Settings::Donations
             } else if page == "announcements" {
                 Settings::Announcements
+            } else if page == "hotkeys" {
+                Settings::Hotkeys
             } else if page == "accounts" || page == "streaming" {
                 Settings::Accounts
             } else {
@@ -841,6 +850,10 @@ impl Studio {
             sound_rename: None,
             canvas_menu: None,
             projectors: Vec::new(),
+            global_hotkeys: None,
+            hotkeys_bound: Vec::new(),
+            hotkeys_changed: None,
+            hotkey_capture: None,
             studio_preview: None,
             studio_taking: false,
             program_texture: None,
@@ -2118,6 +2131,15 @@ impl Studio {
         }
         self.layer = self.layer.and_then(renumber);
         self.changed();
+    }
+    fn save_replay(&mut self) {
+        self.tell("The replay buffer isn't available yet.".into());
+    }
+    fn toggle_replay_buffer(&mut self) {
+        self.tell("The replay buffer isn't available yet.".into());
+    }
+    fn toggle_virtual_camera(&mut self) {
+        self.tell("The virtual camera isn't available yet.".into());
     }
     /// Whether Studio Mode applies to `canvas` (the main, landscape video).
     fn studio_mode_for(&self, canvas: &auroracast_core::Canvas) -> bool {
@@ -5282,6 +5304,7 @@ impl Studio {
                     (Settings::Accounts, "Accounts"),
                     (Settings::Video, "Video & recording"),
                     (Settings::Audio, "Sound"),
+                    (Settings::Hotkeys, "Hotkeys"),
                     (Settings::Appearance, "Look & feel"),
                     (Settings::Advanced, "Advanced"),
                 ] {
@@ -5310,6 +5333,7 @@ impl Studio {
                 Settings::Accounts=>{ self.connections_settings(ui); },
                 Settings::Advanced=>{ changed |= self.advanced_settings(ui); },
                 Settings::Announcements=>self.announce_settings(ui),
+                Settings::Hotkeys=>self.hotkey_settings(ui),
                 Settings::Donations=>{ let (edited, preview) = crate::donations::ui(ui, &mut self.project.preferences.donations, &mut self.donations, &mut self.kofi); changed |= edited; if edited {self.donation_save_due=Some(Instant::now());}
                 if let Some(text) = preview { self.active_alert=Some((text,Instant::now()+Duration::from_secs(8))); self.page=Page::Studio; } },
                 Settings::Video=>{
@@ -6345,6 +6369,7 @@ impl eframe::App for Studio {
         }
         self.panel_windows(ctx);
         self.projector_windows(ctx);
+        self.hotkeys_tick(ctx);
         self.loading_screen(ctx);
         if self.automation_editor.preview_open {
             let mut open = true;
@@ -6660,6 +6685,7 @@ include!("widget_editor.rs");
 
 include!("layer_tools.rs");
 include!("projectors.rs");
+include!("hotkey_page.rs");
 
 include!("layer_properties.rs");
 

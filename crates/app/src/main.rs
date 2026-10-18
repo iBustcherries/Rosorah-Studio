@@ -33,6 +33,7 @@ mod donations_live;
 mod edit_history;
 #[cfg(not(windows))]
 mod game_audio;
+mod hotkeys;
 #[cfg(windows)]
 #[path = "platform_windows/game_audio.rs"]
 mod game_audio;
