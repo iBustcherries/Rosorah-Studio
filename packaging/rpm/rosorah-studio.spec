@@ -36,17 +36,19 @@ unsigned development package.
 # Compiled by build-rpm.sh before rpmbuild runs.
 
 %install
-install -d %{buildroot}/opt/rosorah-studio %{buildroot}%{_bindir} %{buildroot}%{_datadir}/applications %{buildroot}%{_datadir}/icons/hicolor/scalable/apps
+install -d %{buildroot}/opt/rosorah-studio %{buildroot}%{_bindir} %{buildroot}%{_datadir}/applications
 cp -a %{stagedir}/. %{buildroot}/opt/rosorah-studio/
 install -m 0755 %{stagedir}/../rosorah-studio-wrapper %{buildroot}%{_bindir}/rosorah-studio
 install -m 0644 %{stagedir}/../io.rosorah.Studio.desktop %{buildroot}%{_datadir}/applications/io.rosorah.Studio.desktop
-install -m 0644 %{stagedir}/../io.rosorah.Studio.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/io.rosorah.Studio.svg
+for size in 16 24 32 48 64 128 256 512; do
+    install -Dm 0644 %{stagedir}/../icons/io.rosorah.Studio-$size.png %{buildroot}%{_datadir}/icons/hicolor/${size}x${size}/apps/io.rosorah.Studio.png
+done
 
 %files
 /opt/rosorah-studio
 %{_bindir}/rosorah-studio
 %{_datadir}/applications/io.rosorah.Studio.desktop
-%{_datadir}/icons/hicolor/scalable/apps/io.rosorah.Studio.svg
+%{_datadir}/icons/hicolor/*/apps/io.rosorah.Studio.png
 
 %changelog
 * Thu Oct 15 2026 Local build <local@localhost> - %{pkgversion}-12

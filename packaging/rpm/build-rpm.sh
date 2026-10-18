@@ -31,7 +31,7 @@ cp -r fonts "$stage/fonts"
 cp packaging/install-renderer.py "$stage/"
 cp packaging/rpm/rosorah-studio-wrapper "$work/"
 cp packaging/io.rosorah.Studio.desktop "$work/"
-cp packaging/io.rosorah.Studio.svg "$work/"
+cp -r packaging/icons "$work/icons"
 
 echo "== Building optional game-capture hooks (skipped if the 32-bit tools are missing)"
 if (cd native && bash ./build.sh); then

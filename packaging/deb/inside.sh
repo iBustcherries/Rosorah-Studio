@@ -26,7 +26,7 @@ cargo build --release --locked --offline
 pkg=/work/pkg
 rm -rf "$pkg"
 stage="$pkg/opt/rosorah-studio"
-mkdir -p "$stage/browser" "$pkg/usr/bin" "$pkg/usr/share/applications" "$pkg/usr/share/icons/hicolor/scalable/apps" "$pkg/DEBIAN"
+mkdir -p "$stage/browser" "$pkg/usr/bin" "$pkg/usr/share/applications" "$pkg/DEBIAN"
 cp "$CARGO_TARGET_DIR/release/rosorah-studio" "$stage/"
 cp -r browser/. "$stage/browser/"
 rm -rf "$stage/browser/__pycache__"
@@ -34,7 +34,9 @@ cp -r fonts "$stage/fonts"
 cp packaging/install-renderer.py "$stage/"
 install -m 0755 packaging/rpm/rosorah-studio-wrapper "$pkg/usr/bin/rosorah-studio"
 install -m 0644 packaging/io.rosorah.Studio.desktop "$pkg/usr/share/applications/"
-install -m 0644 packaging/io.rosorah.Studio.svg "$pkg/usr/share/icons/hicolor/scalable/apps/"
+for size in 16 24 32 48 64 128 256 512; do
+    install -Dm 0644 "packaging/icons/io.rosorah.Studio-$size.png" "$pkg/usr/share/icons/hicolor/${size}x${size}/apps/io.rosorah.Studio.png"
+done
 
 echo "== Building optional game-capture hooks (skipped if they don't build here)"
 if (cd native && rm -rf build && bash ./build.sh); then

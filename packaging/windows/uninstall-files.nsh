@@ -1,5 +1,6 @@
 Delete "$INSTDIR\browser\chat_browser.py"
 Delete "$INSTDIR\browser\collector.js"
+Delete "$INSTDIR\browser\dock_browser.py"
 Delete "$INSTDIR\browser\dock.html"
 Delete "$INSTDIR\browser\emotes.py"
 Delete "$INSTDIR\browser\send.js"

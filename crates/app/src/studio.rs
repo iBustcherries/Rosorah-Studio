@@ -295,6 +295,9 @@ pub struct Studio {
     /// The sound whose settings window is open.
     sound_settings: Option<Id>,
     web_docks: crate::browser_dock::Docks,
+    updates: crate::updates::Updates,
+    update_window: bool,
+    update_checked: bool,
     /// The scene being named inside its own pill: its id, the text so far, and whether the
     /// box has been focused yet.
     naming_scene: Option<(Id, String, bool)>,
@@ -665,6 +668,10 @@ impl Studio {
             scene_dialog,
             sound_settings,
             web_docks: Default::default(),
+            updates: Default::default(),
+            // `--page update` (with --screenshot) shows the update window, checking as an old version.
+            update_window: page == "update",
+            update_checked: false,
             // `--page name-scene` opens the name box in the current scene's pill for screenshots.
             naming_scene: (page == "name-scene").then(|| (scene_for_naming, String::new(), false)),
             web_dock_dialog: None,
@@ -1359,7 +1366,18 @@ impl Studio {
         }
         let fmt = |v: Option<f32>| v.map(|v| format!("{v:.1}%")).unwrap_or_else(|| "—".into());
         egui::TopBottomPanel::bottom("footer").exact_height(32.).show(ctx,|ui|{ui.horizontal_centered(|ui|{
-            note(ui,concat!("Rosorah Studio ",env!("CARGO_PKG_VERSION")));ui.separator();ui.label(RichText::new(&self.message).small());
+            note(ui,concat!("Rosorah Studio ",env!("CARGO_PKG_VERSION")));
+            // A quiet reminder in the footer; the window with the details opens from it.
+            let offer = match self.updates.state() {
+                crate::updates::State::Available(r) if r.version != self.project.preferences.workspace.skipped_update => Some(format!("⬆ Update {} available", r.version)),
+                crate::updates::State::Downloading(..) => Some("⬆ Downloading update…".into()),
+                crate::updates::State::Downloaded(r, _) => Some(format!("⬆ Install {}", r.version)),
+                _ => None,
+            };
+            if let Some(text) = offer && ui.add(egui::Button::new(RichText::new(text).small().strong().color(Color32::from_rgb(40, 22, 84))).fill(self.accent())).clicked() {
+                self.update_window = true;
+            }
+            ui.separator();ui.label(RichText::new(&self.message).small());
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{note(ui,format!("RAM {}",fmt(self.resources.ram)));note(ui,format!("GPU {}",self.resources.gpu.iter().map(|(_,v)|*v).max().map_or("—".into(),|v|format!("{v}%"))));note(ui,format!("CPU {}",fmt(self.resources.cpu)));}).response.on_hover_text("System usage (all applications), updated once per second. GPU shows the busiest reported device/engine. Unsupported counters show —, never a fabricated zero.");
         });});
     }
@@ -1556,6 +1574,88 @@ impl Studio {
             .filter(|_| vertical_in_use && self.project.preferences.workspace.link_scenes)
         {
             note(ui, format!("Vertical video switches to: {}", link.name));
+        }
+    }
+    /// What's new in the update, and getting it installed.
+    fn update_window_ui(&mut self, ctx: &egui::Context) {
+        use crate::updates::State;
+        if !self.update_window {
+            return;
+        }
+        let state = self.updates.state();
+        let release = match &state {
+            State::Available(r) | State::Downloading(r, ..) | State::Downloaded(r, _) => r.clone(),
+            // Still finding out; the window opens once there's something to show.
+            State::Idle | State::Checking => return,
+            _ => {
+                self.update_window = false;
+                return;
+            }
+        };
+        let mut close = false;
+        let modal = egui::Modal::new(egui::Id::new("update-window")).frame(solid_window(ctx)).show(ctx, |ui| {
+            ui.set_width(460.);
+            ui.heading(format!("Rosorah Studio {}", release.version));
+            note(ui, concat!("You have ", env!("CARGO_PKG_VERSION"), "."));
+            ui.add_space(8.);
+            egui::ScrollArea::vertical().max_height(240.).show(ui, |ui| {
+                ui.label(release.notes.lines().filter(|l| !l.starts_with('|')).collect::<Vec<_>>().join("\n").replace("**", "").replace("## ", ""));
+            });
+            ui.add_space(10.);
+            match &state {
+                State::Downloading(_, done, total) => {
+                    let progress = if *total > 0 { *done as f32 / *total as f32 } else { 0. };
+                    ui.add(egui::ProgressBar::new(progress).text(format!("{:.0} of {:.0} MB", *done as f32 / 1e6, *total as f32 / 1e6)));
+                }
+                State::Downloaded(_, path) => {
+                    note(ui, format!("Saved to {}", path.display()));
+                    if cfg!(windows) {
+                        if ui.add(self.primary_button("Install now")).on_hover_text("Opens the installer. It asks you to close Rosorah first.").clicked() {
+                            let _ = std::process::Command::new(path).spawn();
+                        }
+                    } else {
+                        let command = if path.extension().is_some_and(|e| e == "deb") { "sudo apt install" } else { "sudo dnf install" };
+                        let command = format!("{command} \"{}\"", path.display());
+                        ui.horizontal_wrapped(|ui| {
+                            if ui.add(self.primary_button("Install…")).on_hover_text("Opens it in your software app (Discover or Software)").clicked() {
+                                let _ = crate::desktop::open(path);
+                            }
+                            if ui.button("Copy install command").on_hover_text(&command).clicked() {
+                                ui.ctx().copy_text(command.clone());
+                                self.tell("Copied. Paste it into a terminal, then restart Rosorah.".into());
+                            }
+                        });
+                    }
+                }
+                _ => {
+                    ui.horizontal_wrapped(|ui| {
+                        if release.asset.is_some() {
+                            if ui.add(self.primary_button("Download and install")).clicked() {
+                                self.updates.download(ctx, release.clone());
+                            }
+                        } else {
+                            note(ui, "There's no installer for this system here; get it from the release page.");
+                        }
+                    });
+                }
+            }
+            ui.add_space(6.);
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("View on GitHub").clicked() {
+                    let _ = crate::desktop::open(&release.page);
+                }
+                if !matches!(state, State::Downloading(..)) && ui.button("Skip this version").clicked() {
+                    self.project.preferences.workspace.skipped_update = release.version.clone();
+                    self.dirty = true;
+                    close = true;
+                }
+                if ui.button("Later").clicked() {
+                    close = true;
+                }
+            });
+        });
+        if close || modal.should_close() {
+            self.update_window = false;
         }
     }
     fn panel_title(&self, panel: Panel) -> String {
@@ -3775,6 +3875,17 @@ impl Studio {
         self.panels_animating = false;
         self.scene_dialog_ui(ctx);
         self.web_dock_dialog_ui(ctx);
+        self.update_window_ui(ctx);
+        if !self.update_checked && self.screenshot.is_some() && self.update_window {
+            self.update_checked = true;
+            self.updates.check_as(ctx, "0.0.1");
+        }
+        if !self.update_checked && self.ui_frames > 2 && self.screenshot.is_none() {
+            self.update_checked = true;
+            if self.project.preferences.workspace.check_updates {
+                self.updates.check(ctx);
+            }
+        }
         self.web_docks.tick();
         // The page itself stays clear so the backdrop shows in the gaps between docked panels.
         egui::CentralPanel::default().frame(egui::Frame::central_panel(&ctx.style()).fill(bg())).show(ctx, |ui| {
@@ -4055,7 +4166,7 @@ impl Studio {
                     let response=if vertical_audio {ui.horizontal(|ui| {crate::material::meter_sized(ui,levels,true,meter_height);ui.add(slider.vertical())}).inner}else{ui.add(slider)};
                     if response.changed() {channel.gain_db=if gain<=-60. {-100.}else{gain};changed=true;}
                     let mute = |ui: &mut egui::Ui| ui.selectable_label(channel.muted,if channel.muted {"🔇"}else{"🔊"}).on_hover_text(if channel.muted {"Muted · click to unmute"}else{"Click to mute"}).clicked();
-                    let clicked = if vertical_audio { ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| { ui.small(&level_text); mute(ui) }).inner } else { mute(ui) };
+                    let clicked = if vertical_audio { ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), row), egui::Layout::left_to_right(egui::Align::Center), |ui| { ui.small(&level_text); mute(ui) }).inner } else { mute(ui) };
                     if clicked {channel.muted = !channel.muted;changed=true;}
                     if ui.button("⚙").on_hover_text("Sound settings").clicked() {
                         *sound_settings = Some(channel.id);
@@ -4442,6 +4553,33 @@ if changed{self.changed();}
                 changed = true;
             }
             note(ui, "Adds audio tracks and decibels, encoder and video sizes, rearrangeable panels, capture details and troubleshooting tools. Leave it off to keep Rosorah simple.");
+        });
+        ui.add_space(20.);
+        card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.strong("Updates");
+            changed |= ui.checkbox(&mut self.project.preferences.workspace.check_updates, "Check for updates when Rosorah starts").changed();
+            ui.horizontal_wrapped(|ui| {
+                let state = self.updates.state();
+                let busy = matches!(state, crate::updates::State::Checking | crate::updates::State::Downloading(..));
+                if ui.add_enabled(!busy, egui::Button::new("Check now")).clicked() {
+                    self.project.preferences.workspace.skipped_update.clear();
+                    self.updates.check(ui.ctx());
+                }
+                match state {
+                    crate::updates::State::Checking => note(ui, "Checking…"),
+                    crate::updates::State::UpToDate => note(ui, concat!("You have the latest version (", env!("CARGO_PKG_VERSION"), ").")),
+                    crate::updates::State::Available(r) | crate::updates::State::Downloaded(r, _) => {
+                        if ui.button(format!("Version {} is available…", r.version)).clicked() {
+                            self.update_window = true;
+                        }
+                    }
+                    crate::updates::State::Downloading(..) => note(ui, "Downloading the update…"),
+                    crate::updates::State::Failed(e) => note(ui, e),
+                    crate::updates::State::Idle => {}
+                }
+            });
+            note(ui, format!("New versions come from github.com/{}.", crate::updates::REPO));
         });
         ui.add_space(20.);
         changed |= self.backups_settings(ui);

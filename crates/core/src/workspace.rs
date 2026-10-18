@@ -20,6 +20,10 @@ pub struct WorkspaceSettings {
     pub vertical_video: bool,
     /// Web pages added as panels from the Panels menu.
     pub browser_docks: Vec<BrowserDock>,
+    /// Looks for a newer Rosorah when the studio opens.
+    pub check_updates: bool,
+    /// A version the user chose to skip; its reminder stays hidden.
+    pub skipped_update: String,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BrowserDock {
@@ -105,6 +109,8 @@ impl Default for WorkspaceSettings {
             advanced: false,
             vertical_video: true,
             browser_docks: Vec::new(),
+            check_updates: true,
+            skipped_update: String::new(),
         }
     }
 }
