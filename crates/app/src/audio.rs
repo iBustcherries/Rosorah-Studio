@@ -28,6 +28,11 @@ pub struct Device {
     pub id: u64,
     pub pid: Option<u32>,
     pub channels: Vec<String>,
+    /// For app streams: which app it is, stable across restarts (program or app id, lowercase).
+    pub app: String,
+    /// For app streams: what the stream calls itself (Firefox uses the page title) and its role.
+    pub title: String,
+    pub role: String,
 }
 #[derive(Clone, Default)]
 pub struct View {
@@ -49,6 +54,8 @@ struct Control {
     media: crate::video::AudioBus,
     monitor_device: String,
     targets: Arc<BTreeMap<Id, String>>,
+    /// Apps the user added to the automatic music list.
+    music_apps: Arc<Vec<String>>,
     refresh: bool,
     record: Option<bool>,
     automatic: bool,
@@ -121,12 +128,19 @@ impl Audio {
         }
         c.automatic = automatic && channels.iter().any(|c| c.id == crate::game_audio::CHANNEL);
         c.game = game;
+        // Only strips that still exist: a deleted strip keeps its choice (for Undo) but captures nothing.
         let selected = self
             .selected
             .iter()
-            .filter(|(id, _)| self.enabled.get(id) == Some(&true));
+            .filter(|(id, _)| self.enabled.get(id) == Some(&true) && channels.iter().any(|c| c.id == **id));
         if !c.targets.iter().eq(selected.clone()) {
             c.targets = Arc::new(selected.map(|(id, target)| (*id, target.clone())).collect());
+        }
+    }
+    pub fn music_apps(&self, apps: &[String]) {
+        let mut c = self.control.lock().unwrap();
+        if c.music_apps.as_slice() != apps {
+            c.music_apps = Arc::new(apps.to_vec());
         }
     }
     pub fn monitor_device(&self, target: &str) {
@@ -191,6 +205,11 @@ pub(crate) fn command(program: &str, args: &[&str]) -> Result<Vec<u8>> {
     ensure!(status.success(), "{program} exited unsuccessfully");
     Ok(bytes)
 }
+/// This computer's audio devices and app streams right now (for checks and tests).
+#[cfg(all(test, not(windows)))]
+pub fn live_devices() -> Result<Vec<Device>> {
+    Ok(devices(&graph()?))
+}
 #[cfg(not(windows))]
 fn graph() -> Result<Value> {
     Ok(serde_json::from_slice(&command("pw-dump", &[])?)?)
@@ -235,14 +254,24 @@ fn devices(g: &Value) -> Vec<Device> {
                 "Audio/Sink" => "Desktop output",
                 _ => "Application",
             };
+            // The first identity the app gives: its program, its (Flatpak) app id, then its name.
+            let app = ["application.process.binary", "pipewire.access.portal.app_id", "application.id", "application.name", "node.name"]
+                .iter()
+                .map(|k| prop(n, k))
+                .find(|v| !v.trim().is_empty())
+                .unwrap_or_default()
+                .to_lowercase();
             Some(Device {
                 target: name,
                 serial,
                 label: format!("{prefix}: {label}"),
-                kind,
                 id: n["id"].as_u64()?,
                 pid: node_pid(g, n),
                 channels: output_channels(g, n["id"].as_u64()?),
+                app: if kind == "Stream/Output/Audio" { app } else { String::new() },
+                title: prop(n, "media.name"),
+                role: prop(n, "media.role"),
+                kind,
             })
         })
         .collect()
@@ -684,8 +713,17 @@ fn capture_worker(
             family.clear();
         }
         let mut desired: BTreeMap<InputKey, (Device, Binding)> = BTreeMap::new();
+        // Apps a strip follows by name; Music leaves those to their own strips.
+        let claimed: Vec<String> = c.targets.values().filter_map(|t| crate::app_audio::followed_app(t)).map(str::to_owned).collect();
         for (id, serial) in c.targets.iter() {
             if c.automatic && *id == crate::game_audio::CHANNEL {
+                continue;
+            }
+            if crate::app_audio::follows(serial) {
+                // One capture per matching app sound, picked again whenever apps come and go.
+                for d in crate::app_audio::resolve(serial, &known, &c.music_apps, &claimed, &family) {
+                    desired.insert((*id, d.serial.clone()), (d.clone(), Binding { channel: *id, selection: Selection::Manual(serial.clone()) }));
+                }
                 continue;
             }
             if let Some(d) = known.iter().find(|d| &d.serial == serial) {

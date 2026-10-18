@@ -9,6 +9,7 @@ mod profiles;
 mod alert_guide;
 mod alert_samples;
 mod announce;
+mod app_audio;
 mod appearance;
 mod fonts;
 mod rewards_ui;

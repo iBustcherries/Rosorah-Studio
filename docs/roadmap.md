@@ -1,6 +1,6 @@
 # Rosorah Studio roadmap
 
-Updated for 0.32.0-preview.15 (October 2026). Rosorah Studio is original code built on
+Updated for 0.33.0 (October 2026). Rosorah Studio is original code built on
 independent libraries (Rust, egui/wgpu, GStreamer, Qt WebEngine). It aims to be an easier
 all-in-one alternative to running OBS, a chat bot and an alert service side by side,
 not a feature-for-feature copy of OBS.
@@ -13,7 +13,7 @@ not a feature-for-feature copy of OBS.
 | Scenes and layers | Shipped | Scenes named in place, drag to reorder with sliding rows (also the mixer and automation steps), square/rounded/circle layer frames with faded edges, a green-screen key (experimental), main and vertical videos with linked scenes, crop/align/group tools, text layers with 68 bundled font families, widgets (chat, music, goals, utilities) |
 | Capture (Linux) | Shipped | Automatic game capture (Vulkan/OpenGL hooks) with game audio, PipeWire desktop/window capture, cameras and DroidCam, browser sources |
 | Capture (Windows) | Preview | Windows Graphics Capture, application audio and cursor; renderer hooks are not included; needs more testing on real Windows PCs |
-| Sound | Shipped | Mixer with per-scene volumes, Sound settings window (device, live level, noise suppression), monitoring, delay, six recording tracks |
+| Sound | Shipped | Music strip that follows music apps automatically (never browser video), per-app sound strips that survive app restarts, right-click rename/hide/delete, mixer with per-scene volumes, Sound settings window (device, live level, noise suppression), monitoring, delay, six recording tracks |
 | Recording and streaming | Shipped | Hardware encoders (AMD/NVIDIA, software fallback), multistreaming to Twitch, YouTube, YouTube vertical, Kick, TikTok and custom RTMP, per-destination bitrate, reconnect, Go live checklist |
 | Accounts | Shipped | Twitch, YouTube and Kick sign-in with renewable tokens in the system keyring, titles/categories, automatic stream keys |
 | Chat and activity | Shipped | Unified Twitch/YouTube/Kick/TikTok chat with moderation, Activity history for every connected account |

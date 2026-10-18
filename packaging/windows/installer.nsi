@@ -6,7 +6,7 @@ Unicode true
 !error "Pass -DPAYLOAD=<prepared application folder>"
 !endif
 !ifndef OUTPUT
-!define OUTPUT "Rosorah-Studio-0.32.0-preview.15-Setup.exe"
+!define OUTPUT "Rosorah-Studio-0.33.0-Setup.exe"
 !endif
 Name "Rosorah Studio"
 OutFile "${OUTPUT}"
@@ -17,7 +17,7 @@ VIProductVersion "0.32.0.7"
 VIAddVersionKey /LANG=1033 "ProductName" "Rosorah Studio"
 VIAddVersionKey /LANG=1033 "FileDescription" "Rosorah Studio preview installer"
 VIAddVersionKey /LANG=1033 "FileVersion" "0.32.0.7"
-VIAddVersionKey /LANG=1033 "ProductVersion" "0.32.0-preview.15"
+VIAddVersionKey /LANG=1033 "ProductVersion" "0.33.0"
 VIAddVersionKey /LANG=1033 "LegalCopyright" "Rosorah Studio contributors"
 !define MUI_ABORTWARNING
 !define MUI_ICON "${PAYLOAD}/rosorah.ico"
@@ -44,7 +44,7 @@ Section "Rosorah Studio (required)" Core
   File /r "${PAYLOAD}/*"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RosorahStudio" "DisplayName" "Rosorah Studio"
-  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RosorahStudio" "DisplayVersion" "0.32.0-preview.15"
+  WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RosorahStudio" "DisplayVersion" "0.33.0"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RosorahStudio" "UninstallString" '"$INSTDIR\Uninstall.exe"' 
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RosorahStudio" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RosorahStudio" "DisplayIcon" "$INSTDIR\rosorah.ico"

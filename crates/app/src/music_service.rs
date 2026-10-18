@@ -43,10 +43,25 @@ const TITLES: &[(&str, &str)] = &[
     ("| tidal", "TIDAL"),
 ];
 const BROWSERS: &[&str] = &[
-    "chrom", "firefox", "308046b0af4a39cb", "msedge", "microsoft-edge", "brave", "opera",
+    "chrom", "helium", "firefox", "308046b0af4a39cb", "msedge", "microsoft-edge", "brave", "opera",
     "vivaldi", "librewolf", "floorp", "waterfox", "epiphany", "falkon", "thorium", "zen",
 ];
 
+/// The music service a desktop app is, from its identifiers (program, app id, name).
+pub fn music_app(names: &str) -> Option<&'static str> {
+    let names = names.to_lowercase();
+    APPS.iter().find(|(app, _)| names.contains(app)).map(|(_, name)| *name)
+}
+/// Whether identifiers belong to a web browser.
+pub fn browser(names: &str) -> bool {
+    let names = names.to_lowercase();
+    BROWSERS.iter().any(|b| names.contains(b))
+}
+/// The music site a browser page title belongs to, if the title says so.
+pub fn music_page(title: &str) -> Option<&'static str> {
+    let lower = title.trim().to_lowercase();
+    TITLES.iter().find(|(end, _)| lower.ends_with(end)).map(|(_, name)| *name)
+}
 /// The music service behind a media session, if it is one. `names` are the player's
 /// identifiers (bus name, app id, display name); `urls` are any page or artwork URLs.
 pub fn service(names: &[&str], urls: &[&str], title: &str, artist: &str, album: &str) -> Option<&'static str> {

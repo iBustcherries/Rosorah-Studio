@@ -10,7 +10,9 @@ fn graph() -> Result<Value> {
     let mut seen = std::collections::BTreeSet::new();
     for w in rosorah_windows::window::windows()? {
         if seen.insert(w.process.pid) {
-            rows.push(serde_json::json!({"serial":format!("wasapi:process:{}:{}",w.process.pid,w.process.start_time),"target":w.process.pid.to_string(),"label":format!("Application · {}",w.title),"kind":"Stream/Output/Audio","pid":w.process.pid,"id":w.process.start_time}));
+            // The program's file name (without .exe) identifies the app across restarts.
+            let app = std::path::Path::new(&w.process.name).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+            rows.push(serde_json::json!({"serial":format!("wasapi:process:{}:{}",w.process.pid,w.process.start_time),"target":w.process.pid.to_string(),"label":format!("Application · {}",w.title),"kind":"Stream/Output/Audio","pid":w.process.pid,"id":w.process.start_time,"app":app,"title":w.title}));
         }
     }
     Ok(Value::Array(rows))
@@ -27,6 +29,9 @@ fn devices(g: &Value) -> Vec<Device> {
             id: v["id"].as_u64().unwrap_or(0),
             pid: v["pid"].as_u64().map(|p| p as u32),
             channels: vec!["FL".into(), "FR".into()],
+            app: v["app"].as_str().unwrap_or_default().into(),
+            title: v["title"].as_str().unwrap_or_default().into(),
+            role: String::new(),
         })
         .collect()
 }

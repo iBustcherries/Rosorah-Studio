@@ -24,6 +24,10 @@ pub struct WorkspaceSettings {
     pub check_updates: bool,
     /// A version the user chose to skip; its reminder stays hidden.
     pub skipped_update: String,
+    /// Sound panel strips hidden from view (still heard on stream).
+    pub hidden_sounds: BTreeSet<Id>,
+    /// Names given to sound panel strips; the channel keeps its own name underneath.
+    pub sound_names: BTreeMap<Id, String>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BrowserDock {
@@ -111,6 +115,8 @@ impl Default for WorkspaceSettings {
             browser_docks: Vec::new(),
             check_updates: true,
             skipped_update: String::new(),
+            hidden_sounds: BTreeSet::new(),
+            sound_names: BTreeMap::new(),
         }
     }
 }

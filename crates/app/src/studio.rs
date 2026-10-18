@@ -142,6 +142,12 @@ fn solid_window(ctx: &egui::Context) -> egui::Frame {
     let [r, g, b, _] = panel().to_srgba_unmultiplied();
     egui::Frame::window(&ctx.style()).fill(Color32::from_rgb(r, g, b))
 }
+/// What a sound strip's right-click menu asked for.
+enum SoundAction {
+    Rename(String),
+    Hide,
+    Delete(String),
+}
 /// Text that reads on the accent colour: black, or white when the accent is (nearly) black.
 fn on_accent(accent: Color32) -> Color32 {
     let brightness = (0.2126 * accent.r() as f32 + 0.7152 * accent.g() as f32 + 0.0722 * accent.b() as f32) / 255.;
@@ -418,6 +424,8 @@ pub struct Studio {
     scene_dialog: Option<(Id, String, bool)>,
     /// The sound whose settings window is open.
     sound_settings: Option<Id>,
+    /// A sound strip being renamed, and the name typed so far.
+    sound_rename: Option<(Id, String)>,
     web_docks: crate::browser_dock::Docks,
     announcer: crate::announce::Announcer,
     /// A file chooser open for the announcement image.
@@ -734,7 +742,9 @@ impl Studio {
             .flatten();
         let scene_for_naming = project.canvases.first().map(|c| c.scene).unwrap_or_default();
         // `--page sound-settings` opens the microphone's settings for screenshots.
-        let sound_settings = (page == "sound-settings").then(|| project.audio.iter().find(|c| c.name.to_lowercase().contains("mic")).map(|c| c.id)).flatten();
+        // (`--page music-settings` opens the Music strip's instead.)
+        let wanted = match page.as_str() { "sound-settings" => Some("mic"), "music-settings" => Some("music"), _ => None };
+        let sound_settings = wanted.and_then(|w| project.audio.iter().find(|c| c.name.to_lowercase().contains(w)).map(|c| c.id));
         let mut widget_editor = WidgetEditor::default();
         if page == "widgets" {
             widget_editor.id = project
@@ -800,6 +810,7 @@ impl Studio {
             animate: false,
             scene_dialog,
             sound_settings,
+            sound_rename: None,
             web_docks: Default::default(),
             announcer: Default::default(),
             announce_picker: None,
@@ -1464,6 +1475,33 @@ impl Studio {
                     }
                 });
             }
+            // Its own strip for one app's sound, followed by name so it's back after a restart.
+            ui.menu_button("An application…", |ui| {
+                let followed: Vec<String> = self.audio.selected.values().filter_map(|t| crate::app_audio::followed_app(t)).map(str::to_owned).collect();
+                let mut apps: Vec<(String, String)> = view
+                    .devices
+                    .iter()
+                    .filter(|d| d.kind == "Stream/Output/Audio" && !d.app.is_empty() && !followed.contains(&d.app))
+                    .map(|d| (d.app.clone(), crate::app_audio::app_name(d)))
+                    .collect();
+                apps.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+                apps.dedup_by(|a, b| a.0 == b.0);
+                if apps.is_empty() {
+                    note(ui, "No app is playing sound right now. Start it playing, then look again.");
+                } else {
+                    note(ui, "Apps playing sound now");
+                }
+                for (app, name) in apps {
+                    if ui.button(&name).clicked() {
+                        let id = self.project.id();
+                        self.project.audio.push(auroracast_core::AudioChannel { monitor_only: false, id, name, gain_db: 0., muted: false, tracks: [true, false, false, false, false, false], delay_ms: 0, monitor: false, noise_suppression: Default::default(), media_source: None });
+                        self.audio.selected.insert(id, crate::app_audio::app_target(&app));
+                        self.audio.enabled.insert(id, true);
+                        self.changed();
+                        ui.close();
+                    }
+                }
+            });
             ui.separator();
             if ui.button("Look for new devices").clicked() {
                 self.audio.refresh();
@@ -1976,6 +2014,42 @@ impl Studio {
         match panel {
             Panel::Web(id) => self.project.preferences.workspace.browser_docks.iter().find(|d| d.id == id).map_or_else(|| panel.title().into(), |d| d.name.clone()),
             _ => panel.title().into(),
+        }
+    }
+    /// Renames a sound strip. Only the name shown changes; the sound keeps its own name underneath.
+    fn sound_rename_ui(&mut self, ctx: &egui::Context) {
+        let Some((id, mut name)) = self.sound_rename.take() else { return };
+        let mut done = false;
+        let mut save = false;
+        egui::Modal::new(egui::Id::new("sound-rename")).frame(solid_window(ctx)).show(ctx, |ui| {
+            ui.set_width(320.);
+            ui.heading("Rename sound");
+            ui.add_space(6.);
+            let field = ui.add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY));
+            if !field.has_focus() && !field.lost_focus() {
+                field.request_focus();
+            }
+            save |= field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            ui.add_space(8.);
+            ui.horizontal(|ui| {
+                save |= ui.button("Save").clicked();
+                done |= ui.button("Cancel").clicked();
+            });
+        });
+        if save {
+            let original = self.project.audio.iter().find(|c| c.id == id).map(|c| c.name.clone());
+            let trimmed: String = name.trim().chars().take(40).collect();
+            let names = &mut self.project.preferences.workspace.sound_names;
+            if trimmed.is_empty() || Some(&trimmed) == original.as_ref() {
+                names.remove(&id);
+            } else {
+                names.insert(id, trimmed);
+            }
+            self.dirty = true;
+            done = true;
+        }
+        if !done && !ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.sound_rename = Some((id, name));
         }
     }
     /// Asks for a name and address, then adds the page as a panel.
@@ -4188,6 +4262,7 @@ impl Studio {
         self.panels_animating = false;
         self.scene_dialog_ui(ctx);
         self.web_dock_dialog_ui(ctx);
+        self.sound_rename_ui(ctx);
         self.update_window_ui(ctx);
         if !self.update_checked && self.screenshot.is_some() && self.update_window {
             self.update_checked = true;
@@ -4376,13 +4451,18 @@ impl Studio {
         let mut effect_members = Vec::new();
         let media = &self.project.preferences.transition_media;
         let transitions = [media.stinger, media.screen];
+        let hidden = self.project.preferences.workspace.hidden_sounds.clone();
+        let names = self.project.preferences.workspace.sound_names.clone();
         for channel in self.project.mixer_channels(scene_id) {
+            if hidden.contains(&channel.id) {
+                continue;
+            }
             let effect = !advanced && channel.media_source.is_some() && transitions.contains(&channel.media_source);
             if !advanced && self.unconnected(&channel) {
                 continue;
             }
             if self.project.is_alert_channel(&channel) || effect {
-                if alert_members.is_empty() && effect_members.is_empty() {
+                if alert_members.is_empty() && effect_members.is_empty() && !hidden.contains(&ALERTS_STRIP) {
                     let bus = &self.project.preferences.alert_bus;
                     scene_channels.push(auroracast_core::AudioChannel {
                         id: ALERTS_STRIP,
@@ -4428,11 +4508,23 @@ impl Studio {
         let strip_height = (ui.available_height() - ui.spacing().scroll.allocated_width() - 4.).max(0.);
         let meter_height = (strip_height - overhead).max(24.);
         let automatic = self.project.preferences.auto_game_audio;
+        // Whether Desktop audio is capturing too (then music would be heard twice).
+        let desktop_on = self.project.audio.iter().any(|c| c.name == "Desktop audio" && !c.muted && self.audio.enabled.get(&c.id) == Some(&true));
         let sound_settings = &mut self.sound_settings;
+        // What a strip's right-click menu asked for; carried out after the strips are drawn.
+        let mut strip_action: Option<(Id, SoundAction)> = None;
+        // Apps added to the automatic music list; edited from the Music strip's settings.
+        let music_apps = &mut self.project.preferences.music_apps;
+        let mut music_apps_changed = false;
         let mut refresh = false;
         // Draws one strip; returns what picks it up for reordering (its grip and name).
         let mut draw_channel = |ui: &mut egui::Ui, channel: &mut auroracast_core::AudioChannel| -> egui::Response {
             let mut grab = None;
+            let shown_name = names.get(&channel.id).cloned().unwrap_or_else(|| channel.name.clone());
+            // Right-clicking anywhere on the strip that isn't a control opens its menu. The area sits
+            // under the controls (placed first, at last frame's position) so they keep their clicks.
+            let rect_key = egui::Id::new(("sound-strip-rect", channel.id));
+            let menu_area = ui.data(|d| d.get_temp::<egui::Rect>(rect_key)).map(|r| ui.interact(r, rect_key.with("menu"), egui::Sense::click()));
             let strip = ui.push_id(channel.id, |ui| {
                 egui::Frame::new().inner_margin(egui::Margin::symmetric(0,4)).show(ui, |ui| {
                     ui.spacing_mut().item_spacing.y=4.;
@@ -4449,7 +4541,7 @@ impl Studio {
                         let name = ui.scope(|ui| {
                             // Side by side, the level sits by the mute button so the name gets the whole row.
                             ui.set_max_width(if vertical_audio { ui.available_width() } else { (ui.available_width() - 52.).max(24.) });
-                            ui.add(egui::Label::new(egui::RichText::new(&channel.name).strong()).truncate().sense(egui::Sense::drag()))
+                            ui.add(egui::Label::new(egui::RichText::new(&shown_name).strong()).truncate().sense(egui::Sense::click_and_drag()))
                         }).inner;
                         let handle = handle.union(name);
                         if handle.hovered() && !handle.dragged() {
@@ -4483,7 +4575,7 @@ impl Studio {
                     let modal = egui::Modal::new(egui::Id::new(("sound-settings", channel.id))).frame(solid_window(&ctx)).show(&ctx, |ui| {
                     ui.set_width(400.);
                     ui.spacing_mut().item_spacing.y = 6.;
-                    ui.heading(&channel.name);
+                    ui.heading(&shown_name);
                     crate::material::meter_plain(ui, levels);
                     note(ui, "Speak or play something; the bar moves when this sound is coming through.");
                     ui.add_space(6.);
@@ -4506,6 +4598,12 @@ impl Studio {
                         egui::Frame::group(ui.style()).show(ui, |ui| {
                             egui::ScrollArea::vertical().max_height(220.).auto_shrink([false, true]).show(ui, |ui| {
                                 ui.selectable_value(selected, String::new(), "None");
+                                if !output {
+                                    ui.add_space(4.);
+                                    note(ui, "Follow automatically");
+                                    ui.selectable_value(selected, crate::app_audio::MUSIC.to_owned(), "🎵  Music apps · Spotify, YouTube Music, TIDAL…")
+                                        .on_hover_text("Captures music players as they start and stop. Video in a browser (YouTube, Netflix…) is never included.");
+                                }
                                 // Grouped under headings, so the rows don't each repeat what kind of device they are.
                                 let groups: &[(&str, &str, fn(&str) -> bool)] = if output {
                                     &[("", "Desktop output: ", |k| k == "Audio/Sink")]
@@ -4513,7 +4611,6 @@ impl Studio {
                                     &[
                                         ("Microphones and inputs", "Microphone / input: ", |k| k == "Audio/Source"),
                                         ("Sound playing on this computer", "Desktop output: ", |k| k == "Audio/Sink"),
-                                        ("Apps", "Application: ", |k| k != "Audio/Source" && k != "Audio/Sink"),
                                     ]
                                 };
                                 for (heading, prefix, wanted) in groups {
@@ -4529,8 +4626,50 @@ impl Studio {
                                         ui.selectable_value(selected, d.serial.clone(), d.label.strip_prefix(prefix).unwrap_or(&d.label));
                                     }
                                 }
+                                // One row per app, followed by name so it's found again after a restart.
+                                let mut apps: Vec<(String, String)> = view.devices.iter().filter(|d| d.kind == "Stream/Output/Audio" && !d.app.is_empty()).map(|d| (d.app.clone(), crate::app_audio::app_name(d))).collect();
+                                apps.sort();
+                                apps.dedup_by(|a, b| a.0 == b.0);
+                                if let Some(app) = crate::app_audio::followed_app(selected).filter(|a| !apps.iter().any(|(id, _)| id == a)) {
+                                    apps.push((app.to_owned(), format!("{app} (not playing now)")));
+                                }
+                                if !output && !apps.is_empty() {
+                                    ui.add_space(4.);
+                                    note(ui, "Apps");
+                                    for (app, name) in apps {
+                                        ui.selectable_value(selected, crate::app_audio::app_target(&app), name);
+                                    }
+                                }
                             });
                         });
+                        if *selected == crate::app_audio::MUSIC {
+                            // What's being captured now, and other apps to count as music.
+                            let playing: Vec<String> = crate::app_audio::resolve(crate::app_audio::MUSIC, &view.devices, music_apps, &[], &Default::default()).iter().map(|d| crate::app_audio::app_name(d)).collect();
+                            note(ui, if playing.is_empty() { "No music app is playing right now.".to_owned() } else { format!("Capturing now: {}", playing.join(", ")) });
+                            let mut others: Vec<(String, String)> = view.devices.iter().filter(|d| d.kind == "Stream/Output/Audio" && !d.app.is_empty() && !crate::app_audio::browser(d) && !crate::app_audio::is_music(d, &[])).map(|d| (d.app.clone(), crate::app_audio::app_name(d))).collect();
+                            for app in music_apps.iter() {
+                                if !others.iter().any(|(a, _)| a == app) {
+                                    others.push((app.clone(), app.clone()));
+                                }
+                            }
+                            others.sort();
+                            others.dedup_by(|a, b| a.0 == b.0);
+                            if !others.is_empty() {
+                                ui.collapsing("Also include…", |ui| {
+                                    for (app, name) in others {
+                                        let mut on = music_apps.contains(&app);
+                                        if ui.checkbox(&mut on, name).changed() {
+                                            if on { music_apps.push(app); } else { music_apps.retain(|a| *a != app); }
+                                            music_apps_changed = true;
+                                        }
+                                    }
+                                    note(ui, "Browsers can't be added: they also play videos.");
+                                });
+                            }
+                            if view.devices.iter().any(|d| d.kind == "Audio/Sink") && desktop_on {
+                                ui.colored_label(ui.visuals().warn_fg_color, "Desktop audio also captures everything you hear, so music would be heard twice on stream. Mute Desktop audio, or remove it if you don't need it.");
+                            }
+                        }
                         if *selected != before {
                             *enabled = !selected.is_empty();
                         }
@@ -4592,6 +4731,33 @@ impl Studio {
                 });
                 ui.add_space(4.);
             }).response;
+            ui.data_mut(|d| d.insert_temp(rect_key, strip.rect));
+            // The same menu on the strip's name and on its empty space.
+            let menu_items = |ui: &mut egui::Ui| -> Option<SoundAction> {
+                let mut action = None;
+                if ui.button("Rename…").clicked() {
+                    action = Some(SoundAction::Rename(shown_name.clone()));
+                }
+                if ui.button("Hide").on_hover_text("Removes it from this panel; it's still heard on stream").clicked() {
+                    action = Some(SoundAction::Hide);
+                }
+                // Game audio, the alerts strip and video sounds belong to captures and alerts.
+                let removable = channel.id != crate::game_audio::CHANNEL && channel.id != ALERTS_STRIP && channel.media_source.is_none();
+                if removable && ui.button("Delete").clicked() {
+                    action = Some(SoundAction::Delete(shown_name.clone()));
+                }
+                if action.is_some() {
+                    ui.close();
+                }
+                action
+            };
+            for response in menu_area.iter().chain(grab.iter()) {
+                response.context_menu(|ui| {
+                    if let Some(action) = menu_items(ui) {
+                        strip_action = Some((channel.id, action));
+                    }
+                });
+            }
             grab.unwrap_or(strip)
         };
         let mut reorder = None;
@@ -4599,6 +4765,8 @@ impl Studio {
         let shift_key = ui.id().with(("mixer-shift", vertical_audio));
         // The old index style counts the insertion point before the strip is taken out.
         let to_reorder = |(from, to): (usize, usize)| (shown[from], if to > from { to + 1 } else { to });
+        // Empty space in the panel has its own right-click menu; strips drawn on top keep theirs.
+        let empty_space = ui.interact(ui.available_rect_before_wrap(), ui.id().with("sound-empty-space"), egui::Sense::click());
         let mut rects = Vec::with_capacity(scene_channels.len());
         if vertical_audio {
             // One row of strips; extra channels scroll sideways instead of wrapping
@@ -4648,6 +4816,77 @@ impl Studio {
         if refresh {
             self.audio.refresh();
         }
+        if music_apps_changed {
+            self.dirty = true;
+        }
+        match strip_action {
+            Some((id, SoundAction::Rename(name))) => self.sound_rename = Some((id, name)),
+            Some((id, SoundAction::Hide)) => {
+                self.project.preferences.workspace.hidden_sounds.insert(id);
+                self.dirty = true;
+                self.tell("Hidden. It's still heard on stream; right-click empty space in Sound to show it again.".into());
+            }
+            Some((id, SoundAction::Delete(name))) if id != crate::game_audio::CHANNEL && id != ALERTS_STRIP => {
+                self.project.audio.retain(|c| c.id != id);
+                for volumes in self.project.preferences.scene_audio.values_mut() {
+                    volumes.remove(&id);
+                }
+                self.project.preferences.workspace.sound_names.remove(&id);
+                self.project.preferences.workspace.hidden_sounds.remove(&id);
+                self.changed();
+                self.deleted(format!("Deleted the sound “{name}”"));
+            }
+            _ => {}
+        }
+        empty_space.context_menu(|ui| {
+            let hidden: Vec<(Id, String)> = self
+                .project
+                .preferences
+                .workspace
+                .hidden_sounds
+                .iter()
+                .map(|id| {
+                    let name = self.project.preferences.workspace.sound_names.get(id).cloned().or_else(|| self.project.audio.iter().find(|c| c.id == *id).map(|c| c.name.clone()));
+                    (*id, name.unwrap_or_else(|| if *id == ALERTS_STRIP { "Alerts".into() } else { "Sound".into() }))
+                })
+                .collect();
+            ui.add_enabled_ui(!hidden.is_empty(), |ui| {
+                ui.menu_button("Show hidden sounds", |ui| {
+                    for (id, name) in &hidden {
+                        if ui.button(name).clicked() {
+                            self.project.preferences.workspace.hidden_sounds.remove(id);
+                            self.dirty = true;
+                            ui.close();
+                        }
+                    }
+                    if hidden.len() > 1 {
+                        ui.separator();
+                        if ui.button("Show all").clicked() {
+                            self.project.preferences.workspace.hidden_sounds.clear();
+                            self.dirty = true;
+                            ui.close();
+                        }
+                    }
+                });
+            });
+            ui.separator();
+            ui.label(RichText::new("Sound panel").small().strong());
+            if advanced {
+                let mut side = self.project.preferences.workspace.vertical_audio;
+                if ui.radio_value(&mut side, true, "Strips side by side").clicked() || ui.radio_value(&mut side, false, "Strips stacked").clicked() {
+                    self.project.preferences.workspace.vertical_audio = side;
+                    self.dirty = true;
+                }
+            }
+            if ui.button("Monitoring & sync…").clicked() {
+                self.tools.audio = true;
+                ui.close();
+            }
+            if ui.button("Look for new devices").clicked() {
+                self.audio.refresh();
+                ui.close();
+            }
+        });
         // Strip positions map to project channels; the Alerts strip stands for its first sound.
         let actual = |id: Id| if id == ALERTS_STRIP { alert_members.first().or(effect_members.first()).copied().unwrap_or(id) } else { id };
         if let Some((id, index)) = reorder
@@ -5650,6 +5889,7 @@ impl eframe::App for Studio {
         if self.camera_aspect.update(&mut self.project, &camera_frames) {
             self.changed();
         }
+        self.audio.music_apps(&self.project.preferences.music_apps);
         self.audio.sync(
             &self.project.audio,
             self.project.preferences.auto_game_audio,

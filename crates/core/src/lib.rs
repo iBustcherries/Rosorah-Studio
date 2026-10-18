@@ -858,8 +858,12 @@ pub struct Preferences {
     #[serde(default)]
     pub monitor_device: String,
     /// The input device chosen for each mixer channel, so it's still chosen next time.
+    /// Besides a device, it can be "auto:music" (music apps) or "app:<name>" (one app).
     #[serde(default)]
     pub audio_inputs: std::collections::BTreeMap<Id, String>,
+    /// Apps added to the automatic music-app list, by app identity.
+    #[serde(default)]
+    pub music_apps: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1036,7 +1040,9 @@ impl Default for Project {
                 recording_directory: String::new(),
                 multitrack_recording: false,
                 monitor_device: String::new(),
-                audio_inputs: Default::default(),
+                // New projects: the Music strip follows music apps on its own.
+                audio_inputs: [(12, "auto:music".to_owned())].into(),
+                music_apps: Vec::new(),
                 recording_encoder: RecordingEncoder::Auto,
                 auto_game_audio: true,
             },
