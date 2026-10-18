@@ -213,7 +213,7 @@ impl Studio {
         }
         if self.recovery_candidate.is_some() {
             let mut action = 0;
-            egui::Window::new("Recover unsaved changes?").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER,[0.,0.]).show(ctx,|ui|{ui.label("A newer recovery copy was found. Your saved project has not been replaced.");ui.horizontal(|ui|{if ui.button("Recover changes").clicked(){action=1;}if ui.button("Keep saved project").clicked(){action=2;}});});
+            egui::Modal::new(egui::Id::new("recover-unsaved")).frame(solid_window(ctx)).show(ctx,|ui|{ui.set_width(380.);ui.heading("Recover unsaved changes?");ui.label("A newer recovery copy was found. Your saved project has not been replaced.");ui.horizontal(|ui|{if ui.button("Recover changes").clicked(){action=1;}if ui.button("Keep saved project").clicked(){action=2;}});});
             if action == 1 {
                 let project = self.recovery_candidate.take().unwrap();
                 self.adopt_project(project);

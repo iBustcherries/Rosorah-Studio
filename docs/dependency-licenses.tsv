@@ -403,3 +403,5 @@ zvariant	5.15.0	MIT	https://github.com/z-galaxy/zbus/
 zvariant_derive	5.15.0	MIT	https://github.com/z-galaxy/zbus/
 zvariant_utils	4.2.0	MIT	https://github.com/z-galaxy/zbus/
 qrcode	0.14.1	MIT OR Apache-2.0	https://github.com/kennytm/qrcode-rust
+Noto Sans Math	20251201	OFL-1.1	https://github.com/notofonts/math
+Noto Sans Symbols 2	20251201	OFL-1.1	https://github.com/notofonts/symbols

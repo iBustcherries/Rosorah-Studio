@@ -161,7 +161,7 @@ impl Studio {
             let on = !selected.is_empty();
             self.audio.enabled.insert(mic.id, on);
         }
-        crate::material::meter(ui, view.stereo_peaks.get(&mic.id).copied().unwrap_or([0.; 2]), false);
+        crate::material::meter_plain(ui, view.stereo_peaks.get(&mic.id).copied().unwrap_or([0.; 2]));
         if mic.muted {
             ui.horizontal(|ui| {
                 ui.label("Your microphone is muted.");

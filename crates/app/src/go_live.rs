@@ -132,14 +132,12 @@ impl Studio {
         }
         let mut open = true;
         let mut start = false;
-        egui::Window::new("Ready to go live?")
+        egui::Modal::new(egui::Id::new("go-live"))
             .frame(solid_window(ctx))
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .default_width(460.)
-            .anchor(egui::Align2::CENTER_CENTER, [0., 0.])
             .show(ctx, |ui| {
+                ui.set_width(460.);
+                ui.heading("Ready to go live?");
+                ui.add_space(6.);
                 let ready = self.check_list(ui);
                 if !self.stream_error.is_empty() {
                     ui.separator();
@@ -160,6 +158,9 @@ impl Studio {
                 });
                 note(ui, "⚠ items won't stop the stream, but are worth a look.");
             });
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            open = false;
+        }
         if start {
             self.start_streaming();
             if self.stream_error.is_empty() {

@@ -11,7 +11,7 @@ impl Studio {
   if self.tools.test_until.is_some_and(|t|Instant::now()>=t){if let Some(r)=&self.live_recording{r.stop();self.tools.recording_file=r.view().path.display().to_string();}self.tools.test_until=None;self.tools.status="Local test complete. Play the recording to check picture, sound and sync.".into();}
   self.compatibility_window(ctx);self.project_recording_window(ctx);self.monitoring_window(ctx);self.performance_window(ctx);self.setup_window(ctx);
  }
- fn project_recording_window(&mut self,ctx:&egui::Context){if !self.tools.open{return}let mut open=true;egui::Window::new("Project & recording tools").open(&mut open).default_width(650.).default_height(550.).show(ctx,|ui|{egui::ScrollArea::vertical().show(ui,|ui|{
+ fn project_recording_window(&mut self,ctx:&egui::Context){if !self.tools.open{return}let mut open=true;egui::Window::new("Project & recording tools").open(&mut open).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).default_width(650.).default_height(550.).show(ctx,|ui|{egui::ScrollArea::vertical().show(ui,|ui|{
   ui.heading("Portable project");ui.label("Bundle scenes, layouts, automations and local image/video/audio files. Account sign-ins and stream keys stay on this computer. Browser-source URLs remain in the project.");
   ui.label("OBS and Firebot imports are in Settings > Advanced.");ui.separator();
   ui.label("File path (optional; leave blank to use the file picker)");ui.text_edit_singleline(&mut self.tools.file);
@@ -29,13 +29,13 @@ impl Studio {
   ui.small("Conversion copies the audio/video without re-encoding. It requires MP4-compatible codecs such as H.264 + AAC; incompatible recordings keep their original format.");
   if self.tools.job.is_some(){ui.spinner();ctx.request_repaint_after(Duration::from_millis(100));}ui.label(&self.tools.status);
  });});self.tools.open=open;}
- fn monitoring_window(&mut self,ctx:&egui::Context){if !self.tools.audio{return}let mut open=true;let mut changed=false;let view=self.audio.view();egui::Window::new("Monitoring & sync").open(&mut open).default_width(620.).show(ctx,|ui|{
+ fn monitoring_window(&mut self,ctx:&egui::Context){if !self.tools.audio{return}let mut open=true;let mut changed=false;let view=self.audio.view();egui::Window::new("Monitoring & sync").open(&mut open).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).default_width(620.).show(ctx,|ui|{
   ui.label("Output is what your stream/recording receives. Monitoring is what you hear in your headphones.");let before=self.project.preferences.monitor_device.clone();egui::ComboBox::from_id_salt("headphone-output").selected_text(view.devices.iter().find(|d|d.target==before).map_or("Choose headphones / monitoring off",|d|d.label.as_str())).show_ui(ui,|ui|{ui.selectable_value(&mut self.project.preferences.monitor_device,String::new(),"Monitoring off");for d in view.devices.iter().filter(|d|d.kind=="Audio/Sink"){ui.selectable_value(&mut self.project.preferences.monitor_device,d.target.clone(),&d.label);}});changed|=before!=self.project.preferences.monitor_device;
   if ui.button("Refresh audio devices").clicked(){self.audio.refresh();}ui.small(&view.monitor_status);ui.small("Avoid monitoring desktop audio back into the same captured speakers.");
   for channel in &mut self.project.audio{ui.push_id(channel.id,|ui|{ui.separator();ui.strong(&channel.name);let old=(channel.monitor,channel.monitor_only);let mut mode=if channel.monitor_only{2}else if channel.monitor{1}else{0};egui::ComboBox::from_id_salt("route-mode").selected_text(["Output only","Monitor & output","Monitor only"][mode]).show_ui(ui,|ui|{for(i,label)in["Output only","Monitor & output","Monitor only"].iter().enumerate(){ui.selectable_value(&mut mode,i,*label);}});channel.monitor=mode!=0;channel.monitor_only=mode==2;changed|=old!=(channel.monitor,channel.monitor_only);changed|=ui.add(egui::DragValue::new(&mut channel.delay_ms).range(0..=2000).suffix(" ms delay")).changed();});}
   ui.label("Increase delay when the audio arrives before the picture. Delay affects both monitoring and output; mute/volume still follow the current scene.");
  });self.tools.audio=open;if changed{self.audio.monitor_device(&self.project.preferences.monitor_device);self.changed();}}
- fn performance_window(&mut self,ctx:&egui::Context){if !self.tools.performance{return}let mut open=true;egui::Window::new("Performance details").open(&mut open).default_width(600.).show(ctx,|ui|{
+ fn performance_window(&mut self,ctx:&egui::Context){if !self.tools.performance{return}let mut open=true;egui::Window::new("Performance details").open(&mut open).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).default_width(600.).show(ctx,|ui|{
   for(name,busy)in &self.resources.gpu{ui.label(format!("{name}: {busy}% whole-device GPU busy"));}if self.resources.gpu.is_empty(){ui.label("GPU busy counter is not exposed by this driver.");}
   let mut views=Vec::new();if let Some(r)=&self.live_recording{views.push(("Recording",r.view()));}if let Some(s)=&self.live_stream{views.push(("Stream encoder",s.view()));}
   if views.is_empty(){ui.label("Start a recording or stream to see output timing.");}
@@ -64,7 +64,7 @@ impl Studio{
   }
  if self.tools.job.is_some(){ui.spinner();ui.ctx().request_repaint_after(Duration::from_millis(100));}if !self.tools.status.is_empty(){ui.label(&self.tools.status);}
  }
- fn compatibility_window(&mut self,ctx:&egui::Context){if !self.tools.compatibility{return}let mut open=true;let r=crate::desktop::report();egui::Window::new("Desktop compatibility").open(&mut open).default_width(580.).show(ctx,|ui|{
+ fn compatibility_window(&mut self,ctx:&egui::Context){if !self.tools.compatibility{return}let mut open=true;let r=crate::desktop::report();egui::Window::new("Desktop compatibility").open(&mut open).pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.content_rect().center()).default_width(580.).show(ctx,|ui|{
  ui.heading(format!("{} · {:?}",r.desktop,r.session));ui.label("These checks describe this session's interfaces, not certification of the desktop or GPU.");
  if r.checking{ui.spinner();ui.label("Checking desktop services…");ctx.request_repaint_after(Duration::from_millis(100));}
  ui.separator();ui.strong("Capture");if let Some(types)=r.sources{ui.label(format!("Desktop portal: {}{}",if types&1!=0{"screens "}else{""},if types&2!=0{"windows"}else{""}));}else{ui.label("Desktop screen-sharing portal unavailable.");}

@@ -12,10 +12,17 @@ pub fn meter(ui: &mut egui::Ui, peaks: [f32; 2], vertical: bool) {
     meter_sized(ui, peaks, vertical, 150.);
 }
 pub fn meter_sized(ui: &mut egui::Ui, peaks: [f32; 2], vertical: bool, height: f32) {
+    meter_with(ui, peaks, vertical, height, true);
+}
+/// A horizontal meter without the dB numbers, for the simple mixer.
+pub fn meter_plain(ui: &mut egui::Ui, peaks: [f32; 2]) {
+    meter_with(ui, peaks, false, 0., false);
+}
+fn meter_with(ui: &mut egui::Ui, peaks: [f32; 2], vertical: bool, height: f32, scale: bool) {
     let size = if vertical {
         Vec2::new(52., height)
     } else {
-        Vec2::new(ui.available_width().max(48.), 38.)
+        Vec2::new(ui.available_width().max(48.), if scale { 38. } else { 20. })
     };
     let (bounds, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     let painter = ui.painter();
@@ -57,7 +64,7 @@ pub fn meter_sized(ui: &mut egui::Ui, peaks: [f32; 2], vertical: bool, height: f
             painter.rect_filled(fill, 0., color);
         }
     }
-    for db in [-60, -40, -20, -10, 0] {
+    for db in [-60, -40, -20, -10, 0].into_iter().filter(|_| scale) {
         let fraction = (db as f32 + 60.) / 60.;
         let (pos, align) = if vertical {
             (

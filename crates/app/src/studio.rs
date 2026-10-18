@@ -113,10 +113,104 @@ fn message_menu(
         *action = Some(ChatAction::Hide(m.platform, m.id.clone()));
     }
 }
+/// A yes/no question in the middle of the screen. Nothing else can be clicked until it's answered;
+/// Esc counts as Cancel. Returns Some(true) for yes, Some(false) for cancel.
+fn confirm(ctx: &egui::Context, id: &str, title: &str, body: &str, yes: &str) -> Option<bool> {
+    let mut answer = None;
+    egui::Modal::new(egui::Id::new(("confirm", id))).frame(solid_window(ctx)).show(ctx, |ui| {
+        ui.set_width(360.);
+        ui.heading(title);
+        ui.add_space(6.);
+        ui.label(body);
+        ui.add_space(10.);
+        ui.horizontal(|ui| {
+            if ui.button(yes).clicked() {
+                answer = Some(true);
+            }
+            if ui.button("Cancel").clicked() {
+                answer = Some(false);
+            }
+        });
+    });
+    if answer.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        answer = Some(false);
+    }
+    answer
+}
 /// Guide and checklist windows stay solid even with see-through panels, so they're easy to read.
 fn solid_window(ctx: &egui::Context) -> egui::Frame {
     let [r, g, b, _] = panel().to_srgba_unmultiplied();
     egui::Frame::window(&ctx.style()).fill(Color32::from_rgb(r, g, b))
+}
+/// A list whose rows can be picked up and moved: the held row follows the pointer and the
+/// others slide out of its way. `row` draws one row (by position, top first) and returns the
+/// response that starts a drag. Returns `(from, to)` positions when a row is dropped somewhere new.
+fn sortable_rows(
+    ui: &mut egui::Ui,
+    key: egui::Id,
+    count: usize,
+    stride: f32,
+    animate: bool,
+    mut row: impl FnMut(&mut egui::Ui, usize) -> egui::Response,
+) -> Option<(usize, usize)> {
+    let start = ui.cursor().min;
+    let width = ui.available_width();
+    let held: Option<(usize, f32)> = ui.data(|d| d.get_temp(key)).filter(|(from, _): &(usize, f32)| *from < count);
+    let snap = ui.data(|d| d.get_temp::<bool>(key.with("snap"))).unwrap_or(false);
+    let pointer = ui.ctx().pointer_interact_pos();
+    let last = count.saturating_sub(1) as f32;
+    let target = held.zip(pointer).map(|((from, grab), p)| (from, ((p.y - grab - start.y) / stride).round().clamp(0., last) as usize));
+    let mut next = held;
+    let mut dropped = None;
+    // The held row is drawn last so it stays on top of the rows sliding under it.
+    let order: Vec<usize> = (0..count).filter(|p| Some(*p) != held.map(|h| h.0)).chain(held.map(|h| h.0)).collect();
+    for p in order {
+        let y = match (held, target, pointer) {
+            (Some((from, grab)), _, Some(pointer)) if from == p => (pointer.y - grab).clamp(start.y, start.y + last * stride),
+            _ => {
+                let slot = match target {
+                    Some((from, to)) if from < to && p > from && p <= to => p - 1,
+                    Some((from, to)) if from > to && p >= to && p < from => p + 1,
+                    _ => p,
+                };
+                let duration = if animate && !snap { 0.12 } else { 0. };
+                ui.ctx().animate_value_with_time(key.with(("y", p)), start.y + slot as f32 * stride, duration)
+            }
+        };
+        let rect = egui::Rect::from_min_size(egui::pos2(start.x, y), egui::vec2(width, stride - 3.));
+        let child = &mut ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt(key.with(p)));
+        if held.is_some_and(|h| h.0 == p) {
+            child.painter().rect_filled(rect.expand(2.), 8., child.visuals().extreme_bg_color);
+        }
+        let response = row(child, p);
+        if response.drag_started()
+            && let Some(pointer) = pointer
+        {
+            next = Some((p, pointer.y - rect.top()));
+        }
+        if held.is_some_and(|h| h.0 == p) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
+    }
+    if held.is_some() && !ui.input(|i| i.pointer.any_down()) {
+        if let Some((from, to)) = target.filter(|(from, to)| from != to) {
+            dropped = Some((from, to));
+        }
+        next = None;
+    }
+    ui.allocate_space(egui::vec2(width, count as f32 * stride));
+    ui.data_mut(|d| {
+        match next {
+            Some(h) => d.insert_temp(key, h),
+            None => d.remove::<(usize, f32)>(key),
+        }
+        // After a drop the rows are renumbered, so they jump straight to their new places once.
+        d.insert_temp(key.with("snap"), dropped.is_some());
+    });
+    if next.is_some() {
+        ui.ctx().request_repaint();
+    }
+    dropped
 }
 fn card() -> egui::Frame {
     egui::Frame::new()
@@ -181,6 +275,8 @@ pub struct Studio {
     /// When the microphone was last heard, for the Go live checklist.
     mic_heard: Option<Instant>,
     report_open: bool,
+    /// The stream title being typed in the Stream panel.
+    title_draft: String,
     /// No saved project existed at start, so the setup guide may replace the demo scenes.
     first_run: bool,
     toast: Option<Toast>,
@@ -198,7 +294,6 @@ pub struct Studio {
     scene_dialog: Option<(Id, String, bool)>,
     broadcast_window: u8,
     panels_animating: bool,
-    layer_motion: Option<(Id, Vec<f32>, Instant)>,
     toggle_panel: Option<Panel>,
     project: Project,
     project_path: PathBuf,
@@ -317,6 +412,16 @@ impl Studio {
             .get_mut(&egui::FontFamily::Proportional)
             .unwrap()
             .insert(0, "Roboto".into());
+        // Fallbacks for symbols the other fonts lack (⋯ ◌ ⋮ ⬤ and more).
+        for (name, data) in [
+            ("Noto Sans Symbols 2", &include_bytes!("../assets/fonts/NotoSansSymbols2-Regular.ttf")[..]),
+            ("Noto Sans Math", &include_bytes!("../assets/fonts/NotoSansMath-Regular.ttf")[..]),
+        ] {
+            fonts.font_data.insert(name.into(), egui::FontData::from_static(data).into());
+            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                fonts.families.get_mut(&family).unwrap().push(name.into());
+            }
+        }
         cc.egui_ctx.set_fonts(fonts);
         let mut style = (*cc.egui_ctx.style()).clone();
         style.visuals = egui::Visuals::dark();
@@ -403,8 +508,12 @@ impl Studio {
         let mut captures = crate::capture::Captures::default();
         captures.set_repaint(cc.egui_ctx.clone());
         captures.restore(&project);
-        let audio = crate::audio::Audio::default();
+        let mut audio = crate::audio::Audio::default();
         audio.follow_capture(captures.reader());
+        for (id, input) in &project.preferences.audio_inputs {
+            audio.selected.insert(*id, input.clone());
+            audio.enabled.insert(*id, true);
+        }
         let selected = project
             .canvases
             .first()
@@ -470,6 +579,10 @@ impl Studio {
         } else {
             None
         };
+        // `--page delete-scene` opens the delete question for screenshots.
+        let scene_dialog = (page == "delete-scene")
+            .then(|| project.canvases.first().and_then(|c| project.scene(c.scene)).map(|s| (s.id, s.name.clone(), true)))
+            .flatten();
         let mut widget_editor = WidgetEditor::default();
         if page == "widgets" {
             widget_editor.id = project
@@ -489,6 +602,7 @@ impl Studio {
             go_live_open: false,
             mic_heard: None,
             report_open: false,
+            title_draft: String::new(),
             first_run,
             toast: None,
             recovering,
@@ -530,10 +644,9 @@ impl Studio {
             render_state,
             preview_size: [0, 0],
             animate: false,
-            scene_dialog: None,
+            scene_dialog,
             broadcast_window: if page == "add-service" { 3 } else { 0 },
             panels_animating: false,
-            layer_motion: None,
             frame: 0,
             last_preview: Instant::now(),
             resources: Resources::default(),
@@ -771,20 +884,17 @@ impl Studio {
                 });
             }
             if let Some(name) = self.profile_delete.clone() {
-                ui.separator();
-                ui.label(format!("Delete the {name} profile with its layout and backups? This can't be undone."));
-                ui.horizontal(|ui| {
-                    if ui.button("Yes, delete it").clicked() {
+                match confirm(ui.ctx(), "profile-delete", "Delete profile", &format!("Delete the {name} profile with its layout and backups? This can't be undone."), "Yes, delete it") {
+                    Some(true) => {
                         self.profile_status = match crate::profiles::delete(&name, current.as_deref().unwrap_or("")) {
                             Ok(()) => format!("Deleted {name}"),
                             Err(e) => format!("{e:#}"),
                         };
                         self.profile_delete = None;
                     }
-                    if ui.button("Cancel").clicked() {
-                        self.profile_delete = None;
-                    }
-                });
+                    Some(false) => self.profile_delete = None,
+                    None => {}
+                }
             }
         });
         ui.add_space(12.);
@@ -896,11 +1006,10 @@ impl Studio {
                 }
             });
             if let Some(path) = self.restore_confirm.clone() {
-                ui.separator();
-                ui.label(format!("Restore {}? Your current project is backed up first, so you can undo this by restoring that copy.",
-                    path.file_stem().unwrap_or_default().to_string_lossy()));
-                ui.horizontal(|ui| {
-                    if ui.button("Yes, restore").clicked() {
+                let body = format!("Restore {}? Your current project is backed up first, so you can undo this by restoring that copy.",
+                    path.file_stem().unwrap_or_default().to_string_lossy());
+                match confirm(ui.ctx(), "restore-backup", "Restore backup", &body, "Yes, restore") {
+                    Some(true) => {
                         self.restore_confirm = None;
                         self.backup_status = match crate::backups::load(&path) {
                             Err(e) => format!("{e:#}"),
@@ -914,10 +1023,9 @@ impl Studio {
                             },
                         };
                     }
-                    if ui.button("Cancel").clicked() {
-                        self.restore_confirm = None;
-                    }
-                });
+                    Some(false) => self.restore_confirm = None,
+                    None => {}
+                }
             }
         });
         ui.add_space(12.);
@@ -1128,6 +1236,50 @@ impl Studio {
         }
         ctx.request_repaint_after(Duration::from_millis(500));
     }
+    /// A mixer input with no device chosen yet (game audio follows the captured game on its own).
+    fn unconnected(&self, channel: &auroracast_core::AudioChannel) -> bool {
+        channel.media_source.is_none()
+            && !(channel.id == crate::game_audio::CHANNEL && self.project.preferences.auto_game_audio)
+            && self.audio.selected.get(&channel.id).is_none_or(|s| s.is_empty())
+    }
+    /// Simple mode's way to bring in a sound: pick the device for an input that has none yet.
+    fn add_sound_menu(&mut self, ui: &mut egui::Ui, view: &crate::audio::View) {
+        egui::containers::menu::MenuButton::from_button(self.primary_button("+ Add sound")).ui(ui, |ui| {
+            let waiting: Vec<_> = self.project.audio.iter().filter(|c| self.unconnected(c)).map(|c| (c.id, c.name.clone())).collect();
+            for (id, name) in waiting {
+                let output = name == "Desktop audio";
+                ui.menu_button(if output { "Computer sound".to_owned() } else { name }, |ui| {
+                    note(ui, if output { "Choose the speakers or headphones whose sound to include" } else { "Choose the device" });
+                    for d in view.devices.iter().filter(|d| (d.kind == "Audio/Sink") == output) {
+                        if ui.button(&d.label).clicked() {
+                            self.audio.selected.insert(id, d.serial.clone());
+                            self.audio.enabled.insert(id, true);
+                            ui.close();
+                        }
+                    }
+                });
+            }
+            if !self.project.audio.iter().any(|c| c.name == "Desktop audio") {
+                ui.menu_button("Computer sound", |ui| {
+                    note(ui, "Everything playing on this computer. Choose the speakers or headphones it plays through.");
+                    for d in view.devices.iter().filter(|d| d.kind == "Audio/Sink") {
+                        if ui.button(&d.label).clicked() {
+                            let id = self.project.id();
+                            self.project.audio.push(auroracast_core::AudioChannel { monitor_only: false, id, name: "Desktop audio".into(), gain_db: 0., muted: false, tracks: [true, false, false, false, false, false], delay_ms: 0, monitor: false, noise_suppression: Default::default(), media_source: None });
+                            self.audio.selected.insert(id, d.serial.clone());
+                            self.audio.enabled.insert(id, true);
+                            self.changed();
+                            ui.close();
+                        }
+                    }
+                });
+            }
+            ui.separator();
+            if ui.button("Look for new devices").clicked() {
+                self.audio.refresh();
+            }
+        });
+    }
     fn advanced(&self) -> bool {
         self.project.preferences.workspace.advanced
     }
@@ -1162,24 +1314,6 @@ impl Studio {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{note(ui,format!("RAM {}",fmt(self.resources.ram)));note(ui,format!("GPU {}",self.resources.gpu.iter().map(|(_,v)|*v).max().map_or("—".into(),|v|format!("{v}%"))));note(ui,format!("CPU {}",fmt(self.resources.cpu)));}).response.on_hover_text("System usage (all applications), updated once per second. GPU shows the busiest reported device/engine. Unsupported counters show —, never a fabricated zero.");
         });});
     }
-    /// Main/Vertical switch above Scenes and In this scene; hidden when only one video is in use.
-    fn canvas_tabs(&mut self, ui: &mut egui::Ui) {
-        let shown: Vec<usize> = (0..self.project.canvases.len())
-            .filter(|i| *i == 0 || self.advanced() || (*i == 1 && self.project.preferences.workspace.vertical_video))
-            .collect();
-        if shown.len() < 2 {
-            return;
-        }
-        ui.horizontal_wrapped(|ui| {
-            for index in shown {
-                let label = self.project.canvases[index].name.clone();
-                if ui.selectable_label(self.canvas == index, label).clicked() {
-                    self.canvas = index;
-                    self.layer = None;
-                }
-            }
-        });
-    }
     fn scene_context(&mut self, ui: &mut egui::Ui, canvas: Id, id: Id) {
         if ui.button("Duplicate").clicked() {
             self.project.duplicate_scene(canvas, id);
@@ -1190,23 +1324,6 @@ impl Studio {
             self.scene_dialog = Some((id, self.project.scene(id).unwrap().name.clone(), false));
             ui.close();
         }
-        ui.menu_button("Reorder", |ui| {
-            let ids = self.project.canvas_scenes(canvas);
-            let at = ids.iter().position(|s| *s == id).unwrap_or(0);
-            let last = ids.len() - 1;
-            for (label, to) in [
-                ("Move to top", 0),
-                ("Move up", at.saturating_sub(1)),
-                ("Move down", (at + 1).min(last)),
-                ("Move to bottom", last),
-            ] {
-                if ui.add_enabled(to != at, egui::Button::new(label)).clicked() {
-                    self.project.move_scene(canvas, id, to);
-                    self.changed();
-                    ui.close();
-                }
-            }
-        });
         let vertical_in_use = self.project.canvases.len() > 1 && (self.advanced() || self.project.preferences.workspace.vertical_video);
         if vertical_in_use { ui.menu_button(if canvas == self.project.canvases[0].id { "Show on the vertical video" } else { "Show with main video scene" }, |ui| {
             let main = self.project.canvases[0].id;
@@ -1272,33 +1389,71 @@ impl Studio {
         }
     }
     fn scenes_panel(&mut self, ui: &mut egui::Ui) {
-        self.canvas_tabs(ui);
         let canvas = self.project.canvases[self.canvas].id;
         let active = self.project.canvases[self.canvas].scene;
-        for id in self.project.canvas_scenes(canvas) {
-            let name = self
-                .project
-                .scene(id)
-                .map(|s| s.name.clone())
-                .unwrap_or_default();
-            ui.push_id(id, |ui| {
-                ui.horizontal(|ui| {
-                    let response = ui.add_sized(
-                        [(ui.available_width() - 50.).max(30.), 30.],
-                        egui::Button::new(name).selected(active == id).truncate(),
-                    );
-                    if response.clicked() {
-                        self.request_scene(canvas, id);
-                    }
-                    response.context_menu(|ui| self.scene_context(ui, canvas, id));
-                    ui.menu_button("...", |ui| self.scene_context(ui, canvas, id));
-                });
+        let vertical_in_use = self.project.canvases.len() > 1 && (self.advanced() || self.project.preferences.workspace.vertical_video);
+        if self.canvas > 0 {
+            ui.horizontal_wrapped(|ui| {
+                note(ui, format!("{} scenes", self.project.canvases[self.canvas].name));
+                if ui.small_button("Back to main video").clicked() {
+                    self.canvas = 0;
+                    self.layer = None;
+                }
             });
         }
+        let ids = self.project.canvas_scenes(canvas);
+        let live = self.live_stream.is_some() || self.live_recording.is_some();
+        let animate = self.project.preferences.workspace.animations;
+        let moved = sortable_rows(ui, egui::Id::new(("scene-rows", canvas)), ids.len(), 36., animate, |ui, p| {
+            let id = ids[p];
+            let name = self.project.scene(id).map(|s| s.name.clone()).unwrap_or_default();
+            let on_air = live && active == id;
+            let hovered = ui.rect_contains_pointer(ui.max_rect());
+            ui.horizontal(|ui| {
+                let text = if on_air {
+                    RichText::new(format!("● LIVE  {name}")).color(Color32::from_rgb(255, 92, 92)).strong()
+                } else {
+                    RichText::new(name)
+                };
+                let response = ui
+                    .add_sized([(ui.available_width() - 34.).max(30.), 30.], egui::Button::new(text).selected(active == id).truncate().sense(egui::Sense::click_and_drag()))
+                    .on_hover_text("Click to switch · drag to reorder · right-click for more");
+                if response.clicked() {
+                    self.request_scene(canvas, id);
+                }
+                response.context_menu(|ui| self.scene_context(ui, canvas, id));
+                ui.scope(|ui| {
+                    if !hovered && !egui::Popup::is_any_open(ui.ctx()) {
+                        ui.multiply_opacity(0.);
+                    }
+                    ui.menu_button("…", |ui| self.scene_context(ui, canvas, id));
+                });
+                response
+            })
+            .inner
+        });
+        if let Some((from, to)) = moved {
+            self.project.move_scene(canvas, ids[from], to);
+            self.changed();
+        }
+        ui.add_space(4.);
         ui.horizontal_wrapped(|ui| {
             if ui.add(self.primary_button("+ Scene")).clicked() {let id=self.project.id();self.project.scenes.push(Scene{id,name:format!("Scene {id}"),layers:vec![]});self.project.preferences.workspace.scenes.entry(canvas).or_default().push(id);self.project.switch_scene(canvas,id);self.layer=None;self.changed();}
-            if self.project.canvases.len() > 1 && (self.advanced() || self.project.preferences.workspace.vertical_video) && ui.checkbox(&mut self.project.preferences.workspace.link_scenes,"Switch the vertical video too").on_hover_text("Switching a main video scene also switches the vertical video to its matching scene. Right-click a scene to choose which one.").changed() {self.changed();}
-            ui.menu_button(format!("Transition · {}", self.project.preferences.transition.label()),|ui| self.transition_menu(ui));
+            ui.menu_button("⚙", |ui| {
+                ui.menu_button(format!("Transition · {}", self.project.preferences.transition.label()), |ui| self.transition_menu(ui));
+                if vertical_in_use {
+                    if ui.checkbox(&mut self.project.preferences.workspace.link_scenes, "Switch the vertical video too").on_hover_text("Switching a main video scene also switches the vertical video to its matching scene. Right-click a scene to choose which one.").changed() {
+                        self.changed();
+                    }
+                    if self.canvas == 0 && ui.button("Edit the vertical video's scenes").clicked() {
+                        self.canvas = 1;
+                        self.layer = None;
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("Transition and scene options");
         });
         if let Some(link) = self
             .project
@@ -1307,9 +1462,9 @@ impl Studio {
             .scene_links
             .get(&active)
             .and_then(|id| self.project.scene(*id))
-            .filter(|_| self.project.preferences.workspace.vertical_video || self.advanced())
+            .filter(|_| vertical_in_use && self.project.preferences.workspace.link_scenes)
         {
-            ui.small(format!("Vertical video switches to: {}", link.name));
+            note(ui, format!("Vertical video switches to: {}", link.name));
         }
     }
     fn scene_dialog_ui(&mut self, ctx: &egui::Context) {
@@ -1318,15 +1473,11 @@ impl Studio {
         };
         let mut open = true;
         let mut done = false;
-        egui::Window::new(if delete {
-            "Delete scene"
-        } else {
-            "Rename scene"
-        })
-        .collapsible(false)
-        .resizable(false)
-        .open(&mut open)
-        .show(ctx, |ui| {
+        // Front and center, with the studio dimmed behind it, so the question can't be missed.
+        let modal = egui::Modal::new(egui::Id::new("scene-dialog")).frame(solid_window(ctx)).show(ctx, |ui| {
+            ui.set_width(340.);
+            ui.heading(if delete { "Delete scene" } else { "Rename scene" });
+            ui.add_space(6.);
             if delete {
                 ui.label(format!("Delete “{name}” and remove its scene links?"));
             } else {
@@ -1363,6 +1514,10 @@ impl Studio {
                 }
             });
         });
+        let _ = modal;
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            open = false;
+        }
         self.scene_dialog = if open && !done {
             Some((id, name, delete))
         } else {
@@ -1370,127 +1525,65 @@ impl Studio {
         };
     }
     fn sources_panel(&mut self, ui: &mut egui::Ui) {
-        self.canvas_tabs(ui);
         let active = self.project.canvases[self.canvas].scene;
-        ui.small(format!(
-            "{} · {}",
-            self.project.canvases[self.canvas].name,
-            self.project
-                .scene(active)
-                .map(|s| s.name.as_str())
-                .unwrap_or("Scene")
-        ));
-        note(ui, "Things at the top of the list appear in front. Drag to reorder; double-click to change one.");
+        if self.canvas > 0 {
+            note(ui, format!("{} · {}", self.project.canvases[self.canvas].name, self.project.scene(active).map(|s| s.name.as_str()).unwrap_or("Scene")));
+        }
         let si = self
             .project
             .scenes
             .iter()
             .position(|s| s.id == active)
             .unwrap();
-        let rows: Vec<_> = self.project.scenes[si]
-            .layers
-            .iter()
-            .enumerate()
-            .map(|(i, l)| {
-                (
-                    i,
-                    self.project
-                        .source(l.source)
-                        .map(|s| s.name.clone())
-                        .unwrap_or_default(),
-                    l.visible,
-                    l.locked,
-                )
-            })
-            .collect();
-        let count = rows.len();
-        let stride = 34.;
-        let start = ui.cursor().min;
-        let width = ui.available_width();
+        let count = self.project.scenes[si].layers.len();
         let mut dropped = None;
-        let ease = self
-            .layer_motion
-            .as_ref()
-            .filter(|(scene, offset, _)| *scene == active && offset.len() == count)
-            .map(|(_, _, time)| {
-                let t = (time.elapsed().as_secs_f32() / 0.16).min(1.);
-                if t < 1. {
-                    ui.ctx().request_repaint();
+        let animate = self.project.preferences.workspace.animations;
+        // Rows run top to bottom from the frontmost layer, which is last in the scene.
+        let moved = sortable_rows(ui, egui::Id::new(("layer-rows", active)), count, 34., animate, |ui, p| {
+            let i = count - 1 - p;
+            let layer = &self.project.scenes[si].layers[i];
+            let (visible, locked) = (layer.visible, layer.locked);
+            let name = self.project.source(layer.source).map(|s| s.name.clone()).unwrap_or_default();
+            let hovered = ui.rect_contains_pointer(ui.max_rect());
+            ui.spacing_mut().button_padding = egui::vec2(5., 3.);
+            ui.spacing_mut().item_spacing = egui::vec2(4., 2.);
+            ui.horizontal(|ui| {
+                let eye = egui::Button::new(if visible { RichText::new("👁").color(ui.visuals().strong_text_color()) } else { RichText::new("👁").color(muted()).strikethrough() }).frame(false);
+                if ui.add_sized([22., 26.], eye).on_hover_text(if visible { "Showing · click to hide" } else { "Hidden · click to show" }).clicked() {
+                    self.project.scenes[si].layers[i].visible = !visible;
+                    self.changed();
                 }
-                (1. - t).powi(3)
-            })
-            .unwrap_or(0.);
-        for (i, name, mut visible, locked) in rows.into_iter().rev() {
-            let offset = self
-                .layer_motion
-                .as_ref()
-                .filter(|(scene, offset, _)| *scene == active && offset.len() == count)
-                .map_or(0., |(_, v, _)| v[i] * ease);
-            let rect = egui::Rect::from_min_size(
-                start + egui::vec2(0., (count - 1 - i) as f32 * stride + offset),
-                egui::vec2(width, stride - 3.),
-            );
-            let row_ui = &mut ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt((
-                "layer-row",
-                active,
-                i,
-            )));
-            let row = row_ui.scope(|ui| {
-                ui.spacing_mut().button_padding = egui::vec2(5., 3.);
-                ui.spacing_mut().item_spacing = egui::vec2(4., 2.);
-                ui.horizontal(|ui| {
-                    if ui
-                        .checkbox(&mut visible, "")
-                        .on_hover_text("Show layer")
-                        .changed()
-                    {
-                        self.project.scenes[si].layers[i].visible = visible;
-                        self.changed();
-                    }
-                    let response = ui.add_sized(
+                let label = if locked { format!("🔒 {name}") } else { name.clone() };
+                let response = ui
+                    .add_sized(
                         [(ui.available_width() - 28.).max(30.), 26.],
-                        egui::Button::new(&name)
-                            .sense(if locked {
-                                egui::Sense::click()
-                            } else {
-                                egui::Sense::click_and_drag()
-                            })
-                            .selected(self.selections.get(&active).is_some_and(|v|v.contains(&i)))
+                        egui::Button::new(RichText::new(label).color(if visible { ui.visuals().text_color() } else { muted() }))
+                            .sense(if locked { egui::Sense::click() } else { egui::Sense::click_and_drag() })
+                            .selected(self.selections.get(&active).is_some_and(|v| v.contains(&i)))
                             .truncate(),
-                    );
-                    if !locked && response.drag_started() {
-                        response.dnd_set_drag_payload((active, i));
+                    )
+                    .on_hover_text(if locked { "Locked · right-click to unlock" } else { "Drag to reorder (top appears in front) · double-click to change" });
+                if !locked {
+                    response.clone().on_hover_cursor(egui::CursorIcon::Grab);
+                }
+                if response.clicked() {self.select_layer(active,i,ui.input(|i|i.modifiers.shift));}
+                if response.double_clicked() {
+                    self.select_layer(active, i, false);
+                    self.layer_properties = Some((active, i));
+                }
+                response.context_menu(|ui| self.layer_menu(ui, si, i, &name, &mut dropped));
+                ui.scope(|ui| {
+                    if !hovered && !egui::Popup::is_any_open(ui.ctx()) {
+                        ui.multiply_opacity(0.);
                     }
-                    if !locked {
-                        response.clone().on_hover_cursor(egui::CursorIcon::Grab);
-                    }
-                    if response.clicked() {self.select_layer(active,i,ui.input(|i|i.modifiers.shift));}
-                    if response.double_clicked() {
-                        self.select_layer(active, i, false);
-                        self.layer_properties = Some((active, i));
-                    }
-                    response.context_menu(|ui| self.layer_menu(ui, si, i, &name, &mut dropped));
-                    ui.menu_button("...", |ui| self.layer_menu(ui, si, i, &name, &mut dropped));
+                    ui.menu_button("…", |ui| self.layer_menu(ui, si, i, &name, &mut dropped));
                 });
-            });
-            let response = row.response.interact(egui::Sense::hover());
-            if let Some(payload) = response.dnd_hover_payload::<(Id, usize)>()
-                && payload.0 == active
-            {
-                ui.painter().line_segment(
-                    [rect.left_top(), rect.right_top()],
-                    egui::Stroke::new(2., self.accent()),
-                );
-            }
-            if let Some(payload) = response.dnd_release_payload::<(Id, usize)>()
-                && payload.0 == active
-            {
-                dropped = Some((payload.1, i));
-            }
-        }
-        ui.allocate_space(egui::vec2(width, count as f32 * stride));
-        if ease == 0. {
-            self.layer_motion = None;
+                response
+            })
+            .inner
+        });
+        if let Some((from, to)) = moved {
+            dropped = Some((count - 1 - from, count - 1 - to));
         }
         if let Some((from, to)) = dropped.filter(|(from, to)| {
             from != to
@@ -1509,18 +1602,6 @@ impl Studio {
             self.layer = self
                 .layer
                 .and_then(|selected| origins.iter().position(|old| *old == selected));
-            if self.project.preferences.workspace.animations {
-                self.layer_motion = Some((
-                    active,
-                    origins
-                        .iter()
-                        .enumerate()
-                        .map(|(new, old)| (new as f32 - *old as f32) * stride)
-                        .collect(),
-                    Instant::now(),
-                ));
-                ui.ctx().request_repaint();
-            }
             self.changed();
         }
         if count == 0 {
@@ -2420,29 +2501,26 @@ impl Studio {
                     continue;
                 }
                 ui.push_id(("broadcast-service", slot), |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.checkbox(&mut dest.enabled, name);
-                        if ui.small_button("Set up…").clicked() {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut dest.enabled, "").on_hover_text("Include when you go live");
+                        let (dot, status, color) = if !dest.key.is_empty() {
+                            ("●", "ready", Color32::from_rgb(110, 210, 140))
+                        } else if connected {
+                            ("◌", "getting stream key…", Color32::from_rgb(230, 190, 90))
+                        } else {
+                            ("○", "sign in", muted())
+                        };
+                        let video = dest.canvas.or(if slot == 2 { vertical } else { main }).and_then(|id| self.project.canvases.iter().find(|c| c.id == id)).map(|c| c.name.clone()).unwrap_or_default();
+                        ui.label(RichText::new(dot).color(color));
+                        let label = ui.add(egui::Label::new(RichText::new(name).strong()).truncate());
+                        if several_videos {
+                            label.on_hover_text(format!("Sends the {}", video.to_lowercase()));
+                        }
+                        ui.label(RichText::new(status).small().color(color));
+                        if ui.small_button("Set up…").on_hover_text("Sign-in, stream key and which video to send").clicked() {
                             self.broadcast_window = 100 + slot as u8;
                         }
                     });
-                    if several_videos { ui.horizontal_wrapped(|ui| {
-                        ui.small("Video");
-                        let selected = dest.canvas.or(if slot == 2 { vertical } else { main });
-                        for canvas in &self.project.canvases {
-                            if ui
-                                .selectable_label(selected == Some(canvas.id), &canvas.name)
-                                .on_hover_text(&canvas.name)
-                                .clicked()
-                            {
-                                dest.canvas = Some(canvas.id);
-                            }
-                        }
-                    }); }
-                    if dest.key.is_empty() {
-                        ui.small("Sign in or add a stream key before going live");
-                    }
-                    ui.add_space(6.);
                 });
             }
             if ui
@@ -2617,8 +2695,9 @@ impl Studio {
             self.output_buttons(ui);
         }
         self.broadcast_routes(ui);
+        self.title_editor(ui);
         self.streaming_controls(ui);
-        if ui.button("Stream title & thumbnail").clicked() {
+        if ui.button("Category & thumbnail…").clicked() {
             self.broadcast_window = 1;
         }
         if self.advanced() && ui.button("Quality & recording").clicked() {
@@ -2630,6 +2709,43 @@ impl Studio {
         ui.push_id("broadcast_queue", |ui| crate::automations::queue_bar(ui, &mut self.automation_queue, &mut commands));
         for command in commands {
             self.automation_command(command);
+        }
+    }
+    /// One stream title for every signed-in platform, right in the Stream panel.
+    fn title_editor(&mut self, ui: &mut egui::Ui) {
+        let mut accounts: Vec<&mut crate::accounts::Account> = self.accounts.iter_mut().chain(std::iter::once(&mut self.kick_account)).filter(|a| a.connected).collect();
+        if accounts.is_empty() {
+            return;
+        }
+        if self.title_draft.is_empty()
+            && let Some(title) = accounts.iter().map(|a| a.title.clone()).find(|t| !t.is_empty())
+        {
+            self.title_draft = title;
+        }
+        ui.separator();
+        ui.strong("Stream title");
+        let field = ui.add(egui::TextEdit::singleline(&mut self.title_draft).hint_text("What are you streaming today?").desired_width(f32::INFINITY).char_limit(140));
+        let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let busy = accounts.iter().any(|a| a.operation_busy);
+        let names: Vec<_> = accounts.iter().map(|a| a.platform.name()).collect();
+        if (ui.add_enabled(!self.title_draft.trim().is_empty() && !busy, egui::Button::new(format!("Update on {}", names.join(" and ")))).clicked() || enter)
+            && !self.title_draft.trim().is_empty()
+        {
+            for account in &mut accounts {
+                // YouTube titles belong to a broadcast; skip it until one exists.
+                if account.platform == Platform::YouTube && account.broadcast.is_empty() {
+                    continue;
+                }
+                account.title = self.title_draft.trim().to_owned();
+                account.send(crate::accounts::Command::Update { title: account.title.clone(), category: account.category.clone() });
+            }
+            self.tell("Stream title sent".into());
+        }
+        if busy {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                note(ui, "Updating…");
+            });
         }
     }
     fn broadcast_windows(&mut self, ctx: &egui::Context) {
@@ -2648,6 +2764,8 @@ impl Studio {
             "Quality & recording"
         })
         .open(&mut open)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.content_rect().center())
         .default_width(580.)
         .vscroll(true)
         .show(ctx, |ui| {
@@ -2981,8 +3099,10 @@ impl Studio {
 
     fn chat_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.heading("Chat");
-            ui.menu_button("...", |ui| {
+            if self.filter.is_some() || self.events_only {
+                note(ui, format!("Showing {}", if self.events_only { "events only".to_owned() } else { self.filter.map_or("all", |p| p.name()).to_owned() }));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| ui.menu_button("⋯", |ui| {
                 ui.checkbox(&mut self.events_only, "Events only");
                 ui.selectable_value(&mut self.filter, None, "All platforms");
                 for p in [Platform::Twitch, Platform::YouTube, Platform::Kick] {
@@ -2997,17 +3117,14 @@ impl Studio {
                     let _ = self.browser_chat.start();
                     ui.close();
                 }
-            });
+            }));
         });
         if self.browser_chat.installing() {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.small("Preparing chat…");
             });
-        } else if self.accounts[1].connected && self.accounts[1].broadcast.is_empty() {
-            ui.small("YouTube: waiting for your stream…");
         }
-        ui.separator();
         let mut connected: Vec<_> = self
             .accounts
             .iter()
@@ -3141,70 +3258,39 @@ impl Studio {
             return;
         }
         let mut destinations = Vec::new();
+        // Colored chips choose where messages go; a hollow dot means the platform is still waiting.
+        let youtube_waiting = self.accounts[1].connected && self.accounts[1].broadcast.is_empty();
+        let chip = |ui: &mut egui::Ui, platform: Platform, on: bool, waiting: bool| {
+            let color = if on { platform_color(platform) } else { muted() };
+            let text = format!("{} {}", if waiting { "◌" } else if on { "●" } else { "○" }, platform.name());
+            ui.add(egui::Button::new(RichText::new(text).small().color(color)).selected(false).frame(on))
+                .on_hover_text(if waiting { format!("{} chat starts when your stream does", platform.name()) } else if on { "Sending here · click to stop".into() } else { "Not sending here · click to include".into() })
+                .clicked()
+        };
         ui.horizontal_wrapped(|ui| {
-            ui.small("Send to");
-            for (index, name) in ["Twitch", "YouTube"].iter().enumerate() {
-                if !connected.contains(name) {
+            for (index, (name, platform)) in [("Twitch", Platform::Twitch), ("YouTube", Platform::YouTube)].into_iter().enumerate() {
+                if !connected.contains(&name) {
                     continue;
                 }
                 let selected = self.project.preferences.workspace.chat_destinations[index];
-                if ui
-                    .selectable_label(
-                        selected,
-                        if selected {
-                            format!("✓ {name}")
-                        } else {
-                            (*name).into()
-                        },
-                    )
-                    .clicked()
-                {
+                if chip(ui, platform, selected, platform == Platform::YouTube && youtube_waiting) {
                     self.project.preferences.workspace.chat_destinations[index] = !selected;
                     self.dirty = true;
                 }
             }
             if connected.contains(&"Kick") {
                 let selected = self.project.preferences.workspace.kick_chat;
-                if ui
-                    .selectable_label(
-                        selected,
-                        if selected {
-                            "✓ Kick".to_string()
-                        } else {
-                            "Kick".to_string()
-                        },
-                    )
-                    .clicked()
-                {
+                if chip(ui, Platform::Kick, selected, false) {
                     self.project.preferences.workspace.kick_chat = !selected;
                     self.dirty = true;
                 }
             }
             if connected.contains(&"TikTok") && self.stream_config.tiktok_send {
                 let selected = self.tiktok_chat;
-                if ui.selectable_label(selected, if selected { "✓ TikTok" } else { "TikTok" }).clicked() {
+                if chip(ui, Platform::TikTok, selected, false) {
                     self.tiktok_chat = !selected;
                 }
             }
-            ui.menu_button("Emoji & emotes", |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for emoji in ["😀", "😂", "❤️", "🔥", "👋", "🎉", "👍", "🙏", "💜", "👀"]
-                    {
-                        if ui.button(emoji).clicked() {
-                            self.browser_chat.draft.push_str(emoji);
-                            ui.close();
-                        }
-                    }
-                });
-                for platform in &connected {
-                    for (name, _) in self.browser_chat.rich.recent(platform) {
-                        if ui.button(&name).clicked() {
-                            self.browser_chat.draft.push_str(&format!(" {name} "));
-                            ui.close();
-                        }
-                    }
-                }
-            });
         });
         for (index, name) in ["Twitch", "YouTube"].iter().enumerate() {
             if connected.contains(name)
@@ -3223,9 +3309,12 @@ impl Studio {
         let enter = ui.memory(|m| m.has_focus(editor_id))
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
         let row = ui.text_style_height(&egui::TextStyle::Body);
+        let connected_names = connected.clone();
+        ui.horizontal(|ui| {
         egui::ScrollArea::vertical()
             .id_salt("composer-scroll")
             .max_height(row * 5. + 8.)
+            .max_width((ui.available_width() - 40.).max(60.))
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 ui.add(
@@ -3240,6 +3329,26 @@ impl Studio {
                         )),
                 );
             });
+            ui.menu_button("😀", |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for emoji in ["😀", "😂", "❤️", "🔥", "👋", "🎉", "👍", "🙏", "💜", "👀"] {
+                        if ui.button(emoji).clicked() {
+                            self.browser_chat.draft.push_str(emoji);
+                            ui.close();
+                        }
+                    }
+                });
+                let connected = connected_names.clone();
+                for platform in &connected {
+                    for (name, _) in self.browser_chat.rich.recent(platform) {
+                        if ui.button(&name).clicked() {
+                            self.browser_chat.draft.push_str(&format!(" {name} "));
+                            ui.close();
+                        }
+                    }
+                }
+            }).response.on_hover_text("Emoji & emotes");
+        });
         let label = match destinations.as_slice() {
             [] => "Choose a platform".into(),
             [one] => format!("Send to {one}"),
@@ -3375,7 +3484,7 @@ impl Studio {
     fn preview(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
         let canvas = self.project.canvases[self.canvas].clone();
         let width = ui.available_width().max(1.);
-        let max_height = (ui.available_height() - 125.).max(1.);
+        let max_height = (ui.available_height() - if self.advanced() { 70. } else { 44. }).max(1.);
         let scale = (width / canvas.width as f32).min(max_height / canvas.height as f32);
         let size = Vec2::new(canvas.width as f32 * scale, canvas.height as f32 * scale);
         let dimensions = if self.panels_animating && self.preview_size[0] > 0 {
@@ -3434,10 +3543,12 @@ impl Studio {
             self.revision = false;
             self.last_preview = Instant::now();
         }
-        note(
-            ui,
-            format!("{} × {} · {} fps", canvas.width, canvas.height, canvas.fps),
-        );
+        if self.advanced() {
+            note(
+                ui,
+                format!("{} × {} · {} fps", canvas.width, canvas.height, canvas.fps),
+            );
+        }
         let (rect, _) = ui.allocate_exact_size(Vec2::new(width, max_height), egui::Sense::hover());
         let target = egui::Rect::from_center_size(rect.center(), size);
         if let Some(texture) = &self.preview {
@@ -3445,13 +3556,6 @@ impl Studio {
                 *texture,
                 target,
                 egui::Rect::from_min_max(egui::pos2(0., 0.), egui::pos2(1., 1.)),
-                Color32::WHITE,
-            );
-            ui.painter().text(
-                target.left_top() + Vec2::new(14., 14.),
-                egui::Align2::LEFT_TOP,
-                "PREVIEW",
-                egui::FontId::proportional(12.),
                 Color32::WHITE,
             );
             if let Some((text, until)) = &self.active_alert
@@ -3505,31 +3609,6 @@ impl Studio {
             self.changed();
         }
         self.canvas_layout_tools(ui);
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .checkbox(&mut self.project.preferences.snapping.enabled, "Snapping")
-                .changed()
-            {
-                self.changed();
-            }
-            ui.menu_button("Preview options", |ui| {
-                let before = self.project.preferences.snapping;
-                let settings = &mut self.project.preferences.snapping;
-                ui.checkbox(&mut settings.canvas_edges, "Canvas edges");
-                ui.checkbox(&mut settings.canvas_center, "Canvas center");
-                ui.checkbox(&mut settings.sources, "Other layers");
-                ui.add(
-                    egui::DragValue::new(&mut settings.distance)
-                        .range(2.0..=24.0)
-                        .suffix(" px snap distance"),
-                );
-                if self.project.preferences.snapping != before {
-                    self.changed();
-                }
-                ui.checkbox(&mut self.animate, "Animate test input");
-                ui.small("Drag sources to move or resize. Hold Ctrl to bypass snapping.");
-            });
-        });
     }
 
     fn main_studio(&mut self, ctx: &egui::Context) {
@@ -3664,7 +3743,11 @@ impl Studio {
         let advanced = self.advanced();
         ui.horizontal_wrapped(|ui| {
             if advanced && ui.button("Monitoring & sync…").clicked(){self.tools.audio=true;}
-            ui.strong(format!("Sound · {}",self.project.scene(scene_id).map(|s|s.name.as_str()).unwrap_or("Scene")));
+            note(ui, format!("Volumes for {}",self.project.scene(scene_id).map(|s|s.name.as_str()).unwrap_or("this scene")));
+            if !advanced {
+                self.add_sound_menu(ui, &view);
+                return;
+            }
             ui.menu_button("Options",|ui| {
         if !self.project.audio.iter().any(|c| c.name == "Desktop audio")
             && ui.button("Add computer sound").on_hover_text("Everything playing on this computer").clicked()
@@ -3712,20 +3795,29 @@ impl Studio {
                 self.dirty = true;
             }
         }); }
-        let vertical_audio = self.project.preferences.workspace.vertical_audio;
+        let vertical_audio = advanced && self.project.preferences.workspace.vertical_audio;
         self.audio
             .monitor_device(&self.project.preferences.monitor_device);
-        // Alert sounds share one "Alerts" strip, shown where the first of them sits.
+        // Alert sounds share one "Alerts" strip, shown where the first of them sits. In simple mode
+        // the stinger and transition-screen sounds join it as "Effects", and inputs with nothing
+        // chosen are left out until they're set up from + Add sound.
         let mut view = view;
         let mut scene_channels = Vec::new();
         let mut alert_members = Vec::new();
+        let mut effect_members = Vec::new();
+        let media = &self.project.preferences.transition_media;
+        let transitions = [media.stinger, media.screen];
         for channel in self.project.mixer_channels(scene_id) {
-            if self.project.is_alert_channel(&channel) {
-                if alert_members.is_empty() {
+            let effect = !advanced && channel.media_source.is_some() && transitions.contains(&channel.media_source);
+            if !advanced && self.unconnected(&channel) {
+                continue;
+            }
+            if self.project.is_alert_channel(&channel) || effect {
+                if alert_members.is_empty() && effect_members.is_empty() {
                     let bus = &self.project.preferences.alert_bus;
                     scene_channels.push(auroracast_core::AudioChannel {
                         id: ALERTS_STRIP,
-                        name: "Alerts".into(),
+                        name: if advanced { "Alerts".into() } else { "Effects".into() },
                         gain_db: bus.gain_db,
                         muted: bus.muted,
                         media_source: None,
@@ -3737,19 +3829,17 @@ impl Studio {
                 let peak = view.stereo_peaks.get(&channel.id).copied().unwrap_or([0.; 2]);
                 let combined = view.stereo_peaks.entry(ALERTS_STRIP).or_insert([0.; 2]);
                 *combined = [combined[0].max(peak[0]), combined[1].max(peak[1])];
-                alert_members.push(channel.id);
+                if effect {
+                    effect_members.push(channel.id);
+                } else {
+                    alert_members.push(channel.id);
+                }
             } else {
                 scene_channels.push(channel);
             }
         }
         if scene_channels.is_empty() {
-            note(ui, "Nothing to hear yet. Add your microphone or your computer's sound.");
-            if ui.add(self.primary_button("Add computer sound")).clicked() {
-                let id = self.project.id();
-                self.project.audio.push(auroracast_core::AudioChannel { monitor_only: false, id, name: "Desktop audio".into(), gain_db: 0., muted: false, tracks: [true, false, false, false, false, false], delay_ms: 0, monitor: false, noise_suppression: Default::default(), media_source: None });
-                self.changed();
-                self.audio.refresh();
-            }
+            note(ui, "Nothing to hear yet. Use + Add sound to add your microphone or your computer's sound.");
         }
         let shown: Vec<Id> = scene_channels.iter().map(|c| c.id).collect();
         let alerts_before = scene_channels.iter().find(|c| c.id == ALERTS_STRIP).cloned();
@@ -3806,14 +3896,14 @@ impl Studio {
                             ui.small(if gain <= -60. { if advanced { "−∞ dB".into() } else { "Off".into() } } else if advanced {format!("{gain:.1} dB")} else {format!("{:.0}%", 10f32.powf(gain / 20.) * 100.)});
                         });
                     });
-                    if !vertical_audio {crate::material::meter(ui,levels,false);}
+                    if !vertical_audio {if advanced {crate::material::meter(ui,levels,false);} else {crate::material::meter_plain(ui,levels);}}
                     ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), if vertical_audio {meter_height+60.}else{30.}), if vertical_audio {egui::Layout::top_down(egui::Align::Center)} else {egui::Layout::left_to_right(egui::Align::Center)},|ui| {
                     ui.spacing_mut().slider_width=if vertical_audio {meter_height}else{(ui.available_width()-150.).max(40.)};
                     let slider=egui::Slider::new(&mut gain,-60.0..=6.0).show_value(false).handle_shape(egui::style::HandleShape::Rect{aspect_ratio:0.35});
                     let response=if vertical_audio {ui.horizontal(|ui| {crate::material::meter_sized(ui,levels,true,meter_height);ui.add(slider.vertical())}).inner}else{ui.add(slider)};
                     if response.changed() {channel.gain_db=if gain<=-60. {-100.}else{gain};changed=true;}
-                    if ui.selectable_label(channel.muted,if channel.muted {"Unmute"}else{"Mute"}).clicked() {channel.muted = !channel.muted;changed=true;}
-                    ui.menu_button("Settings",|ui| {
+                    if ui.selectable_label(channel.muted,if channel.muted {"🔇"}else{"🔊"}).on_hover_text(if channel.muted {"Muted · click to unmute"}else{"Click to mute"}).clicked() {channel.muted = !channel.muted;changed=true;}
+                    ui.menu_button("⚙",|ui| {
                     if automatic && channel.id == crate::game_audio::CHANNEL {
                         ui.label("Following captured game");
                         ui.small(
@@ -3971,7 +4061,7 @@ impl Studio {
                 });
         }
         // Strip positions map to project channels; the Alerts strip stands for its first sound.
-        let actual = |id: Id| if id == ALERTS_STRIP { alert_members.first().copied().unwrap_or(id) } else { id };
+        let actual = |id: Id| if id == ALERTS_STRIP { alert_members.first().or(effect_members.first()).copied().unwrap_or(id) } else { id };
         if let Some((id, index)) = reorder
             && let Some(from) = self.project.audio.iter().position(|c| c.id == actual(id))
         {
@@ -3990,6 +4080,9 @@ impl Studio {
             for channel in scene_channels {
                 if channel.id == ALERTS_STRIP {
                     self.project.preferences.alert_bus = auroracast_core::AlertBus { gain_db: channel.gain_db, muted: channel.muted };
+                    for id in &effect_members {
+                        self.project.preferences.scene_audio.entry(scene_id).or_default().insert(*id, auroracast_core::SceneVolume { gain_db: channel.gain_db, muted: channel.muted });
+                    }
                     // Only settings changed on the strip are copied to every alert sound.
                     let Some(before) = &alerts_before else { continue };
                     for base in self.project.audio.iter_mut().filter(|c| alert_members.contains(&c.id)) {
@@ -4476,6 +4569,18 @@ impl eframe::App for Studio {
         self.appearance.frame(ctx, &self.project.preferences.workspace.appearance);
         if self.ui_frames == 1 && !self.advanced() {
             self.sync_vertical_panel();
+        }
+        // Remember chosen inputs (the mixer edits them directly) without adding undo steps.
+        let inputs: std::collections::BTreeMap<Id, String> = self
+            .audio
+            .selected
+            .iter()
+            .filter(|(id, input)| !input.is_empty() && self.audio.enabled.get(id) == Some(&true))
+            .map(|(id, input)| (*id, input.clone()))
+            .collect();
+        if inputs != self.project.preferences.audio_inputs {
+            self.project.preferences.audio_inputs = inputs;
+            self.dirty = true;
         }
         self.browser_chat.runtime_wanted = self.project.sources.iter().any(|s| matches!(s.kind, SourceKind::Browser { .. }));
         if let Some(rx) = &self.recovering

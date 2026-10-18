@@ -1,0 +1,4 @@
+Copyright The Noto Project Authors (https://github.com/notofonts/math, https://github.com/notofonts/symbols)
+
+Noto Sans Math and Noto Sans Symbols 2 are licensed under the SIL Open Font License, Version 1.1,
+the same license as Roboto. The full text is in OFL.txt in this folder.

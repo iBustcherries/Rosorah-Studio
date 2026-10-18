@@ -828,6 +828,9 @@ pub struct Preferences {
     pub multitrack_recording: bool,
     #[serde(default)]
     pub monitor_device: String,
+    /// The input device chosen for each mixer channel, so it's still chosen next time.
+    #[serde(default)]
+    pub audio_inputs: std::collections::BTreeMap<Id, String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1004,6 +1007,7 @@ impl Default for Project {
                 recording_directory: String::new(),
                 multitrack_recording: false,
                 monitor_device: String::new(),
+                audio_inputs: Default::default(),
                 recording_encoder: RecordingEncoder::Auto,
                 auto_game_audio: true,
             },

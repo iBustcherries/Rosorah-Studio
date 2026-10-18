@@ -9,26 +9,35 @@ impl Studio {
   let Some(s)=self.project.scene(scene)else{return};let group=s.layers[index].group;let members:Vec<_>=s.layers.iter().enumerate().filter(|(i,l)|*i==index||(group!=0&&l.group==group)).map(|(i,_)|i).collect();let selected=self.selections.entry(scene).or_default();
   if !add{*selected=members;}else{for i in members{if selected.contains(&i){selected.retain(|n|*n!=i);}else{selected.push(i);}}}self.layer=selected.last().copied();
  }
+ /// The small toolbar under a preview: Arrange when several things are selected, and one ⋯ menu for the rest.
  fn canvas_layout_tools(&mut self,ui:&mut egui::Ui){
   let canvas=self.project.canvases[self.canvas].clone();let Some(si)=self.project.scenes.iter().position(|s|s.id==canvas.scene)else{return};
   let mut selected=self.selections.get(&canvas.scene).cloned().unwrap_or_default();selected.retain(|i|*i<self.project.scenes[si].layers.len());
   let mut locked=self.project.preferences.locked_canvases.contains(&canvas.id);
-  let narrow=ui.available_width()<320.;
+  let destinations:Vec<_>=self.project.canvases.iter().enumerate().filter(|(_,c)|c.id!=canvas.id).map(|(i,c)|(i,c.name.clone())).collect();
   ui.horizontal_wrapped(|ui|{
-   if ui.checkbox(&mut locked,if narrow{"Lock"}else{"Lock canvas"}).changed(){self.project.preferences.locked_canvases.retain(|id|*id!=canvas.id);if locked{self.project.preferences.locked_canvases.push(canvas.id);}self.changed();}
-   if !narrow {ui.label(format!("{} selected",selected.len()));}
-   ui.add_enabled_ui(!locked&&!selected.is_empty(),|ui|{ui.menu_button("Arrange",|ui|{
-    let editable:Vec<_>=selected.iter().copied().filter(|&i|!self.project.scenes[si].layers[i].locked).collect();
-    if ui.add_enabled(editable.len()>1,egui::Button::new("Group")).clicked(){let group=self.project.scenes[si].layers.iter().map(|l|l.group).max().unwrap_or(0)+1;for &i in &editable{self.project.scenes[si].layers[i].group=group;}self.changed();ui.close();}
+   ui.menu_button("⋯",|ui|{
+    if ui.checkbox(&mut locked,"Lock this video (nothing can be moved)").changed(){self.project.preferences.locked_canvases.retain(|id|*id!=canvas.id);if locked{self.project.preferences.locked_canvases.push(canvas.id);}self.changed();}
+    let before=self.project.preferences.snapping;
+    let settings=&mut self.project.preferences.snapping;
+    ui.checkbox(&mut settings.enabled,"Snap to edges and other items");
+    if settings.enabled{ui.indent("snap",|ui|{ui.checkbox(&mut settings.canvas_edges,"Video edges");ui.checkbox(&mut settings.canvas_center,"Video center");ui.checkbox(&mut settings.sources,"Other items");ui.add(egui::DragValue::new(&mut settings.distance).range(2.0..=24.0).suffix(" px snap distance"));});}
+    if self.project.preferences.snapping!=before{self.changed();}
+    if !selected.is_empty()&&!locked{for(index,name)in destinations.clone(){ui.menu_button(format!("Copy selection to {name}"),|ui|{if ui.button("Share source settings").clicked(){self.copy_layers_to(si,&selected,index,false);ui.close();}if ui.button("Make independent copies").clicked(){self.copy_layers_to(si,&selected,index,true);ui.close();}});}}
+    if self.advanced(){ui.checkbox(&mut self.animate,"Animate test input");}
+    ui.separator();
+    note(ui,"Drag things on the video to move them; drag a corner to resize. Shift-click to select more, or drag across empty space. Hold Ctrl to skip snapping.");
+   }).response.on_hover_text("Lock, snapping and selection options");
+   if locked{note(ui,"🔒 Locked");}
+   let editable:Vec<_>=selected.iter().copied().filter(|&i|!self.project.scenes[si].layers[i].locked).collect();
+   if editable.len()>1&&!locked{ui.menu_button(format!("Arrange {} items",editable.len()),|ui|{
+    if ui.button("Group").clicked(){let group=self.project.scenes[si].layers.iter().map(|l|l.group).max().unwrap_or(0)+1;for &i in &editable{self.project.scenes[si].layers[i].group=group;}self.changed();ui.close();}
     if ui.button("Ungroup").clicked(){for &i in &editable{self.project.scenes[si].layers[i].group=0;}self.changed();ui.close();}
     ui.separator();
     for(name,axis,factor)in[("Align left",0,0.),("Align horizontal centers",0,0.5),("Align right",0,1.),("Align top",1,0.),("Align vertical centers",1,0.5),("Align bottom",1,1.)]{if ui.button(name).clicked(){if let Some(b)=auroracast_core::layout::bounds(&self.project.scenes[si],&editable){for &i in &editable{let l=&mut self.project.scenes[si].layers[i];l.rect[axis]=b[axis]+b[axis+2]*factor-l.rect[axis+2]*factor;}self.changed();}ui.close();}}
     for(name,axis)in[("Equal horizontal gaps",0),("Equal vertical gaps",1)]{if ui.add_enabled(editable.len()>=3,egui::Button::new(name)).clicked(){auroracast_core::layout::distribute(&mut self.project.scenes[si],&editable,axis);self.changed();ui.close();}}
-    ui.separator();let destinations:Vec<_>=self.project.canvases.iter().enumerate().filter(|(_,c)|c.id!=canvas.id).map(|(i,c)|(i,c.name.clone())).collect();
-    for(index,name)in destinations{ui.menu_button(format!("Copy to {name}"),|ui|{if ui.button("Share source settings").clicked(){self.copy_layers_to(si,&selected,index,false);ui.close();}if ui.button("Make independent copies").clicked(){self.copy_layers_to(si,&selected,index,true);ui.close();}});}
-   });});
+   });}
   });
-  if !narrow{ui.small("Shift-click to select more · drag empty space to box-select · Ctrl temporarily disables snapping");}
  }
  fn copy_layers_to(&mut self,scene:usize,indices:&[usize],canvas:usize,independent:bool){
   let destination=self.project.canvases[canvas].scene;let originals:Vec<_>=indices.iter().filter_map(|&i|self.project.scenes[scene].layers.get(i).cloned()).collect();let mut copies=Vec::new();let mut cloned=std::collections::BTreeMap::new();let mut groups=std::collections::BTreeMap::new();let mut next_group=self.project.scene(destination).unwrap().layers.iter().map(|l|l.group).max().unwrap_or(0)+1;
@@ -41,9 +50,9 @@ cloned.insert(old,id);id};layer.source=id;}
  fn layer_rename_window(&mut self,ctx:&egui::Context){
   let Some((id,mut name))=self.layer_rename.clone()else{return};
   if self.project.source(id).is_none(){self.layer_rename=None;return;}
-  let mut open=true;let mut save=false;let mut cancel=false;
-  egui::Window::new("Rename layer").id(egui::Id::new("rename_layer_dialog")).open(&mut open).anchor(egui::Align2::CENTER_CENTER,egui::Vec2::ZERO).resizable(false).default_width(340.).show(ctx,|ui|{
-   ui.label("Name");let field=ui.add(egui::TextEdit::singleline(&mut name).char_limit(100).desired_width(320.));
+  let open=true;let mut save=false;let mut cancel=false;
+  egui::Modal::new(egui::Id::new("rename_layer_dialog")).frame(solid_window(ctx)).show(ctx,|ui|{
+   ui.set_width(340.);ui.heading("Rename layer");ui.label("Name");let field=ui.add(egui::TextEdit::singleline(&mut name).char_limit(100).desired_width(320.));
    if !ctx.memory(|m|m.has_focus(field.id))&&!ctx.memory(|m|m.focused().is_some()){field.request_focus();}
    ui.label("Updates this source's name in every scene. Placement stays the same.");
    let valid=!name.trim().is_empty();
