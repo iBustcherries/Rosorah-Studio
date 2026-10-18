@@ -18,6 +18,8 @@ pub struct WorkspaceSettings {
     pub advanced: bool,
     /// Shows the second (vertical) video in the studio.
     pub vertical_video: bool,
+    /// Studio Mode: scenes are prepared in a preview, then sent live with Transition.
+    pub studio_mode: bool,
     /// Web pages added as panels from the Panels menu.
     pub browser_docks: Vec<BrowserDock>,
     /// Looks for a newer Rosorah when the studio opens.
@@ -112,6 +114,7 @@ impl Default for WorkspaceSettings {
             appearance: Appearance::default(),
             advanced: false,
             vertical_video: true,
+            studio_mode: false,
             browser_docks: Vec::new(),
             check_updates: true,
             skipped_update: String::new(),

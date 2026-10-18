@@ -13,6 +13,15 @@ struct ActiveTransition {
 impl Studio {
     /// Switches scene, using the stinger or transition screen when one is set up.
     fn request_scene(&mut self, canvas: Id, scene: Id) {
+        // In Studio Mode, picking a scene for the main video prepares it in the preview instead.
+        if self.project.preferences.workspace.studio_mode
+            && !self.studio_taking
+            && self.project.canvases.first().is_some_and(|c| c.id == canvas)
+        {
+            self.studio_preview = Some(scene);
+            self.revision = true;
+            return;
+        }
         let media = &self.project.preferences.transition_media;
         let source = match self.project.preferences.transition {
             auroracast_core::Transition::Stinger => media.stinger,

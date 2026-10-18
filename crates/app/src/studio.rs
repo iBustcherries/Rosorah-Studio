@@ -142,6 +142,8 @@ fn solid_window(ctx: &egui::Context) -> egui::Frame {
     let [r, g, b, _] = panel().to_srgba_unmultiplied();
     egui::Frame::window(&ctx.style()).fill(Color32::from_rgb(r, g, b))
 }
+/// Tells Studio Mode's preview drawing apart from the live canvas.
+const STUDIO_PREVIEW: Id = 0x5747_0000_0000_0000;
 /// What a file chooser's pick becomes.
 #[derive(Clone, Copy, PartialEq)]
 enum MediaPick {
@@ -433,6 +435,11 @@ pub struct Studio {
     sound_settings: Option<Id>,
     /// The layer whose menu was opened by right-clicking it on the canvas.
     canvas_menu: Option<(Id, usize)>,
+    /// Studio Mode: the scene being prepared, and the Program view's picture.
+    studio_preview: Option<Id>,
+    studio_taking: bool,
+    program_texture: Option<egui::TextureId>,
+    program_drawn: Instant,
     /// Layers copied for pasting into any scene.
     layer_clipboard: Vec<CopiedLayer>,
     /// A folder chooser re-pointing a slideshow.
@@ -831,6 +838,10 @@ impl Studio {
             sound_settings,
             sound_rename: None,
             canvas_menu: None,
+            studio_preview: None,
+            studio_taking: false,
+            program_texture: None,
+            program_drawn: Instant::now(),
             layer_clipboard: Vec::new(),
             look_picker: None,
             slideshow_folder: None,
@@ -1739,8 +1750,12 @@ impl Studio {
                 return response;
             }
             ui.horizontal(|ui| {
+                // In Studio Mode the scene being prepared is marked too.
+                let preparing = self.project.preferences.workspace.studio_mode && self.studio_preview == Some(id) && active != id;
                 let text = if on_air {
                     RichText::new(format!("● LIVE  {name}")).color(Color32::from_rgb(255, 92, 92)).strong()
+                } else if preparing {
+                    RichText::new(format!("◐ {name}")).strong()
                 } else {
                     RichText::new(name)
                 };
@@ -1773,6 +1788,16 @@ impl Studio {
                 let name=(1..).map(|n|if n==1{"New Scene".to_owned()}else{format!("New Scene {n}")}).find(|n|!self.project.scenes.iter().any(|s|&s.name==n)).unwrap();
                 self.naming_scene=Some((id,String::new(),false));
                 self.project.scenes.push(Scene{id,name,layers:vec![]});self.project.preferences.workspace.scenes.entry(canvas).or_default().push(id);self.project.switch_scene(canvas,id);self.layer=None;self.changed();}
+            if self.canvas == 0 {
+                let mut studio = self.project.preferences.workspace.studio_mode;
+                if ui.toggle_value(&mut studio, "Studio Mode").on_hover_text("Prepare scenes in a preview, then send them live with Transition").changed() {
+                    self.project.preferences.workspace.studio_mode = studio;
+                    // The preview starts on what's live.
+                    self.studio_preview = studio.then(|| self.project.canvases[0].scene);
+                    self.revision = true;
+                    self.dirty = true;
+                }
+            }
             ui.menu_button("⚙", |ui| {
                 ui.menu_button(format!("Transition · {}", self.project.preferences.transition.label()), |ui| self.transition_menu(ui));
                 if vertical_in_use {
@@ -2089,6 +2114,53 @@ impl Studio {
         }
         self.layer = self.layer.and_then(renumber);
         self.changed();
+    }
+    /// Whether Studio Mode applies to `canvas` (the main, landscape video).
+    fn studio_mode_for(&self, canvas: &auroracast_core::Canvas) -> bool {
+        self.project.preferences.workspace.studio_mode && self.project.canvases.first().is_some_and(|c| c.id == canvas.id) && canvas.width >= canvas.height
+    }
+    /// Sends the prepared scene live with the usual transition.
+    fn studio_transition(&mut self) {
+        let Some(canvas) = self.project.canvases.first().map(|c| c.id) else { return };
+        if let Some(scene) = self.studio_preview.filter(|s| self.project.scene(*s).is_some()) {
+            self.studio_taking = true;
+            self.request_scene(canvas, scene);
+            self.studio_taking = false;
+        }
+    }
+    /// Studio Mode's Program view: what viewers see, drawn up to 15 times a second.
+    fn program_view(&mut self, ui: &mut egui::Ui) {
+        let Some(canvas) = self.project.canvases.first().cloned() else { return };
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("● PROGRAM").small().strong().color(Color32::from_rgb(255, 92, 92)));
+            let ready = self.studio_preview.is_some_and(|s| s != canvas.scene);
+            if ui.add_enabled(ready, self.primary_button("Transition ▶")).on_hover_text("Send the preview live").on_disabled_hover_text("Pick another scene to prepare it first").clicked() {
+                self.studio_transition();
+            }
+        });
+        let width = ui.available_width().max(1.);
+        let height = (ui.available_height() - 8.).max(1.);
+        let scale = (width / canvas.width as f32).min(height / canvas.height as f32);
+        let size = Vec2::new(canvas.width as f32 * scale, canvas.height as f32 * scale);
+        let dims = [(size.x as u32).clamp(16, 4096), (size.y as u32).clamp(16, 4096)];
+        if self.program_drawn.elapsed() >= Duration::from_millis(66)
+            && let (Some(gpu), Some(state)) = (&mut self.gpu, &self.render_state)
+            && let Ok(view) = gpu.render_gpu(&self.project, &canvas, dims[0], dims[1])
+        {
+            self.program_drawn = Instant::now();
+            let mut renderer = state.renderer.write();
+            match self.program_texture {
+                Some(id) => renderer.update_egui_texture_from_wgpu_texture(&state.device, &view, eframe::wgpu::FilterMode::Linear, id),
+                None => self.program_texture = Some(renderer.register_native_texture(&state.device, &view, eframe::wgpu::FilterMode::Linear)),
+            }
+        }
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(width, height), egui::Sense::hover());
+        let target = egui::Rect::from_center_size(rect.center(), size);
+        if let Some(texture) = self.program_texture {
+            ui.painter().image(texture, target, egui::Rect::from_min_max(egui::pos2(0., 0.), egui::pos2(1., 1.)), Color32::WHITE);
+            ui.painter().rect_stroke(target, 2., egui::Stroke::new(2., Color32::from_rgb(255, 92, 92)), egui::StrokeKind::Outside);
+        }
+        ui.ctx().request_repaint_after(Duration::from_millis(66));
     }
     fn panel_title(&self, panel: Panel) -> String {
         match panel {
@@ -4248,7 +4320,17 @@ impl Studio {
             self.revision = self.vertical_revision;
         }
         let ctx = ui.ctx().clone();
-        self.preview(ui, &ctx);
+        let studio = !vertical && self.studio_mode_for(&self.project.canvases[index].clone());
+        if studio {
+            // Preview on the left (click scenes and edit here), Program on the right (what viewers see).
+            ui.columns(2, |columns| {
+                columns[0].label(RichText::new("◐ PREVIEW").small().strong().color(self.accent()));
+                self.preview(&mut columns[0], &ctx);
+                self.program_view(&mut columns[1]);
+            });
+        } else {
+            self.preview(ui, &ctx);
+        }
         let selected =
             ui.rect_contains_pointer(ui.max_rect()) && ui.input(|i| i.pointer.any_pressed());
         if vertical {
@@ -4266,7 +4348,14 @@ impl Studio {
         }
     }
     fn preview(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context) {
-        let canvas = self.project.canvases[self.canvas].clone();
+        let mut canvas = self.project.canvases[self.canvas].clone();
+        let live_id = canvas.id;
+        // Studio Mode: this view shows and edits the scene being prepared, drawn separately from
+        // what's live so preparing never starts a transition.
+        if self.studio_mode_for(&canvas) {
+            canvas.scene = self.studio_preview.filter(|s| self.project.scene(*s).is_some()).unwrap_or(canvas.scene);
+            canvas.id = live_id ^ STUDIO_PREVIEW;
+        }
         let width = ui.available_width().max(1.);
         let max_height = (ui.available_height() - if self.advanced() { 70. } else { 44. }).max(1.);
         let scale = (width / canvas.width as f32).min(max_height / canvas.height as f32);
@@ -4381,7 +4470,7 @@ impl Studio {
                         self.keep_aspect,
                         self.project.preferences.snapping,
                         self.crop_layer.is_some_and(|(scene,_)|scene==canvas.scene),
-                        self.project.preferences.locked_canvases.contains(&canvas.id),
+                        self.project.preferences.locked_canvases.contains(&live_id),
                     )
                 })
                 .inner;
@@ -5581,7 +5670,10 @@ if changed{self.changed();}
                     self.log(format!("Preview alert: {template}"));
                 }
                 Action::SwitchScene { canvas, scene } => {
+                    // Automations go live directly, Studio Mode or not.
+                    self.studio_taking = true;
                     self.request_scene(*canvas, *scene);
+                    self.studio_taking = false;
                     self.log("Scene switched".into());
                 }
             }
