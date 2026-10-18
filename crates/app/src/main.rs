@@ -64,6 +64,7 @@ mod updates;
 mod studio;
 mod video;
 mod widgets;
+mod window_memory;
 #[path = "dock_workspace.rs"]
 mod workspace;
 
@@ -137,13 +138,16 @@ fn main() -> Result<()> {
     let (project, notice) = profiles::open(&project_path)?;
     let screenshot = option(&args, "--screenshot").map(PathBuf::from);
     let page = option(&args, "--page").unwrap_or("studio".into());
+    let viewport = eframe::egui::ViewportBuilder::default()
+        .with_title("Rosorah Studio")
+        .with_inner_size([1440., 900.])
+        .with_min_inner_size([1100., 700.])
+        .with_app_id("io.rosorah.Studio")
+        .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icons/app-256.png")).unwrap_or_default());
+    // Open the way it was left (screenshots always use the standard window).
+    let viewport = if screenshot.is_none() { window_memory::apply(viewport, &window_memory::load()) } else { viewport };
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("Rosorah Studio")
-            .with_inner_size([1440., 900.])
-            .with_min_inner_size([1100., 700.])
-            .with_app_id("io.rosorah.Studio")
-            .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icons/app-256.png")).unwrap_or_default()),
+        viewport,
         renderer: eframe::Renderer::Wgpu,
         wgpu_options: eframe::egui_wgpu::WgpuConfiguration {
             desired_maximum_frame_latency: Some(1),

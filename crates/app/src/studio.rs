@@ -539,6 +539,9 @@ pub struct Studio {
     screenshot_requested: bool,
     /// When the studio opened; screenshots wait a moment so pages and fades can settle.
     started: Instant,
+    /// Where the window is and how big, saved shortly after it changes and on exit.
+    window_placement: crate::window_memory::Placement,
+    window_changed: Option<Instant>,
     loading: Option<Loading>,
     ui_frames: u32,
 }
@@ -902,6 +905,8 @@ impl Studio {
             screenshot,
             screenshot_requested: false,
             started: Instant::now(),
+            window_placement: crate::window_memory::load(),
+            window_changed: None,
             ui_frames: 0,
         }
     }
@@ -4262,6 +4267,16 @@ impl Studio {
         self.panels_animating = false;
         self.scene_dialog_ui(ctx);
         self.web_dock_dialog_ui(ctx);
+        if self.screenshot.is_none() {
+            if crate::window_memory::track(ctx, &mut self.window_placement) {
+                self.window_changed = Some(Instant::now());
+            }
+            // Saved once things settle, not on every step of a drag or resize.
+            if self.window_changed.is_some_and(|at| at.elapsed() > Duration::from_secs(1)) {
+                self.window_changed = None;
+                crate::window_memory::save(&self.window_placement);
+            }
+        }
         self.sound_rename_ui(ctx);
         self.update_window_ui(ctx);
         if !self.update_checked && self.screenshot.is_some() && self.update_window {
@@ -6009,6 +6024,9 @@ impl eframe::App for Studio {
     }
     fn on_exit(&mut self) {
         self.checkpoint_widgets();
+        if self.screenshot.is_none() {
+            crate::window_memory::save(&self.window_placement);
+        }
         // Normal window close waits in the UI; this also finalizes on other exits.
         if let Some(stream) = &self.live_stream {
             stream.stop();
