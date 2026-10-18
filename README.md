@@ -140,3 +140,9 @@ Rust 1.90+, GStreamer/base plugin and GLib/GIO development packages, pkg-config 
 ## 0.31 preview: guided alerts, rewards and imports
 
 See [release notes](docs/release-0.31.md) for the new guided alert setup, Twitch rewards editor, OBS/Firebot import preview, and the exact limits of the initial Windows groundwork. The runnable package remains Linux x86_64.
+
+## License
+
+Rosorah Studio's original project code is licensed under the [GNU General Public License, version 3 only](LICENSE) (`GPL-3.0-only`), except where a file or component carries a different license notice. You may use, modify, and redistribute the covered code under that license. Distributed binaries must be accompanied by corresponding source as required by GPLv3.
+
+Third-party dependencies, vendored code, fonts, and media retain their respective licenses and notices. This license does not grant rights to third-party content you capture or stream, and does not require your recordings or broadcasts to be GPL-licensed merely because you created them with Rosorah.
