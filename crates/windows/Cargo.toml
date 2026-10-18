@@ -1,4 +1,5 @@
 [package]
+license.workspace = true
 name = "rosorah-windows"
 version.workspace = true
 edition.workspace = true
