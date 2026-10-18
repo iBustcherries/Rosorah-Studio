@@ -233,6 +233,8 @@ enum Settings {
     /// Accounts has two tabs: streaming platforms (Accounts) and Donations.
     Accounts,
     Donations,
+    /// "I'm live" posts to Discord and Bluesky; the third Accounts tab.
+    Announcements,
     Video,
     Audio,
     /// The advanced-options switch, backups, profiles and imports.
@@ -295,6 +297,11 @@ pub struct Studio {
     /// The sound whose settings window is open.
     sound_settings: Option<Id>,
     web_docks: crate::browser_dock::Docks,
+    announcer: crate::announce::Announcer,
+    /// Whether this stream has been announced yet.
+    announced: bool,
+    /// Announcements switched off in the Go live checklist, for this stream only ([Discord, Bluesky]).
+    announce_skip: [bool; 2],
     updates: crate::updates::Updates,
     update_window: bool,
     update_checked: bool,
@@ -640,12 +647,14 @@ impl Studio {
             project,
             project_path,
             page: match page.as_str() {
-                "settings" | "streaming" | "accounts" | "donations" => Page::Settings,
+                "settings" | "streaming" | "accounts" | "donations" | "announcements" => Page::Settings,
                 "automation-preview" | "alerts" | "alert-guide" | "alert-guide-media" | "alert-guide-finish" => Page::Alerts,
                 _ => Page::Studio,
             },
             settings: if page == "donations" {
                 Settings::Donations
+            } else if page == "announcements" {
+                Settings::Announcements
             } else if page == "accounts" || page == "streaming" {
                 Settings::Accounts
             } else {
@@ -668,6 +677,9 @@ impl Studio {
             scene_dialog,
             sound_settings,
             web_docks: Default::default(),
+            announcer: Default::default(),
+            announced: false,
+            announce_skip: [false; 2],
             updates: Default::default(),
             // `--page update` (with --screenshot) shows the update window, checking as an old version.
             update_window: page == "update",
@@ -1656,6 +1668,127 @@ impl Studio {
         });
         if close || modal.should_close() {
             self.update_window = false;
+        }
+    }
+    /// Title, category and where to watch, from the accounts and the destinations switched on.
+    fn announce_stream(&self) -> crate::announce::Stream {
+        let config = &self.stream_config;
+        let [twitch, youtube] = &self.accounts;
+        let kick = &self.kick_account;
+        let mut links = Vec::new();
+        if config.twitch.enabled && twitch.connected && !twitch.name.is_empty() {
+            links.push(("Twitch".to_owned(), format!("https://twitch.tv/{}", twitch.name.to_lowercase())));
+        }
+        if (config.youtube.enabled || config.youtube_vertical.enabled) && youtube.connected {
+            // The broadcast itself when there is one; otherwise the channel's live page.
+            if !youtube.broadcast.is_empty() {
+                links.push(("YouTube".to_owned(), format!("https://youtu.be/{}", youtube.broadcast)));
+            } else if !youtube.user_id.is_empty() {
+                links.push(("YouTube".to_owned(), format!("https://www.youtube.com/channel/{}/live", youtube.user_id)));
+            }
+        }
+        for service in config.services.iter().filter(|s| s.destination.enabled) {
+            match service.provider {
+                crate::streaming::Provider::Kick if kick.connected && !kick.name.is_empty() => {
+                    links.push(("Kick".to_owned(), format!("https://kick.com/{}", kick.name.to_lowercase())));
+                }
+                crate::streaming::Provider::TikTok if !config.tiktok_username.trim().is_empty() => {
+                    links.push(("TikTok".to_owned(), format!("https://www.tiktok.com/@{}/live", config.tiktok_username.trim().trim_start_matches('@'))));
+                }
+                _ => {}
+            }
+        }
+        links.dedup_by(|a, b| a.0 == b.0);
+        let live = [twitch, youtube, kick].into_iter().filter(|a| a.connected);
+        let title = live.clone().map(|a| a.title.trim()).find(|t| !t.is_empty()).unwrap_or_default().to_owned();
+        let category = live
+            .filter_map(|a| a.categories.iter().find(|c| c.id == a.category).map(|c| c.name.clone()))
+            .find(|n| !n.is_empty())
+            .unwrap_or_default();
+        crate::announce::Stream { title, category, links }
+    }
+    /// Settings > Accounts > Announcements.
+    fn announce_settings(&mut self, ui: &mut egui::Ui) {
+        let before = self.stream_config.announce.clone();
+        let preview_stream = {
+            let mut s = self.announce_stream();
+            if s.title.is_empty() {
+                s.title = "Your stream title".into();
+            }
+            if s.links.is_empty() {
+                s.links.push(("Twitch".into(), "https://twitch.tv/yourname".into()));
+            }
+            s
+        };
+        let mut test = None;
+        ui.heading("Go-live announcements");
+        note(ui, "When your stream starts, Rosorah posts this once to the places switched on below. You can skip any of them for one stream in the Go live checklist.");
+        ui.add_space(14.);
+        let a = &mut self.stream_config.announce;
+        card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.strong("Message");
+            ui.add(egui::TextEdit::multiline(&mut a.message).desired_rows(3).desired_width(f32::INFINITY));
+            note(ui, "{title} your stream title · {category} the game or category · {links} where to watch (one per line) · {twitch} {youtube} {kick} {tiktok} a single link");
+            ui.horizontal_wrapped(|ui| {
+                if ui.small_button("Use the default message").clicked() {
+                    a.message = crate::announce::DEFAULT_MESSAGE.into();
+                }
+            });
+            ui.add_space(6.);
+            ui.label(RichText::new("Preview").small().strong());
+            let text = crate::announce::fill(&a.message, &preview_stream);
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(&text);
+            });
+            let count = text.chars().count();
+            if count > crate::announce::BLUESKY_LIMIT {
+                ui.colored_label(ui.visuals().warn_fg_color, format!("{count} characters: Bluesky allows {}, so shorten it if you announce there.", crate::announce::BLUESKY_LIMIT));
+            }
+        });
+        ui.add_space(12.);
+        card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("Discord").heading().color(Color32::from_rgb(114, 137, 218)));
+            ui.checkbox(&mut a.discord, "Announce on Discord");
+            ui.label("Webhook address");
+            ui.add(egui::TextEdit::singleline(&mut a.discord_webhook).password(true).hint_text("https://discord.com/api/webhooks/…").desired_width(f32::INFINITY));
+            note(ui, "In Discord: Server Settings → Integrations → Webhooks → New Webhook, choose the channel, then Copy Webhook URL. Add @everyone to the message to ping the server.");
+            if !a.discord_webhook.trim().is_empty() && !crate::announce::valid_webhook(&a.discord_webhook) {
+                ui.colored_label(ui.visuals().warn_fg_color, "That doesn't look like a Discord webhook address.");
+            }
+            if ui.add_enabled(crate::announce::valid_webhook(&a.discord_webhook), egui::Button::new("Send test")).on_hover_text("Posts the message to Discord now").clicked() {
+                test = Some([true, false]);
+            }
+        });
+        ui.add_space(12.);
+        card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("Bluesky").heading().color(Color32::from_rgb(32, 139, 254)));
+            ui.checkbox(&mut a.bluesky, "Announce on Bluesky");
+            ui.label("Handle");
+            ui.add(egui::TextEdit::singleline(&mut a.bluesky_handle).hint_text("yourname.bsky.social").desired_width(f32::INFINITY));
+            ui.label("App password");
+            ui.add(egui::TextEdit::singleline(&mut a.bluesky_password).password(true).hint_text("xxxx-xxxx-xxxx-xxxx").desired_width(f32::INFINITY));
+            ui.horizontal_wrapped(|ui| {
+                note(ui, "Use an app password, not your main password: Bluesky → Settings → Privacy and security → App passwords.");
+                if ui.small_button("Open").clicked() {
+                    let _ = crate::desktop::open("https://bsky.app/settings/app-passwords");
+                }
+            });
+            let ready = !a.bluesky_handle.trim().is_empty() && !a.bluesky_password.trim().is_empty();
+            if ui.add_enabled(ready, egui::Button::new("Send test")).on_hover_text("Posts the message to Bluesky now").clicked() {
+                test = Some([false, true]);
+            }
+        });
+        note(ui, "The webhook address and app password are kept in your system's keyring with your stream keys.");
+        if let Some(which) = test {
+            self.announcer.send(&self.stream_config.announce, preview_stream, which, ui.ctx());
+            self.tell("Sending a test announcement…".into());
+        }
+        if before != self.stream_config.announce {
+            self.save_stream_settings();
         }
     }
     fn panel_title(&self, panel: Panel) -> String {
@@ -2669,6 +2802,22 @@ impl Studio {
         }
     }
     fn streaming_tick(&mut self, ctx: &egui::Context) {
+        for result in self.announcer.drain() {
+            self.tell(result);
+        }
+        let Some(stream) = &self.live_stream else {
+            self.announced = false;
+            self.announce_skip = [false; 2];
+            return;
+        };
+        if !self.announced && stream.destinations().iter().any(|d| d.path.is_none() && d.phase == crate::streaming::Phase::Sending) {
+            self.announced = true;
+            let a = &self.stream_config.announce;
+            let which = [a.discord_ready() && !self.announce_skip[0], a.bluesky_ready() && !self.announce_skip[1]];
+            if which.iter().any(|w| *w) {
+                self.announcer.send(a, self.announce_stream(), which, ctx);
+            }
+        }
         let Some(stream) = &self.live_stream else {
             return;
         };
@@ -4440,7 +4589,7 @@ impl Studio {
                     (Settings::Appearance, "Look & feel"),
                     (Settings::Advanced, "Advanced"),
                 ] {
-                    let selected = self.settings == p || (p == Settings::Accounts && self.settings == Settings::Donations);
+                    let selected = self.settings == p || (p == Settings::Accounts && matches!(self.settings, Settings::Donations | Settings::Announcements));
                     if ui.add_sized([ui.available_width(), 40.], egui::Button::new(label).selected(selected)).clicked() {
                         self.settings = p;
                     }
@@ -4449,10 +4598,11 @@ impl Studio {
         let live = self.live_stream.is_some() || self.live_recording.is_some();
         egui::CentralPanel::default().show(ctx,|ui|{crate::appearance::glass(ui,egui::CornerRadius::ZERO);egui::ScrollArea::vertical().show(ui,|ui|{
             ui.add_space(16.);let mut changed=false;
-            if matches!(self.settings, Settings::Accounts | Settings::Donations) {
+            if matches!(self.settings, Settings::Accounts | Settings::Donations | Settings::Announcements) {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.settings, Settings::Accounts, "Streaming platforms");
                     ui.selectable_value(&mut self.settings, Settings::Donations, "Donations");
+                    ui.selectable_value(&mut self.settings, Settings::Announcements, "Announcements");
                 });
                 ui.add_space(8.);
             }
@@ -4463,6 +4613,7 @@ impl Studio {
                 });changed|=self.look_settings(ui);},
                 Settings::Accounts=>{ self.connections_settings(ui); },
                 Settings::Advanced=>{ changed |= self.advanced_settings(ui); },
+                Settings::Announcements=>self.announce_settings(ui),
                 Settings::Donations=>{ let (edited, preview) = crate::donations::ui(ui, &mut self.project.preferences.donations, &mut self.donations, &mut self.kofi); changed |= edited; if edited {self.donation_save_due=Some(Instant::now());}
                 if let Some(text) = preview { self.active_alert=Some((text,Instant::now()+Duration::from_secs(8))); self.page=Page::Studio; } },
                 Settings::Video=>{

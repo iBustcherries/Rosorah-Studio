@@ -1,5 +1,5 @@
 # Run after build.ps1 in x64 Developer PowerShell. Requires NSIS 3 on PATH.
-param([string]$Bundle = 'dist/windows-development', [string]$Output = 'dist/Rosorah-Studio-0.32.0-preview.12-Setup.exe')
+param([string]$Bundle = 'dist/windows-development', [string]$Output = 'dist/Rosorah-Studio-0.32.0-preview.13-Setup.exe')
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 Push-Location $root

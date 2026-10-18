@@ -1,6 +1,6 @@
 # Rosorah Studio roadmap
 
-Updated for 0.32.0-preview.11 (October 2026). Rosorah Studio is original code built on
+Updated for 0.32.0-preview.13 (October 2026). Rosorah Studio is original code built on
 independent libraries (Rust, egui/wgpu, GStreamer, Qt WebEngine). It aims to be an easier
 all-in-one alternative to running OBS, a chat bot and an alert service side by side,
 not a feature-for-feature copy of OBS.
@@ -21,11 +21,12 @@ not a feature-for-feature copy of OBS.
 | Donations | Shipped | StreamElements, Streamlabs and Ko-fi (Settings → Accounts → Donations), donation goals |
 | Transitions | Shipped | Cut/fade, stinger videos and transition screens |
 | Projects | Shipped | Profiles, hourly and on-close backups, recording recovery, OBS and Firebot import |
+| Announcements | Shipped | "I'm live" posts to Discord (webhook) and Bluesky (app password), once per stream, with a message template and per-stream skip |
 | Distribution | Shipped | Windows installer, Fedora .rpm and Ubuntu/Debian .deb on GitHub Releases; in-app update check |
 
 ## Next
 
-1. **Go-live announcements**: post to Discord (webhook), Bluesky and, if its API terms allow, X when a stream starts.
+1. **X (Twitter) announcements**, if X's API terms allow posting from a free developer account.
 2. **Updates through the software apps** (on hold): a package repository so Discover and GNOME Software can update Rosorah, and later a Flatpak for Bazaar. The game-capture hooks don't fit Flatpak's sandbox, which still needs a plan.
 3. **Windows testing pass**: check capture, encoders and the installer on real Windows PCs.
 

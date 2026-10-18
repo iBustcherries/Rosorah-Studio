@@ -8,6 +8,7 @@ mod backups;
 mod profiles;
 mod alert_guide;
 mod alert_samples;
+mod announce;
 mod appearance;
 mod fonts;
 mod rewards_ui;

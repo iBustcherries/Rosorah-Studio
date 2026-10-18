@@ -143,6 +143,20 @@ impl Studio {
                     ui.separator();
                     self.error_line(ui, self.stream_error.clone());
                 }
+                let announce = &self.stream_config.announce;
+                let places = [(announce.discord_ready(), "Discord"), (announce.bluesky_ready(), "Bluesky")];
+                if places.iter().any(|(ready, _)| *ready) {
+                    ui.separator();
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Announce on");
+                        for (i, (ready, name)) in places.into_iter().enumerate() {
+                            let mut on = !self.announce_skip[i];
+                            if ready && ui.checkbox(&mut on, name).on_hover_text("Untick to skip it for this stream only").changed() {
+                                self.announce_skip[i] = !on;
+                            }
+                        }
+                    });
+                }
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui

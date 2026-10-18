@@ -78,6 +78,8 @@ pub struct Config {
     pub tiktok_username: String,
     /// Opt-in: type outgoing messages into TikTok's chat box.
     pub tiktok_send: bool,
+    /// "I'm live" posts to Discord and Bluesky; its two secrets live in the keyring.
+    pub announce: crate::announce::Settings,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -100,6 +102,7 @@ impl Default for Config {
             record: false,
             tiktok_username: String::new(),
             tiktok_send: false,
+            announce: Default::default(),
         }
     }
 }
@@ -196,6 +199,11 @@ impl Config {
                 keys.insert(format!("service-{}", s.id), s.destination.key.clone());
             }
         }
+        for (name, secret) in [("discord-webhook", &self.announce.discord_webhook), ("bluesky-password", &self.announce.bluesky_password)] {
+            if !secret.is_empty() {
+                keys.insert(name.to_string(), secret.clone());
+            }
+        }
         keys
     }
     fn fill_keys(&mut self, keys: &std::collections::BTreeMap<String, String>) {
@@ -209,6 +217,11 @@ impl Config {
                 s.destination.key = k.clone();
             }
         }
+        for (name, secret) in [("discord-webhook", &mut self.announce.discord_webhook), ("bluesky-password", &mut self.announce.bluesky_password)] {
+            if secret.is_empty() && let Some(k) = keys.get(name) {
+                *secret = k.clone();
+            }
+        }
     }
     fn without_keys(&self) -> Self {
         let mut c = self.clone();
@@ -218,6 +231,8 @@ impl Config {
         for s in &mut c.services {
             s.destination.key.clear();
         }
+        c.announce.discord_webhook.clear();
+        c.announce.bluesky_password.clear();
         c
     }
     /// Loads settings and their keys from the keyring. Keys found in the file (from older
