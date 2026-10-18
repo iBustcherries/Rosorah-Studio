@@ -89,6 +89,6 @@ echo "== Building the installer"
     find . -mindepth 1 -type d | sed 's|^\./||' | awk '{print length, $0}' | sort -rn | cut -d' ' -f2- | while read -r d; do printf 'RMDir "$INSTDIR\\%s"\n' "${d//\//\\}"; done
 ) > "$here/uninstall-files.nsh"
 mkdir -p dist
-setup="$root/dist/Rosorah-Studio-0.32.0-preview.13-Setup.exe"
+setup="$root/dist/Rosorah-Studio-0.32.0-preview.14-Setup.exe"
 makensis -WX -V2 "-DPAYLOAD=$bundle" "-DOUTPUT=$setup" "$here/installer.nsi"
 sha256sum "$setup"

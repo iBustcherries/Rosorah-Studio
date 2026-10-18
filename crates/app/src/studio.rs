@@ -173,8 +173,10 @@ fn sortable_rows(
                     Some((from, to)) if from > to && p >= to && p < from => p + 1,
                     _ => p,
                 };
+                // Only the place in the list animates; the panel's own position is added afterwards,
+                // so rows move exactly with the panel when it's resized or moved.
                 let duration = if animate && !snap { 0.12 } else { 0. };
-                ui.ctx().animate_value_with_time(key.with(("y", p)), start.y + slot as f32 * stride, duration)
+                start.y + ui.ctx().animate_value_with_time(key.with(("slot", p)), slot as f32, duration) * stride
             }
         };
         let rect = egui::Rect::from_min_size(egui::pos2(start.x, y), egui::vec2(width, stride - 3.));
@@ -5696,8 +5698,21 @@ impl egui_dock::TabViewer for StudioTabs<'_> {
         tab: &mut Panel,
         rect: egui::Rect,
     ) -> egui::Rect {
+        // Resizing the window by its edge is handled by the system, so no button looks held:
+        // panels follow the window instantly for a moment after its size changes.
+        let size = ctx.content_rect().size();
+        let now = ctx.input(|i| i.time);
+        let resized_at = ctx.data_mut(|d| {
+            let (last, at) = d.get_temp_mut_or_insert_with(egui::Id::new("window-size"), || (size, f64::NEG_INFINITY));
+            if *last != size {
+                *last = size;
+                *at = now;
+            }
+            *at
+        });
         let duration = if self.0.project.preferences.workspace.animations
             && !ctx.input(|i| i.pointer.any_down())
+            && now - resized_at > 0.4
         {
             0.16
         } else {
@@ -5902,3 +5917,34 @@ include!("first_run.rs");
 
 include!("utility_windows.rs");
 include!("loading.rs");
+
+#[cfg(test)]
+mod sortable_rows_tests {
+    use super::*;
+    /// Draws three rows below `gap` points of space, returning each row's top edge.
+    fn frame(ctx: &egui::Context, time: f64, gap: f32) -> Vec<f32> {
+        let mut tops = vec![0.; 3];
+        let input = egui::RawInput { time: Some(time), screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400., 600.))), ..Default::default() };
+        let _ = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.add_space(gap);
+                sortable_rows(ui, egui::Id::new("rows"), 3, 36., true, |ui, p| {
+                    tops[p] = ui.max_rect().top();
+                    ui.label("row")
+                });
+            });
+        });
+        tops
+    }
+    #[test]
+    fn rows_move_with_their_panel_without_lagging() {
+        let ctx = egui::Context::default();
+        let before = frame(&ctx, 0.0, 0.);
+        frame(&ctx, 0.5, 0.);
+        // The panel's top moves down 120 points (a divider or the window being resized).
+        let after = frame(&ctx, 0.51, 120.);
+        for (b, a) in before.iter().zip(&after) {
+            assert!((a - b - 120.).abs() < 0.01, "row lagged: {b} → {a}");
+        }
+    }
+}
