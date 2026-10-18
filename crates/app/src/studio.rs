@@ -375,6 +375,7 @@ enum Settings {
     Video,
     Audio,
     Hotkeys,
+    Remote,
     /// The advanced-options switch, backups, profiles and imports.
     Advanced,
 }
@@ -438,6 +439,13 @@ pub struct Studio {
     canvas_menu: Option<(Id, usize)>,
     /// Open projector windows.
     projectors: Vec<Projector>,
+    /// The remote-control server while it runs, what it was started with, and what controllers last heard.
+    remote: Option<crate::remote::Server>,
+    remote_settings: RemoteRunning,
+    remote_error: String,
+    remote_attempt: Instant,
+    remote_seen: RemoteState,
+    remote_chat_seen: u64,
     /// The virtual camera's output while it's on, and ones still finishing.
     virtual_camera: Option<crate::recording::Recording>,
     camera_stopping: Vec<crate::recording::Recording>,
@@ -859,6 +867,12 @@ impl Studio {
             sound_rename: None,
             canvas_menu: None,
             projectors: Vec::new(),
+            remote: None,
+            remote_settings: Default::default(),
+            remote_error: String::new(),
+            remote_attempt: Instant::now() - Duration::from_secs(60),
+            remote_seen: Default::default(),
+            remote_chat_seen: 0,
             virtual_camera: None,
             camera_stopping: Vec::new(),
             replay_on: false,
@@ -5457,6 +5471,7 @@ impl Studio {
                     (Settings::Video, "Video & recording"),
                     (Settings::Audio, "Sound"),
                     (Settings::Hotkeys, "Hotkeys"),
+                    (Settings::Remote, "Remote control"),
                     (Settings::Appearance, "Look & feel"),
                     (Settings::Advanced, "Advanced"),
                 ] {
@@ -5486,6 +5501,7 @@ impl Studio {
                 Settings::Advanced=>{ changed |= self.advanced_settings(ui); },
                 Settings::Announcements=>self.announce_settings(ui),
                 Settings::Hotkeys=>self.hotkey_settings(ui),
+                Settings::Remote=>self.remote_settings_page(ui),
                 Settings::Donations=>{ let (edited, preview) = crate::donations::ui(ui, &mut self.project.preferences.donations, &mut self.donations, &mut self.kofi); changed |= edited; if edited {self.donation_save_due=Some(Instant::now());}
                 if let Some(text) = preview { self.active_alert=Some((text,Instant::now()+Duration::from_secs(8))); self.page=Page::Studio; } },
                 Settings::Video=>{
@@ -6523,6 +6539,7 @@ impl eframe::App for Studio {
         self.projector_windows(ctx);
         self.hotkeys_tick(ctx);
         self.replay_tick();
+        self.remote_tick();
         self.loading_screen(ctx);
         if self.automation_editor.preview_open {
             let mut open = true;
@@ -6839,6 +6856,7 @@ include!("widget_editor.rs");
 include!("layer_tools.rs");
 include!("projectors.rs");
 include!("hotkey_page.rs");
+include!("remote_page.rs");
 
 include!("layer_properties.rs");
 

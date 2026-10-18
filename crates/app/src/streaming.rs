@@ -80,6 +80,22 @@ pub struct Config {
     pub tiktok_send: bool,
     /// "I'm live" posts to Discord and Bluesky; its two secrets live in the keyring.
     pub announce: crate::announce::Settings,
+    /// Remote control (Stream Deck, phone apps…); the password lives in the keyring.
+    pub remote: RemoteSettings,
+    pub remote_password: String,
+}
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteSettings {
+    pub enabled: bool,
+    pub port: u16,
+    /// Reachable from other devices on the network, not only this computer.
+    pub network: bool,
+}
+impl Default for RemoteSettings {
+    fn default() -> Self {
+        Self { enabled: false, port: 4455, network: false }
+    }
 }
 impl Default for Config {
     fn default() -> Self {
@@ -103,6 +119,8 @@ impl Default for Config {
             tiktok_username: String::new(),
             tiktok_send: false,
             announce: Default::default(),
+            remote: Default::default(),
+            remote_password: String::new(),
         }
     }
 }
@@ -223,7 +241,7 @@ impl Config {
                 keys.insert(format!("service-{}", s.id), s.destination.key.clone());
             }
         }
-        for (name, secret) in [("discord-webhook", &self.announce.discord_webhook), ("bluesky-password", &self.announce.bluesky_password)] {
+        for (name, secret) in [("discord-webhook", &self.announce.discord_webhook), ("bluesky-password", &self.announce.bluesky_password), ("remote-password", &self.remote_password)] {
             if !secret.is_empty() {
                 keys.insert(name.to_string(), secret.clone());
             }
@@ -241,7 +259,7 @@ impl Config {
                 s.destination.key = k.clone();
             }
         }
-        for (name, secret) in [("discord-webhook", &mut self.announce.discord_webhook), ("bluesky-password", &mut self.announce.bluesky_password)] {
+        for (name, secret) in [("discord-webhook", &mut self.announce.discord_webhook), ("bluesky-password", &mut self.announce.bluesky_password), ("remote-password", &mut self.remote_password)] {
             if secret.is_empty() && let Some(k) = keys.get(name) {
                 *secret = k.clone();
             }
@@ -257,6 +275,7 @@ impl Config {
         }
         c.announce.discord_webhook.clear();
         c.announce.bluesky_password.clear();
+        c.remote_password.clear();
         c
     }
     /// Loads settings and their keys from the keyring. Keys found in the file (from older
