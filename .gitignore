@@ -2,3 +2,6 @@
 /artifacts/
 *.tmp
 
+
+# Sign-in registrations packaged with the installers; never committed.
+/packaging/accounts-defaults.json

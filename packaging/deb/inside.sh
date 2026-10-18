@@ -32,6 +32,8 @@ cp -r browser/. "$stage/browser/"
 rm -rf "$stage/browser/__pycache__"
 cp -r fonts "$stage/fonts"
 cp packaging/install-renderer.py "$stage/"
+# Twitch/YouTube sign-in registrations; kept out of git (see .gitignore).
+if [ -f packaging/accounts-defaults.json ]; then cp packaging/accounts-defaults.json "$stage/"; else echo "WARNING: packaging/accounts-defaults.json is missing, so Twitch and YouTube sign-in will be unavailable in this package." >&2; fi
 install -m 0755 packaging/rpm/rosorah-studio-wrapper "$pkg/usr/bin/rosorah-studio"
 install -m 0644 packaging/io.rosorah.Studio.desktop "$pkg/usr/share/applications/"
 for size in 16 24 32 48 64 128 256 512; do

@@ -29,6 +29,8 @@ cp -r browser/. "$stage/browser/"
 # Open-licence fonts for text layers; each family folder carries its licence.
 cp -r fonts "$stage/fonts"
 cp packaging/install-renderer.py "$stage/"
+# Twitch/YouTube sign-in registrations; kept out of git (see .gitignore).
+if [ -f packaging/accounts-defaults.json ]; then cp packaging/accounts-defaults.json "$stage/"; else echo "WARNING: packaging/accounts-defaults.json is missing, so Twitch and YouTube sign-in will be unavailable in this package." >&2; fi
 cp packaging/rpm/rosorah-studio-wrapper "$work/"
 cp packaging/io.rosorah.Studio.desktop "$work/"
 cp -r packaging/icons "$work/icons"

@@ -70,6 +70,8 @@ cp "$CARGO_TARGET_DIR/$target/release/rosorah-launcher.exe" "$bundle/Rosorah.exe
 cp -r browser "$bundle/browser"
 rm -rf "$bundle/browser/__pycache__"
 cp -r fonts "$bundle/fonts"
+# Twitch/YouTube sign-in registrations; kept out of git (see .gitignore).
+if [ -f packaging/accounts-defaults.json ]; then cp packaging/accounts-defaults.json "$bundle/"; else echo "WARNING: packaging/accounts-defaults.json is missing, so Twitch and YouTube sign-in will be unavailable in this package." >&2; fi
 cp docs/windows-integration-checkpoint.md "$bundle/README.md"
 cp "$here/run.cmd" "$here/setup.cmd" "$here/setup.ps1" "$here/rosorah.ico" "$bundle/"
 mkdir -p "$bundle/runtime"
@@ -87,6 +89,6 @@ echo "== Building the installer"
     find . -mindepth 1 -type d | sed 's|^\./||' | awk '{print length, $0}' | sort -rn | cut -d' ' -f2- | while read -r d; do printf 'RMDir "$INSTDIR\\%s"\n' "${d//\//\\}"; done
 ) > "$here/uninstall-files.nsh"
 mkdir -p dist
-setup="$root/dist/Rosorah-Studio-0.32.0-preview.11-Setup.exe"
+setup="$root/dist/Rosorah-Studio-0.32.0-preview.12-Setup.exe"
 makensis -WX -V2 "-DPAYLOAD=$bundle" "-DOUTPUT=$setup" "$here/installer.nsi"
 sha256sum "$setup"
