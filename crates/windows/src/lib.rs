@@ -20,4 +20,7 @@ pub mod window;
 #[cfg(windows)]
 pub mod hotkeys;
 
+#[cfg(windows)]
+pub mod virtual_camera;
+
 pub mod capture_policy;
