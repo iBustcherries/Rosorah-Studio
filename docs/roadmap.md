@@ -26,14 +26,14 @@ not a feature-for-feature copy of OBS.
 
 ## Next
 
-1. **X (Twitter) announcements**, if X's API terms allow posting from a free developer account.
+1. **Windows testing pass**: check capture, encoders and the installer on real Windows PCs.
 2. **Updates through the software apps** (on hold): a package repository so Discover and GNOME Software can update Rosorah, and later a Flatpak for Bazaar. The game-capture hooks don't fit Flatpak's sandbox, which still needs a plan.
-3. **Windows testing pass**: check capture, encoders and the installer on real Windows PCs.
 
 ## Later
 
 - Replay buffer and virtual camera.
 - A hotkeys page for scenes, mute and recording (automations can already run from Ctrl+Alt+F1–F12).
+- X (Twitter) announcements (on hold): X's API is pay-per-use only, at $0.20 per post with a link (October 2026).
 - Signed installers (Windows code signing, signed package repositories).
 - A chosen licence and public source, if the project goes open.
 
