@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Panel {
     Scenes,
     Sources,
@@ -15,6 +15,26 @@ pub enum Panel {
     Broadcast,
     Chat,
     Activity,
+    /// A web page added from the Panels menu, by its id.
+    Web(u64),
+}
+// Saved as plain text ("Chat", "Web:3") because panels are also keys in the saved layout's maps.
+impl Serialize for Panel {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Web(id) => s.serialize_str(&format!("Web:{id}")),
+            other => s.serialize_str(&format!("{other:?}")),
+        }
+    }
+}
+impl<'de> Deserialize<'de> for Panel {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        if let Some(id) = text.strip_prefix("Web:") {
+            return id.parse().map(Self::Web).map_err(serde::de::Error::custom);
+        }
+        Self::ALL.into_iter().find(|p| format!("{p:?}") == text).ok_or_else(|| serde::de::Error::custom(format!("unknown panel {text}")))
+    }
 }
 impl Panel {
     pub const ALL: [Self; 8] = [
@@ -37,6 +57,7 @@ impl Panel {
             Self::Broadcast => "Stream",
             Self::Chat => "Chat",
             Self::Activity => "Activity",
+            Self::Web(_) => "Web page",
         }
     }
 }
@@ -332,6 +353,18 @@ impl Workspace {
         } else {
             self.dock.push_to_first_leaf(panel);
         }
+    }
+    /// Drops web panels whose page was removed (or that a newer layout left behind).
+    pub fn retain_web(&mut self, ids: &[u64]) {
+        let gone = |p: &Panel| matches!(p, Panel::Web(id) if !ids.contains(id));
+        let stale: Vec<Panel> = self.dock.iter_all_tabs().map(|(_, t)| *t).filter(|t| gone(t)).collect();
+        for tab in stale {
+            if let Some(location) = self.dock.find_tab(&tab) {
+                self.dock.remove_tab(location);
+            }
+        }
+        self.windows.retain(|p| !gone(p));
+        self.homes.retain(|p, _| !gone(p));
     }
     pub fn set_visible(&mut self, panel: Panel, visible: bool) {
         if !visible {

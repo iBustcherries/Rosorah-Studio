@@ -294,6 +294,12 @@ pub struct Studio {
     scene_dialog: Option<(Id, String, bool)>,
     /// The sound whose settings window is open.
     sound_settings: Option<Id>,
+    web_docks: crate::browser_dock::Docks,
+    /// The scene being named inside its own pill: its id, the text so far, and whether the
+    /// box has been focused yet.
+    naming_scene: Option<(Id, String, bool)>,
+    /// Name and address being entered for a new web page panel.
+    web_dock_dialog: Option<(String, String)>,
     broadcast_window: u8,
     panels_animating: bool,
     toggle_panel: Option<Panel>,
@@ -389,6 +395,8 @@ pub struct Studio {
     record_folder: String,
     screenshot: Option<PathBuf>,
     screenshot_requested: bool,
+    /// When the studio opened; screenshots wait a moment so pages and fades can settle.
+    started: Instant,
     loading: Option<Loading>,
     ui_frames: u32,
 }
@@ -492,6 +500,11 @@ impl Studio {
                 .total_margin()
                 .left_top(),
         );
+        workspace.retain_web(&project.preferences.workspace.browser_docks.iter().map(|d| d.id).collect::<Vec<_>>());
+        // `--page web-dock` shows the first web page panel for screenshots.
+        if page == "web-dock" && let Some(dock) = project.preferences.workspace.browser_docks.first() {
+            workspace.set_visible(Panel::Web(dock.id), true);
+        }
         if page == "activity" {
             workspace.set_visible(Panel::Activity, true);
             if let Some((surface, node, tab)) = workspace.dock.find_tab(&Panel::Activity) {
@@ -585,6 +598,7 @@ impl Studio {
         let scene_dialog = (page == "delete-scene")
             .then(|| project.canvases.first().and_then(|c| project.scene(c.scene)).map(|s| (s.id, s.name.clone(), true)))
             .flatten();
+        let scene_for_naming = project.canvases.first().map(|c| c.scene).unwrap_or_default();
         // `--page sound-settings` opens the microphone's settings for screenshots.
         let sound_settings = (page == "sound-settings").then(|| project.audio.iter().find(|c| c.name.to_lowercase().contains("mic")).map(|c| c.id)).flatten();
         let mut widget_editor = WidgetEditor::default();
@@ -650,6 +664,10 @@ impl Studio {
             animate: false,
             scene_dialog,
             sound_settings,
+            web_docks: Default::default(),
+            // `--page name-scene` opens the name box in the current scene's pill for screenshots.
+            naming_scene: (page == "name-scene").then(|| (scene_for_naming, String::new(), false)),
+            web_dock_dialog: None,
             broadcast_window: if page == "add-service" { 3 } else { 0 },
             panels_animating: false,
             frame: 0,
@@ -730,6 +748,7 @@ impl Studio {
             loading: screenshot.is_none().then(Loading::start),
             screenshot,
             screenshot_requested: false,
+            started: Instant::now(),
             ui_frames: 0,
         }
     }
@@ -1090,6 +1109,31 @@ impl Studio {
                                     }
                                 }
                                 ui.separator();
+                                ui.strong("Web pages");
+                                let mut remove = None;
+                                for dock in &self.project.preferences.workspace.browser_docks {
+                                    ui.horizontal(|ui| {
+                                        let panel = Panel::Web(dock.id);
+                                        let mut visible = self.workspace.contains(panel);
+                                        if ui.checkbox(&mut visible, &dock.name).on_hover_text(&dock.url).changed() {
+                                            self.workspace.set_visible(panel, visible);
+                                        }
+                                        if ui.small_button("✕").on_hover_text("Remove this web page").clicked() {
+                                            remove = Some(dock.id);
+                                        }
+                                    });
+                                }
+                                if let Some(id) = remove {
+                                    self.project.preferences.workspace.browser_docks.retain(|d| d.id != id);
+                                    self.workspace.retain_web(&self.project.preferences.workspace.browser_docks.iter().map(|d| d.id).collect::<Vec<_>>());
+                                    self.web_docks.remove(id);
+                                    self.dirty = true;
+                                }
+                                if ui.button("+ Add a web page…").clicked() {
+                                    self.web_dock_dialog = Some((String::new(), "https://".into()));
+                                    ui.close();
+                                }
+                                ui.separator();
                                 if ui.button("Reset layout").clicked() {
                                     self.reset_layout();
                                     ui.close();
@@ -1326,7 +1370,7 @@ impl Studio {
             ui.close();
         }
         if ui.button("Rename").clicked() {
-            self.scene_dialog = Some((id, self.project.scene(id).unwrap().name.clone(), false));
+            self.naming_scene = Some((id, self.project.scene(id).unwrap().name.clone(), false));
             ui.close();
         }
         let vertical_in_use = self.project.canvases.len() > 1 && (self.advanced() || self.project.preferences.workspace.vertical_video);
@@ -1414,6 +1458,44 @@ impl Studio {
             let name = self.project.scene(id).map(|s| s.name.clone()).unwrap_or_default();
             let on_air = live && active == id;
             let hovered = ui.rect_contains_pointer(ui.max_rect());
+            if let Some((naming, text, focused)) = &mut self.naming_scene
+                && *naming == id
+            {
+                // The pill becomes a name box; Enter or clicking away keeps the name, Esc leaves it as it was.
+                let response = ui
+                    .horizontal(|ui| {
+                        egui::Frame::new()
+                            .fill(ui.visuals().selection.bg_fill)
+                            .corner_radius(ui.visuals().widgets.inactive.corner_radius)
+                            .inner_margin(egui::Margin::symmetric(8, 0))
+                            .show(ui, |ui| {
+                                let ink = ui.visuals().selection.stroke.color;
+                                ui.add_sized(
+                                    [(ui.available_width() - 34.).max(30.), 30.],
+                                    egui::TextEdit::singleline(text)
+                                        .hint_text(RichText::new("New Scene").color(ink.gamma_multiply(0.55)))
+                                        .text_color(ink)
+                                        .frame(false)
+                                        .vertical_align(egui::Align::Center),
+                                )
+                            })
+                            .inner
+                    })
+                    .inner;
+                if !*focused {
+                    response.request_focus();
+                    *focused = true;
+                } else if response.lost_focus() {
+                    let typed = text.trim().chars().take(80).collect::<String>();
+                    let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                    self.naming_scene = None;
+                    if !cancelled && !typed.is_empty() && let Some(scene) = self.project.scenes.iter_mut().find(|s| s.id == id) {
+                        scene.name = typed;
+                        self.changed();
+                    }
+                }
+                return response;
+            }
             ui.horizontal(|ui| {
                 let text = if on_air {
                     RichText::new(format!("● LIVE  {name}")).color(Color32::from_rgb(255, 92, 92)).strong()
@@ -1443,7 +1525,11 @@ impl Studio {
         }
         ui.add_space(4.);
         ui.horizontal_wrapped(|ui| {
-            if ui.add(self.primary_button("+ Scene")).clicked() {let id=self.project.id();self.project.scenes.push(Scene{id,name:format!("Scene {id}"),layers:vec![]});self.project.preferences.workspace.scenes.entry(canvas).or_default().push(id);self.project.switch_scene(canvas,id);self.layer=None;self.changed();}
+            if ui.add(self.primary_button("+ Scene")).clicked() {let id=self.project.id();
+                // Named in its pill right away; until then it's "New Scene" (numbered if that's taken).
+                let name=(1..).map(|n|if n==1{"New Scene".to_owned()}else{format!("New Scene {n}")}).find(|n|!self.project.scenes.iter().any(|s|&s.name==n)).unwrap();
+                self.naming_scene=Some((id,String::new(),false));
+                self.project.scenes.push(Scene{id,name,layers:vec![]});self.project.preferences.workspace.scenes.entry(canvas).or_default().push(id);self.project.switch_scene(canvas,id);self.layer=None;self.changed();}
             ui.menu_button("⚙", |ui| {
                 ui.menu_button(format!("Transition · {}", self.project.preferences.transition.label()), |ui| self.transition_menu(ui));
                 if vertical_in_use {
@@ -1470,6 +1556,52 @@ impl Studio {
             .filter(|_| vertical_in_use && self.project.preferences.workspace.link_scenes)
         {
             note(ui, format!("Vertical video switches to: {}", link.name));
+        }
+    }
+    fn panel_title(&self, panel: Panel) -> String {
+        match panel {
+            Panel::Web(id) => self.project.preferences.workspace.browser_docks.iter().find(|d| d.id == id).map_or_else(|| panel.title().into(), |d| d.name.clone()),
+            _ => panel.title().into(),
+        }
+    }
+    /// Asks for a name and address, then adds the page as a panel.
+    fn web_dock_dialog_ui(&mut self, ctx: &egui::Context) {
+        let Some((mut name, mut url)) = self.web_dock_dialog.take() else {
+            return;
+        };
+        let mut done = false;
+        let valid = crate::browser_source::valid_url(url.trim());
+        egui::Modal::new(egui::Id::new("web-dock-dialog")).frame(solid_window(ctx)).show(ctx, |ui| {
+            ui.set_width(380.);
+            ui.heading("Add a web page");
+            ui.add_space(6.);
+            ui.label("Name");
+            ui.add(egui::TextEdit::singleline(&mut name).hint_text("e.g. Stream dashboard").desired_width(f32::INFINITY));
+            ui.label("Address");
+            ui.add(egui::TextEdit::singleline(&mut url).desired_width(f32::INFINITY));
+            note(ui, "It opens as a panel you can move and group like the others. Sign-ins on these pages are remembered.");
+            ui.add_space(10.);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    done = true;
+                }
+                if ui.add_enabled(valid, egui::Button::new("Add")).clicked() {
+                    let docks = &mut self.project.preferences.workspace.browser_docks;
+                    let id = docks.iter().map(|d| d.id).max().unwrap_or(0) + 1;
+                    let url = url.trim().to_owned();
+                    let name = match name.trim() {
+                        "" => reqwest::Url::parse(&url).ok().and_then(|u| u.host_str().map(|h| h.trim_start_matches("www.").to_owned())).unwrap_or_else(|| "Web page".into()),
+                        n => n.chars().take(40).collect(),
+                    };
+                    docks.push(auroracast_core::workspace::BrowserDock { id, name, url });
+                    self.workspace.set_visible(Panel::Web(id), true);
+                    self.dirty = true;
+                    done = true;
+                }
+            });
+        });
+        if !done && !ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.web_dock_dialog = Some((name, url));
         }
     }
     fn scene_dialog_ui(&mut self, ctx: &egui::Context) {
@@ -2493,16 +2625,33 @@ impl Studio {
             .collect::<Vec<_>>();
         names.extend(self.stream_config.services.iter().map(|s| s.name.clone()));
         let several_videos = self.project.canvases.len() > 1 && (self.advanced() || self.project.preferences.workspace.vertical_video);
+        let kick_connected = self.kick_account.connected;
+        // The platform each row streams to, for its name color; None for custom servers.
+        let platforms: Vec<Option<Platform>> = (0..names.len())
+            .map(|slot| match slot {
+                0 => Some(Platform::Twitch),
+                1 | 2 => Some(Platform::YouTube),
+                _ => match self.stream_config.services[slot - 3].provider {
+                    crate::streaming::Provider::Kick => Some(Platform::Kick),
+                    crate::streaming::Provider::TikTok => Some(Platform::TikTok),
+                    crate::streaming::Provider::Custom => None,
+                },
+            })
+            .collect();
+        let mut hidden = Vec::new();
         ui.add_enabled_ui(self.live_stream.is_none(), |ui| {
             for (slot, name) in names.iter().enumerate() {
                 let connected = match slot {
                     0 => self.accounts[0].connected,
                     1 => self.accounts[1].connected,
                     2 => false,
-                    _ => true,
+                    _ => platforms[slot] == Some(Platform::Kick) && kick_connected && self.stream_config.services[slot - 3].destination.managed_by_account,
                 };
                 let dest = self.stream_config.destination_mut(slot).unwrap();
+                // Only platforms you can stream to (or have switched on) are listed; the rest wait in
+                // "Set up another platform".
                 if !connected && dest.key.is_empty() && !dest.enabled {
+                    hidden.push(slot);
                     continue;
                 }
                 ui.push_id(("broadcast-service", slot), |ui| {
@@ -2517,7 +2666,7 @@ impl Studio {
                         };
                         let video = dest.canvas.or(if slot == 2 { vertical } else { main }).and_then(|id| self.project.canvases.iter().find(|c| c.id == id)).map(|c| c.name.clone()).unwrap_or_default();
                         ui.label(RichText::new(dot).color(color));
-                        let label = ui.add(egui::Label::new(RichText::new(name).strong()).truncate());
+                        let label = ui.add(egui::Label::new(RichText::new(name).strong().color(platforms[slot].map_or(ui.visuals().strong_text_color(), platform_color))).truncate());
                         if several_videos {
                             label.on_hover_text(format!("Sends the {}", video.to_lowercase()));
                         }
@@ -2528,15 +2677,21 @@ impl Studio {
                     });
                 });
             }
-            if ui
-                .add_enabled(
-                    self.stream_config.services.len() < 16,
-                    egui::Button::new("+ Add a platform"),
-                )
-                .clicked()
-            {
-                self.broadcast_window = 3;
-            }
+            ui.menu_button("+ Set up another platform", |ui| {
+                for slot in &hidden {
+                    if ui.button(&names[*slot]).clicked() {
+                        self.broadcast_window = 100 + *slot as u8;
+                        ui.close();
+                    }
+                }
+                if !hidden.is_empty() {
+                    ui.separator();
+                }
+                if ui.add_enabled(self.stream_config.services.len() < 16, egui::Button::new("A new platform…")).clicked() {
+                    self.broadcast_window = 3;
+                    ui.close();
+                }
+            });
         });
         if before != self.stream_config {
             self.save_stream_settings();
@@ -3619,6 +3774,8 @@ impl Studio {
     fn main_studio(&mut self, ctx: &egui::Context) {
         self.panels_animating = false;
         self.scene_dialog_ui(ctx);
+        self.web_dock_dialog_ui(ctx);
+        self.web_docks.tick();
         // The page itself stays clear so the backdrop shows in the gaps between docked panels.
         egui::CentralPanel::default().frame(egui::Frame::central_panel(&ctx.style()).fill(bg())).show(ctx, |ui| {
             self.workspace.remember_homes();
@@ -3706,7 +3863,7 @@ impl Studio {
         for mut tab in self.workspace.windows.clone() {
             let id = egui::ViewportId::from_hash_of(("panel-window", tab));
             let builder = egui::ViewportBuilder::default()
-                .with_title(format!("{} · Rosorah Studio", tab.title()))
+                .with_title(format!("{} · Rosorah Studio", self.panel_title(tab)))
                 .with_app_id("io.rosorah.Studio")
                 .with_inner_size([440., 600.])
                 .with_min_inner_size([260., 200.]);
@@ -3717,7 +3874,7 @@ impl Studio {
                     .show(ctx, |ui| {
                         ui.horizontal(|ui| {
                             // Dragging this handle out of the window and letting go docks the panel again.
-                            let handle = ui.add(egui::Label::new(RichText::new(format!("⠿ {}", tab.title())).strong()).sense(egui::Sense::drag()))
+                            let handle = ui.add(egui::Label::new(RichText::new(format!("⠿ {}", self.panel_title(tab))).strong()).sense(egui::Sense::drag()))
                                 .on_hover_cursor(egui::CursorIcon::Grab)
                                 .on_hover_text("Drag out of this window and let go to dock it back where it was");
                             if handle.dragged() {
@@ -3863,6 +4020,7 @@ impl Studio {
                     ui.spacing_mut().item_spacing.y=4.;
                     let levels = view.stereo_peaks.get(&channel.id).copied().unwrap_or([0.;2]);
                     let mut gain = channel.gain_db.max(-60.);
+                    let level_text = if gain <= -60. { if advanced { "−∞ dB".into() } else { "Off".into() } } else if advanced {format!("{gain:.1} dB")} else {format!("{:.0}%", 10f32.powf(gain / 20.) * 100.)};
                     ui.horizontal(|ui| {
                         let (grip, handle) = ui.allocate_exact_size(egui::vec2(10., row), egui::Sense::drag());
                         let dot = if handle.hovered() || handle.dragged() { ui.visuals().strong_text_color() } else { ui.visuals().weak_text_color() };
@@ -3871,7 +4029,8 @@ impl Studio {
                             ui.painter().circle_filled(grip.center() + offset, 1.4, dot);
                         }
                         let name = ui.scope(|ui| {
-                            ui.set_max_width((ui.available_width() - 52.).max(24.));
+                            // Side by side, the level sits by the mute button so the name gets the whole row.
+                            ui.set_max_width(if vertical_audio { ui.available_width() } else { (ui.available_width() - 52.).max(24.) });
                             ui.add(egui::Label::new(egui::RichText::new(&channel.name).strong()).truncate().sense(egui::Sense::drag()))
                         }).inner;
                         for response in [handle, name] {
@@ -3883,9 +4042,11 @@ impl Studio {
                             }
                             response.on_hover_text("Drag to reorder");
                         }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.small(if gain <= -60. { if advanced { "−∞ dB".into() } else { "Off".into() } } else if advanced {format!("{gain:.1} dB")} else {format!("{:.0}%", 10f32.powf(gain / 20.) * 100.)});
-                        });
+                        if !vertical_audio {
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.small(&level_text);
+                            });
+                        }
                     });
                     if !vertical_audio {if advanced {crate::material::meter(ui,levels,false);} else {crate::material::meter_plain(ui,levels);}}
                     ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), if vertical_audio {meter_height+60.}else{30.}), if vertical_audio {egui::Layout::top_down(egui::Align::Center)} else {egui::Layout::left_to_right(egui::Align::Center)},|ui| {
@@ -3893,7 +4054,9 @@ impl Studio {
                     let slider=egui::Slider::new(&mut gain,-60.0..=6.0).show_value(false).handle_shape(egui::style::HandleShape::Rect{aspect_ratio:0.35});
                     let response=if vertical_audio {ui.horizontal(|ui| {crate::material::meter_sized(ui,levels,true,meter_height);ui.add(slider.vertical())}).inner}else{ui.add(slider)};
                     if response.changed() {channel.gain_db=if gain<=-60. {-100.}else{gain};changed=true;}
-                    if ui.selectable_label(channel.muted,if channel.muted {"🔇"}else{"🔊"}).on_hover_text(if channel.muted {"Muted · click to unmute"}else{"Click to mute"}).clicked() {channel.muted = !channel.muted;changed=true;}
+                    let mute = |ui: &mut egui::Ui| ui.selectable_label(channel.muted,if channel.muted {"🔇"}else{"🔊"}).on_hover_text(if channel.muted {"Muted · click to unmute"}else{"Click to mute"}).clicked();
+                    let clicked = if vertical_audio { ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| { ui.small(&level_text); mute(ui) }).inner } else { mute(ui) };
+                    if clicked {channel.muted = !channel.muted;changed=true;}
                     if ui.button("⚙").on_hover_text("Sound settings").clicked() {
                         *sound_settings = Some(channel.id);
                     }
@@ -4065,10 +4228,10 @@ impl Studio {
                         for channel in &mut scene_channels {
                             let rect = ui
                                 .allocate_ui_with_layout(
-                                    egui::vec2(140., strip_height),
+                                    egui::vec2(108., strip_height),
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| {
-                                        ui.set_max_width(140.);
+                                        ui.set_max_width(108.);
                                         draw_channel(ui, channel)
                                     },
                                 )
@@ -4755,7 +4918,7 @@ impl eframe::App for Studio {
         self.browser_chat.set_context(ctx);
         self.browser_chat.tick(&mut self.chat);
         let mut incoming = std::mem::take(&mut self.browser_chat.activity);
-        for account in &mut self.accounts {
+        for account in self.accounts.iter_mut().chain(std::iter::once(&mut self.kick_account)) {
             incoming.append(&mut account.activity);
         }
         let mut donations = self.donations.drain();
@@ -5150,7 +5313,7 @@ impl eframe::App for Studio {
         self.go_live_window(ctx);
         self.report_window(ctx);
         self.toast_ui(ctx);
-        if self.screenshot.is_some() && !self.screenshot_requested && self.ui_frames >= 20 && !self.appearance.busy() {
+        if self.screenshot.is_some() && !self.screenshot_requested && self.ui_frames >= 20 && self.started.elapsed() > Duration::from_secs(4) && !self.appearance.busy() {
             self.screenshot_requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
         }
@@ -5262,7 +5425,7 @@ impl egui_dock::TabViewer for StudioTabs<'_> {
         result
     }
     fn title(&mut self, tab: &mut Panel) -> egui::WidgetText {
-        tab.title().into()
+        self.0.panel_title(*tab).into()
     }
     fn id(&mut self, tab: &mut Panel) -> egui::Id {
         egui::Id::new(("studio-panel", *tab))
@@ -5324,7 +5487,7 @@ impl egui_dock::TabViewer for StudioTabs<'_> {
                 Panel::Chat => self.0.chat_panel(ui),
                 Panel::Activity => self.0.event_history.ui(
                     ui,
-                    &self.0.accounts,
+                    &[&self.0.accounts[0], &self.0.accounts[1], &self.0.kick_account],
                     &[self.0.donations.status().owner, self.0.kofi.status().owner],
                     self.0.stream_config.tiktok_username.trim().trim_start_matches('@'),
                     self.0.project.preferences.automation_history.show_missed,
@@ -5332,6 +5495,14 @@ impl egui_dock::TabViewer for StudioTabs<'_> {
                 Panel::Preview => self.0.canvas_panel(ui, false),
                 Panel::Vertical => self.0.canvas_panel(ui, true),
                 Panel::Mixer => self.0.mixer_panel(ui),
+                Panel::Web(id) => {
+                    let id = *id;
+                    let url = self.0.project.preferences.workspace.browser_docks.iter().find(|d| d.id == id).map(|d| d.url.clone());
+                    match url {
+                        Some(url) => self.0.web_docks.ui(ui, id, &url),
+                        None => note(ui, "This web page was removed."),
+                    }
+                }
             });
     }
 }

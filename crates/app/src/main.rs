@@ -12,6 +12,7 @@ mod appearance;
 mod fonts;
 mod rewards_ui;
 mod browser_chat;
+mod browser_dock;
 mod browser_source;
 mod camera;
 mod camera_layout;

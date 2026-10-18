@@ -214,22 +214,24 @@ impl History {
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
-        accounts: &[crate::accounts::Account; 2],
+        accounts: &[&crate::accounts::Account],
         donation_owners: &[String],
         tiktok: &str,
         show_missed: bool,
     ) {
         ui.heading("Stream activity");
         let connected: Vec<_> = accounts.iter().filter(|a| a.connected).collect();
-        ui.label(if connected.is_empty() {
-            "Your connected accounts will appear here.".into()
+        if connected.is_empty() {
+            ui.label("Your connected accounts will appear here.");
         } else {
-            connected
-                .iter()
-                .map(|a| format!("{} · {}", a.platform.name(), a.name))
-                .collect::<Vec<_>>()
-                .join("  /  ")
-        });
+            // Every connected account, each in its platform's color.
+            ui.horizontal_wrapped(|ui| {
+                for a in &connected {
+                    let [r, g, b] = a.platform.color();
+                    ui.label(egui::RichText::new(format!("{} · {}", a.platform.name(), a.name)).strong().color(egui::Color32::from_rgb(r, g, b)));
+                }
+            });
+        }
         ui.small("Newest first · Saved on this computer");
         ui.separator();
         let mut count = 0;

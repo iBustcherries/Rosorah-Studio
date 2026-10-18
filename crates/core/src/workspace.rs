@@ -18,6 +18,14 @@ pub struct WorkspaceSettings {
     pub advanced: bool,
     /// Shows the second (vertical) video in the studio.
     pub vertical_video: bool,
+    /// Web pages added as panels from the Panels menu.
+    pub browser_docks: Vec<BrowserDock>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BrowserDock {
+    pub id: u64,
+    pub name: String,
+    pub url: String,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemeMode {
@@ -96,6 +104,7 @@ impl Default for WorkspaceSettings {
             appearance: Appearance::default(),
             advanced: false,
             vertical_video: true,
+            browser_docks: Vec::new(),
         }
     }
 }
