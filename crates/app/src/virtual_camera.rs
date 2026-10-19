@@ -27,15 +27,26 @@ pub fn set_up() -> anyhow::Result<()> {
     anyhow::ensure!(device().is_some(), "The camera was added but didn't appear");
     Ok(())
 }
+/// On Windows the camera is "there" once its component is set up; it only shows in apps while on.
 #[cfg(windows)]
 pub fn device() -> Option<String> {
     rosorah_windows::virtual_camera::installed().then(|| rosorah_windows::virtual_camera::PIPE.to_owned())
 }
 #[cfg(windows)]
 pub fn supported() -> bool {
-    rosorah_windows::virtual_camera::installed()
+    rosorah_windows::virtual_camera::supported()
 }
+/// Whether the set-up camera component needs replacing with the one shipped with this Rosorah.
+#[cfg(windows)]
+pub fn outdated() -> bool {
+    rosorah_windows::virtual_camera::installed() && !rosorah_windows::virtual_camera::up_to_date()
+}
+#[cfg(not(windows))]
+pub fn outdated() -> bool {
+    false
+}
+/// Copies the camera component into Program Files and registers it (Windows asks permission once).
 #[cfg(windows)]
 pub fn set_up() -> anyhow::Result<()> {
-    anyhow::bail!("Reinstall Rosorah with \"Virtual camera\" ticked to add the camera (Windows 11)")
+    rosorah_windows::virtual_camera::set_up()
 }

@@ -453,6 +453,9 @@ pub struct Studio {
     pending_events: Vec<serde_json::Value>,
     /// The virtual camera's output while it's on, and ones still finishing.
     virtual_camera: Option<crate::recording::Recording>,
+    /// Windows: the camera as Windows shows it to apps, while it's on.
+    #[cfg(windows)]
+    windows_camera: Option<rosorah_windows::virtual_camera::Camera>,
     camera_stopping: Vec<crate::recording::Recording>,
     /// Replay buffer: on or off, its own encoder when not live, and a save in progress.
     replay_on: bool,
@@ -882,6 +885,8 @@ impl Studio {
             scripts_loaded: Vec::new(),
             pending_events: Vec::new(),
             virtual_camera: None,
+            #[cfg(windows)]
+            windows_camera: None,
             camera_stopping: Vec::new(),
             replay_on: false,
             replay_stream: None,
@@ -2270,18 +2275,38 @@ impl Studio {
         if let Some(camera) = self.virtual_camera.take() {
             camera.stop();
             self.camera_stopping.push(camera);
+            #[cfg(windows)]
+            self.windows_camera.take();
             return;
         }
         let Some(device) = crate::virtual_camera::device() else {
             self.tell("Set up the virtual camera first (Stream panel).".into());
             return;
         };
+        // Windows shows the camera to apps only while it's on; FFmpeg writes into its pipe.
+        #[cfg(windows)]
+        let device = match rosorah_windows::virtual_camera::Camera::start() {
+            Ok(camera) => {
+                let input = camera.input.clone();
+                self.windows_camera = Some(camera);
+                let _ = device;
+                input
+            }
+            Err(e) => {
+                self.tell(format!("The virtual camera couldn't start: {e:#}"));
+                return;
+            }
+        };
         match crate::recording::Recording::start_camera(&self.project, 0, self.captures.reader(), device) {
             Ok(camera) => {
                 self.virtual_camera = Some(camera);
                 self.tell("Virtual camera on: pick “Rosorah Virtual Camera” in Discord, Zoom or your browser.".into());
             }
-            Err(e) => self.tell(format!("The virtual camera couldn't start: {e:#}")),
+            Err(e) => {
+                #[cfg(windows)]
+                self.windows_camera.take();
+                self.tell(format!("The virtual camera couldn't start: {e:#}"));
+            }
         }
     }
     /// Virtual camera controls for the Stream panel.
@@ -2292,23 +2317,33 @@ impl Studio {
         {
             self.tell(format!("The virtual camera stopped: {e}"));
             self.virtual_camera = None;
+            #[cfg(windows)]
+            self.windows_camera.take();
         }
         ui.horizontal_wrapped(|ui| {
             let ready = crate::virtual_camera::device().is_some();
             let mut on = self.virtual_camera.is_some();
-            if ready {
+            if ready && self.virtual_camera.is_none() && crate::virtual_camera::outdated() {
+                if ui.button("📷 Update virtual camera").on_hover_text("This Rosorah has a newer camera component (Windows asks for administrator permission)").clicked() {
+                    match crate::virtual_camera::set_up() {
+                        Ok(()) => self.tell("Virtual camera updated.".into()),
+                        Err(e) => self.tell(format!("{e:#}")),
+                    }
+                }
+            } else if ready {
                 if ui.toggle_value(&mut on, "📷 Virtual camera").on_hover_text("Rosorah's main video as a webcam for Discord, Zoom or a browser").changed() {
                     self.toggle_virtual_camera();
                 }
             } else if crate::virtual_camera::supported() {
-                if ui.button("📷 Set up virtual camera").on_hover_text("Adds “Rosorah Virtual Camera” (asks for your password once; lasts until restart)").clicked() {
+                let hint = if cfg!(windows) { "Adds “Rosorah Virtual Camera” (Windows asks for administrator permission once)" } else { "Adds “Rosorah Virtual Camera” (asks for your password once; lasts until restart)" };
+                if ui.button("📷 Set up virtual camera").on_hover_text(hint).clicked() {
                     match crate::virtual_camera::set_up() {
                         Ok(()) => self.tell("Virtual camera added. Switch it on whenever you want.".into()),
                         Err(e) => self.tell(format!("{e:#}")),
                     }
                 }
             } else {
-                note(ui, if cfg!(windows) { "Virtual camera: reinstall with “Virtual camera” ticked (Windows 11)." } else { "Virtual camera: install v4l2loopback (Fedora: sudo dnf install v4l2loopback; Ubuntu: sudo apt install v4l2loopback-dkms)." });
+                note(ui, if cfg!(windows) { "Virtual camera: needs Windows 11." } else { "Virtual camera: install v4l2loopback (Fedora: sudo dnf install v4l2loopback; Ubuntu: sudo apt install v4l2loopback-dkms)." });
             }
         });
     }

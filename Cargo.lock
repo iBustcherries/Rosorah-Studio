@@ -2986,6 +2986,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rosorah-camera"
+version = "0.33.0"
+dependencies = [
+ "windows",
+ "windows-core",
+]
+
+[[package]]
 name = "rosorah-capture"
 version = "0.33.0"
 dependencies = [

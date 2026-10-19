@@ -549,7 +549,12 @@ fn launch_target_tracks(
         #[cfg(not(windows))]
         cmd.args(["-map", "0:v:0", "-vf", "format=yuv420p", "-f", "v4l2"]).arg(device);
         #[cfg(windows)]
-        cmd.args(["-map", "0:v:0", "-vf", "format=nv12", "-f", "rawvideo", "-y"]).arg(device);
+        {
+            // The camera component offers one fixed picture; the canvas is fitted into it.
+            use rosorah_windows::virtual_camera::{FPS, HEIGHT, WIDTH};
+            let fit = format!("scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=nv12");
+            cmd.args(["-map", "0:v:0", "-vf", &fit, "-r", &FPS.to_string(), "-f", "rawvideo", "-y"]).arg(device);
+        }
         cmd.args(["-map", "1:a:0", "-f", "null", "-"]).stderr(Stdio::piped()).stdout(Stdio::null());
         #[cfg(unix)]
         cmd.stdin(Stdio::from(video_read.try_clone()?));

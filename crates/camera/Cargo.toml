@@ -1,0 +1,14 @@
+[package]
+name = "rosorah-camera"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Rosorah Virtual Camera: the Windows 11 camera component apps see as a webcam"
+
+[lib]
+name = "rosorah_camera"
+crate-type = ["cdylib"]
+
+[target.'cfg(windows)'.dependencies]
+windows-core = "0.58"
+windows = { version = "0.58", features = ["implement", "Win32_Foundation", "Win32_System_Com", "Win32_Media_MediaFoundation", "Win32_Media_KernelStreaming", "Win32_System_Variant", "Win32_System_Com_StructuredStorage"] }

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/gpu", "crates/app", "crates/capture", "crates/windows"]
+members = ["crates/core", "crates/gpu", "crates/app", "crates/capture", "crates/windows", "crates/camera"]
 resolver = "2"
 
 [workspace.package]

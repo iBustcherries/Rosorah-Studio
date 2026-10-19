@@ -24,6 +24,10 @@ try {
     New-Item -ItemType Directory -Path $Output | Out-Null
     Copy-Item 'target/x86_64-pc-windows-msvc/release/rosorah-studio.exe' $Output
     Copy-Item 'target/x86_64-pc-windows-msvc/release/rosorah-windows-probe.exe' $Output
+    $env:RUSTFLAGS = '-C target-feature=+crt-static'
+    cargo build --locked --release --target x86_64-pc-windows-msvc -p rosorah-camera --target-dir target/camera
+    Remove-Item Env:RUSTFLAGS
+    Copy-Item 'target/camera/x86_64-pc-windows-msvc/release/rosorah_camera.dll' (Join-Path $Output 'rosorah-camera.dll')
     Copy-Item 'browser' $Output -Recurse
     Copy-Item 'fonts' $Output -Recurse
     Copy-Item 'docs/windows-integration-checkpoint.md' (Join-Path $Output 'README.md')

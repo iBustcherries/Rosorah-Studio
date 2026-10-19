@@ -96,6 +96,13 @@ Section "Uninstall"
   RMDir /r "$INSTDIR\runtime\ffmpeg-9.0.2-essentials_build"
   RMDir "$INSTDIR\runtime"
   Delete "$INSTDIR\setup.log"
+  ; The virtual camera, if it was set up, lives in Program Files; removing it needs permission.
+  SetRegView 64
+  ReadRegStr $0 HKLM "SOFTWARE\Classes\CLSID\{b6ac0fba-5752-439c-ad7b-9bbc8d093265}\InprocServer32" ""
+  SetRegView lastused
+  ${If} $0 != ""
+    ExecShellWait "runas" "$SYSDIR\cmd.exe" '/s /c "reg delete "HKLM\SOFTWARE\Classes\CLSID\{b6ac0fba-5752-439c-ad7b-9bbc8d093265}" /f /reg:64 & del /f /q "$0" & rmdir "$PROGRAMFILES64\Rosorah Studio Camera""' SW_HIDE
+  ${EndIf}
   Delete "$INSTDIR\Uninstall.exe"
   RMDir "$INSTDIR"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RosorahStudio"

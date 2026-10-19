@@ -45,6 +45,11 @@ echo "== Compiling Rosorah Studio for Windows"
 cargo xwin rustc --locked --release --target $target -p rosorah-studio --bin rosorah-studio -- -C link-arg="$work/rosorah.res"
 cargo xwin build --locked --release --target $target -p rosorah-windows
 
+echo "== Compiling the virtual camera component"
+# Windows' camera service loads it, so it carries its own C runtime (no VC++ install needed there).
+CARGO_TARGET_DIR="$root/target-windows/camera" RUSTFLAGS="-C target-feature=+crt-static" \
+    cargo xwin build --locked --release --target $target -p rosorah-camera
+
 echo "== Compiling the launcher"
 mkdir -p "$work/launcher/src"
 cp "$here/launcher.rs" "$work/launcher/src/main.rs"
@@ -66,6 +71,7 @@ rm -rf "$bundle"
 mkdir -p "$bundle"
 out="$CARGO_TARGET_DIR/$target/release"
 cp "$out/rosorah-studio.exe" "$out/rosorah-windows-probe.exe" "$bundle/"
+cp "$root/target-windows/camera/$target/release/rosorah_camera.dll" "$bundle/rosorah-camera.dll"
 cp "$CARGO_TARGET_DIR/$target/release/rosorah-launcher.exe" "$bundle/Rosorah.exe"
 cp -r browser "$bundle/browser"
 rm -rf "$bundle/browser/__pycache__"
