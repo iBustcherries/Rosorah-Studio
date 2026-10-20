@@ -62,8 +62,7 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
 - **Alerts and automations**: follows, subs, gifts, bits and Kicks, raids, channel points, Super
   Chats, donations (StreamElements, Streamlabs, Ko-fi) and chat commands trigger alerts, sounds,
   chat replies, scene switches and widget updates, and paid messages can be read aloud. Guided setup,
-  built-in sounds and animations,
-  bot accounts and timers.
+  built-in sounds and animations, bot accounts and timers.
 - **Widgets**: chat, alerts, goals, now playing (follows your music app), timers, counters, polls,
   checklists, schedules, credits, QR codes and more, in 26 themes.
 - **Studio Mode, transitions and projectors**: prepare a scene before sending it live; cut, fade,
