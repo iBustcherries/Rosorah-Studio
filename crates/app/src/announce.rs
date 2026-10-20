@@ -1,5 +1,5 @@
-//! "I'm live" posts to Discord (a channel webhook) and Bluesky (handle + app password),
-//! sent once per stream when it starts sending.
+//! "I'm live" posts to Discord (a channel webhook), Bluesky (handle + app password) and Threads
+//! (an access token from the user's own Meta app), sent once per stream when it starts sending.
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -12,6 +12,8 @@ pub const DEFAULT_MESSAGE: &str = "🔴 I'm live! {title}\n{links}";
 /// Bluesky counts graphemes; characters are a close, slightly cautious stand-in.
 pub const BLUESKY_LIMIT: usize = 300;
 const DISCORD_LIMIT: usize = 2000;
+pub const THREADS_LIMIT: usize = 500;
+const THREADS_API: &str = "https://graph.threads.net";
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -24,6 +26,14 @@ pub struct Settings {
     pub bluesky_handle: String,
     /// Secret: a Bluesky app password, kept in the keyring with the stream keys.
     pub bluesky_password: String,
+    pub threads: bool,
+    /// Secret: a Threads access token, kept in the keyring with the stream keys. Renewed on each
+    /// post, since a token unused for 60 days can't be renewed any more.
+    pub threads_token: String,
+    /// When the token runs out (Unix seconds); 0 until Rosorah has renewed it once.
+    pub threads_expires: u64,
+    /// The account the token posts as, learned when it's first used.
+    pub threads_username: String,
     /// An optional picture (PNG or JPEG) posted with the announcement.
     pub image: String,
 }
@@ -36,6 +46,10 @@ impl Default for Settings {
             bluesky: false,
             bluesky_handle: String::new(),
             bluesky_password: String::new(),
+            threads: false,
+            threads_token: String::new(),
+            threads_expires: 0,
+            threads_username: String::new(),
             image: String::new(),
         }
     }
@@ -46,6 +60,9 @@ impl Settings {
     }
     pub fn bluesky_ready(&self) -> bool {
         self.bluesky && !handle(&self.bluesky_handle).is_empty() && !self.bluesky_password.trim().is_empty()
+    }
+    pub fn threads_ready(&self) -> bool {
+        self.threads && !self.threads_token.trim().is_empty()
     }
 }
 /// Bluesky refuses images over about 1 MB; Discord allows far more, so one size suits both.
@@ -238,6 +255,64 @@ fn post_bluesky(name: &str, password: &str, text: &str, stream: &Stream, picture
     }
     Ok(())
 }
+/// Length as Threads counts it toward its limit: emoji and other symbols count as their UTF-8
+/// bytes. Letters outside ASCII are counted the same way, which errs on the safe side.
+pub fn threads_length(text: &str) -> usize {
+    text.chars().map(|c| if c.is_ascii() { 1 } else { c.len_utf8() }).sum()
+}
+/// What Rosorah learned about the Threads account while posting.
+pub struct ThreadsAccount {
+    /// A renewed token and when it runs out, when renewing worked.
+    pub renewed: Option<(String, u64)>,
+    pub username: String,
+}
+/// Meta's error text; an expired or revoked token gets a plain explanation.
+fn threads_failure(response: reqwest::blocking::Response) -> anyhow::Error {
+    let status = response.status();
+    let body: Value = response.json().unwrap_or_default();
+    if body["error"]["code"].as_i64() == Some(190) {
+        return anyhow::anyhow!("the Threads token has expired or was revoked; paste a new one in Settings");
+    }
+    let message = body["error"]["message"].as_str().filter(|m| !m.is_empty()).map(str::to_owned);
+    anyhow::anyhow!(message.unwrap_or_else(|| format!("HTTP {status}")))
+}
+fn post_threads(token: &str, text: &str, stream: &Stream) -> Result<ThreadsAccount> {
+    ensure!(threads_length(text) <= THREADS_LIMIT, "The message is longer than Threads' {THREADS_LIMIT} characters");
+    let client = client()?;
+    let mut token = token.trim().to_owned();
+    // Renewing gives another 60 days. Meta refuses tokens under a day old, which is fine: the
+    // current one is then still good.
+    let renewed = client
+        .get(format!("{THREADS_API}/refresh_access_token"))
+        .query(&[("grant_type", "th_refresh_token"), ("access_token", token.as_str())])
+        .send()
+        .ok()
+        .filter(|r| r.status().is_success())
+        .and_then(|r| r.json::<Value>().ok())
+        .and_then(|v| {
+            let fresh = v["access_token"].as_str()?.to_owned();
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+            Some((fresh, now + v["expires_in"].as_u64()?))
+        });
+    if let Some((fresh, _)) = &renewed {
+        token = fresh.clone();
+    }
+    let me = client.get(format!("{THREADS_API}/v1.0/me")).query(&[("fields", "username"), ("access_token", token.as_str())]).send().context("Couldn't reach Threads")?;
+    if !me.status().is_success() {
+        return Err(threads_failure(me));
+    }
+    let username = me.json::<Value>()?["username"].as_str().unwrap_or_default().to_owned();
+    // A text post, published as soon as it's made, with a preview card for the first place to watch.
+    let mut form = vec![("media_type", "TEXT"), ("text", text), ("auto_publish_text", "true"), ("access_token", token.as_str())];
+    if let Some((_, url)) = stream.links.first() {
+        form.push(("link_attachment", url.as_str()));
+    }
+    let response = client.post(format!("{THREADS_API}/v1.0/me/threads")).form(&form).send().context("Couldn't reach Threads")?;
+    if !response.status().is_success() {
+        return Err(threads_failure(response));
+    }
+    Ok(ThreadsAccount { renewed, username })
+}
 /// The current time as Bluesky expects it (RFC 3339, UTC).
 fn chrono_now() -> String {
     let now = gst::glib::DateTime::now_utc().ok();
@@ -248,11 +323,12 @@ fn chrono_now() -> String {
 #[derive(Default)]
 pub struct Announcer {
     results: Arc<Mutex<Vec<String>>>,
+    threads: Arc<Mutex<Option<ThreadsAccount>>>,
 }
 impl Announcer {
-    /// Posts to the places switched on in `which` ([Discord, Bluesky]).
-    pub fn send(&self, settings: &Settings, stream: Stream, which: [bool; 2], ctx: &eframe::egui::Context) {
-        let (settings, results, ctx) = (settings.clone(), self.results.clone(), ctx.clone());
+    /// Posts to the places switched on in `which` ([Discord, Bluesky, Threads]).
+    pub fn send(&self, settings: &Settings, stream: Stream, which: [bool; 3], ctx: &eframe::egui::Context) {
+        let (settings, results, threads, ctx) = (settings.clone(), self.results.clone(), self.threads.clone(), ctx.clone());
         std::thread::spawn(move || {
             let text = fill(&settings.message, &stream);
             let mut out = Vec::new();
@@ -280,12 +356,25 @@ impl Announcer {
                     Err(e) => format!("Bluesky announcement failed: {e:#}"),
                 });
             }
+            if which[2] {
+                out.push(match post_threads(&settings.threads_token, &text, &stream) {
+                    Ok(account) => {
+                        *threads.lock().unwrap() = Some(account);
+                        "Announced on Threads".to_owned()
+                    }
+                    Err(e) => format!("Threads announcement failed: {e:#}"),
+                });
+            }
             results.lock().unwrap().extend(out);
             ctx.request_repaint();
         });
     }
     pub fn drain(&self) -> Vec<String> {
         std::mem::take(&mut *self.results.lock().unwrap())
+    }
+    /// The Threads account details from the last successful post, once.
+    pub fn threads_account(&self) -> Option<ThreadsAccount> {
+        self.threads.lock().unwrap().take()
     }
 }
 #[cfg(test)]
@@ -337,6 +426,11 @@ mod tests {
         let picture = load_picture(path.to_str().unwrap()).unwrap();
         assert!(picture.bytes.len() <= IMAGE_LIMIT && picture.mime == "image/jpeg" && picture.name == "big.jpg");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn threads_counts_emoji_as_bytes() {
+        assert_eq!(threads_length("live now"), 8);
+        assert_eq!(threads_length("🔴 live"), 4 + 5);
     }
     #[test]
     fn only_discord_webhooks_are_accepted() {

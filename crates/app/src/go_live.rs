@@ -144,7 +144,7 @@ impl Studio {
                     self.error_line(ui, self.stream_error.clone());
                 }
                 let announce = &self.stream_config.announce;
-                let places = [(announce.discord_ready(), "Discord"), (announce.bluesky_ready(), "Bluesky")];
+                let places = [(announce.discord_ready(), "Discord"), (announce.bluesky_ready(), "Bluesky"), (announce.threads_ready(), "Threads")];
                 if places.iter().any(|(ready, _)| *ready) {
                     ui.separator();
                     ui.horizontal_wrapped(|ui| {

@@ -241,7 +241,7 @@ impl Config {
                 keys.insert(format!("service-{}", s.id), s.destination.key.clone());
             }
         }
-        for (name, secret) in [("discord-webhook", &self.announce.discord_webhook), ("bluesky-password", &self.announce.bluesky_password), ("remote-password", &self.remote_password)] {
+        for (name, secret) in [("discord-webhook", &self.announce.discord_webhook), ("bluesky-password", &self.announce.bluesky_password), ("threads-token", &self.announce.threads_token), ("remote-password", &self.remote_password)] {
             if !secret.is_empty() {
                 keys.insert(name.to_string(), secret.clone());
             }
@@ -259,7 +259,7 @@ impl Config {
                 s.destination.key = k.clone();
             }
         }
-        for (name, secret) in [("discord-webhook", &mut self.announce.discord_webhook), ("bluesky-password", &mut self.announce.bluesky_password), ("remote-password", &mut self.remote_password)] {
+        for (name, secret) in [("discord-webhook", &mut self.announce.discord_webhook), ("bluesky-password", &mut self.announce.bluesky_password), ("threads-token", &mut self.announce.threads_token), ("remote-password", &mut self.remote_password)] {
             if secret.is_empty() && let Some(k) = keys.get(name) {
                 *secret = k.clone();
             }
@@ -275,6 +275,7 @@ impl Config {
         }
         c.announce.discord_webhook.clear();
         c.announce.bluesky_password.clear();
+        c.announce.threads_token.clear();
         c.remote_password.clear();
         c
     }

@@ -491,7 +491,7 @@ pub struct Studio {
     /// Whether this stream has been announced yet.
     announced: bool,
     /// Announcements switched off in the Go live checklist, for this stream only ([Discord, Bluesky]).
-    announce_skip: [bool; 2],
+    announce_skip: [bool; 3],
     updates: crate::updates::Updates,
     update_window: bool,
     update_checked: bool,
@@ -909,7 +909,7 @@ impl Studio {
             announce_picker: None,
             announce_thumb: None,
             announced: false,
-            announce_skip: [false; 2],
+            announce_skip: [false; 3],
             updates: Default::default(),
             // `--page update` (with --screenshot) shows the update window, checking as an old version.
             update_window: page == "update",
@@ -2083,6 +2083,10 @@ impl Studio {
             if count > crate::announce::BLUESKY_LIMIT {
                 ui.colored_label(ui.visuals().warn_fg_color, format!("{count} characters: Bluesky allows {}, so shorten it if you announce there.", crate::announce::BLUESKY_LIMIT));
             }
+            let threads = crate::announce::threads_length(&text);
+            if threads > crate::announce::THREADS_LIMIT {
+                ui.colored_label(ui.visuals().warn_fg_color, format!("{threads} characters as Threads counts them (emoji count as several): Threads allows {}.", crate::announce::THREADS_LIMIT));
+            }
         });
         ui.add_space(12.);
         card().show(ui, |ui| {
@@ -2096,7 +2100,7 @@ impl Studio {
                 ui.colored_label(ui.visuals().warn_fg_color, "That doesn't look like a Discord webhook address.");
             }
             if ui.add_enabled(crate::announce::valid_webhook(&a.discord_webhook), egui::Button::new("Send test")).on_hover_text("Posts the message to Discord now").clicked() {
-                test = Some([true, false]);
+                test = Some([true, false, false]);
             }
         });
         ui.add_space(12.);
@@ -2116,10 +2120,48 @@ impl Studio {
             });
             let ready = !a.bluesky_handle.trim().is_empty() && !a.bluesky_password.trim().is_empty();
             if ui.add_enabled(ready, egui::Button::new("Send test")).on_hover_text("Posts the message to Bluesky now").clicked() {
-                test = Some([false, true]);
+                test = Some([false, true, false]);
             }
         });
-        note(ui, "The webhook address and app password are kept in your system's keyring with your stream keys.");
+        ui.add_space(12.);
+        card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("Threads").heading());
+            ui.checkbox(&mut a.threads, "Announce on Threads");
+            ui.label("Access token");
+            let token = a.threads_token.clone();
+            ui.add(egui::TextEdit::singleline(&mut a.threads_token).password(true).hint_text("Paste the token from your Meta app").desired_width(f32::INFINITY));
+            if a.threads_token != token {
+                // A different token may be a different account, and its age is unknown.
+                a.threads_expires = 0;
+                a.threads_username.clear();
+            }
+            note(ui, "Threads posts need your own (free) Meta app: on developers.facebook.com, create an app with the \"Access the Threads API\" use case, add the threads_basic and threads_content_publish permissions, add your Threads account as a tester (accept the invite in Threads → Settings → Account → Website permissions), then generate an access token and paste it here.");
+            ui.horizontal_wrapped(|ui| {
+                if ui.small_button("Open Meta for Developers").clicked() {
+                    let _ = crate::desktop::open("https://developers.facebook.com/apps/");
+                }
+            });
+            note(ui, "Posts are text with a preview card for your stream link; the image isn't posted on Threads.");
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            if !a.threads_username.is_empty() {
+                note(ui, format!("Posting as @{}", a.threads_username));
+            }
+            if a.threads_expires > 0 {
+                let day = gst::glib::DateTime::from_unix_local(a.threads_expires as i64).ok().and_then(|d| d.format("%e %B %Y").ok()).map(|d| d.trim().to_owned()).unwrap_or_default();
+                if a.threads_expires <= now {
+                    ui.colored_label(ui.visuals().error_fg_color, "This token has expired. Generate a new one and paste it here.");
+                } else if a.threads_expires - now < 7 * 24 * 3600 {
+                    ui.colored_label(ui.visuals().warn_fg_color, format!("This token runs out on {day}. Announce or send a test before then and Rosorah renews it."));
+                } else {
+                    note(ui, format!("Renewed automatically each time you announce; good until {day}."));
+                }
+            }
+            if ui.add_enabled(!a.threads_token.trim().is_empty(), egui::Button::new("Send test")).on_hover_text("Posts the message to Threads now").clicked() {
+                test = Some([false, false, true]);
+            }
+        });
+        note(ui, "The webhook address, app password and Threads token are kept in your system's keyring with your stream keys.");
         if let Some(rx) = &self.announce_picker
             && let Ok(path) = rx.try_recv()
         {
@@ -3462,15 +3504,25 @@ impl Studio {
         for result in self.announcer.drain() {
             self.tell(result);
         }
+        // A renewed Threads token replaces the old one, which stops working once renewed.
+        if let Some(account) = self.announcer.threads_account() {
+            let a = &mut self.stream_config.announce;
+            if let Some((token, expires)) = account.renewed {
+                a.threads_token = token;
+                a.threads_expires = expires;
+            }
+            a.threads_username = account.username;
+            self.save_stream_settings();
+        }
         let Some(stream) = &self.live_stream else {
             self.announced = false;
-            self.announce_skip = [false; 2];
+            self.announce_skip = [false; 3];
             return;
         };
         if !self.announced && stream.destinations().iter().any(|d| d.path.is_none() && d.phase == crate::streaming::Phase::Sending) {
             self.announced = true;
             let a = &self.stream_config.announce;
-            let which = [a.discord_ready() && !self.announce_skip[0], a.bluesky_ready() && !self.announce_skip[1]];
+            let which = [a.discord_ready() && !self.announce_skip[0], a.bluesky_ready() && !self.announce_skip[1], a.threads_ready() && !self.announce_skip[2]];
             if which.iter().any(|w| *w) {
                 self.announcer.send(a, self.announce_stream(), which, ctx);
             }
