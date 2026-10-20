@@ -15,7 +15,7 @@ impl Guide {
  pub fn design_preview(step:usize)->Self{Self{open:true,step:step.min(2),name:"Donation celebration".into(),event:EventKind::Donation,text:"Thank you, {user}, for {amount} {currency}!".into(),..Default::default()}}
  pub fn for_reward(&mut self,id:&str,title:&str){*self=Self::default();self.open=true;self.event=EventKind::Redemption;self.platform=Some(Platform::Twitch);self.reward=id.into();self.name=title.into();}
  pub fn ui(&mut self,ctx:&egui::Context,p:&mut Project,connected:&[Platform])->Option<(Id,bool)>{
-  if !self.open{return None;} if let Some((sound,rx))=&self.picker {if let Ok(path)=rx.try_recv(){if let Some(path)=path {if *sound{self.sound=path.to_string_lossy().into()}else{self.media=path.to_string_lossy().into()}}self.picker=None;}}
+  if !self.open{return None;} if let Some((sound,rx))=&self.picker&& let Ok(path)=rx.try_recv(){if let Some(path)=path {if *sound{self.sound=path.to_string_lossy().into()}else{self.media=path.to_string_lossy().into()}}self.picker=None;}
   let mut open=true;let mut result=None;
   egui::Window::new("Create alert or automation").open(&mut open).default_width(570.).anchor(egui::Align2::CENTER_CENTER,egui::Vec2::ZERO).resizable(true).show(ctx,|ui|{
    ui.horizontal(|ui|{for (i,label) in ["1  When","2  Do","3  Preview & finish"].iter().enumerate(){ui.selectable_value(&mut self.step,i,*label);}});ui.separator();
@@ -80,7 +80,7 @@ impl Guide {
   }
   let mut add=|path:&str,sound:bool|->Option<Id>{if path.is_empty(){return None;}let id=p.id();p.sources.push(Source{id,name:format!("{} · {}",self.name,if sound{"Sound"}else{"Media"}),kind:SourceKind::VideoFile(VideoSettings{path:path.into(),gain:self.gain,audio:sound||self.sound.is_empty(),looped:false,automation_only:true,duration_secs:self.seconds,canvases:vec![canvas.id],..Default::default()})});
    let audio_id=p.id();p.audio.push(AudioChannel{id:audio_id,name:format!("{} · {}",self.name,if sound{"Sound"}else{"Media"}),gain_db:0.,muted:false,tracks:[true,false,false,false,false,false],delay_ms:0,monitor:self.monitor,monitor_only:false,noise_suppression:Default::default(),media_source:Some(id)});
-   if sound {if let Some(s)=p.scenes.iter_mut().find(|s|s.id==canvas.scene){s.layers.push(Layer{ frame: Default::default(), look: Default::default(),source:id,rect:[0.,0.,0.001,0.001],visible:true,locked:true,opacity:0.,crop:[0.;4],group:0});}}
+   if sound&& let Some(s)=p.scenes.iter_mut().find(|s|s.id==canvas.scene){s.layers.push(Layer{ frame: Default::default(), look: Default::default(),source:id,rect:[0.,0.,0.001,0.001],visible:true,locked:true,opacity:0.,crop:[0.;4],group:0});}
    Some(id)};
   let media=add(&self.media,false);let sound=add(&self.sound,true);
   if self.monitor&&(media.is_some()||sound.is_some())&&p.preferences.monitor_device.is_empty(){p.preferences.monitor_device=crate::audio::DEFAULT_MONITOR.into();}

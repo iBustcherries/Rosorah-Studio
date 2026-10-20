@@ -9,7 +9,18 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
 **[Download the latest release](https://github.com/iBustcherries/RosorahStudio-releases/releases/latest)**
 · Windows 10/11 installer, Fedora `.rpm`, Ubuntu/Debian `.deb`
 
-## What's new in 0.39.0
+## What's new in 0.40.0
+
+- **Read paid messages aloud:** Super Chats, donations, cheers and Kicks spoken in a natural voice
+  that runs on your computer, with its own mixer strip.
+- **Browser sources:** local overlay files, custom CSS, keep running or refresh when shown, saved
+  sign-ins, overlays made for OBS, and overlay sound on Windows.
+- **+ Add** opens a dialog, and **Use again** brings in captures, cameras and widgets from your other
+  scenes with live previews.
+- **Chat widget:** well-known bots are hidden, and you can hide any chatter. Right-click their message
+  and choose **Hide from chat widgets**.
+
+## 0.39.0
 
 - **Chat widget:** messages slide and fade in, and out when they're set to disappear. Chatters'
   profile pictures, badges (moderator, VIP, subscriber…) and their own name colours show beside
@@ -18,16 +29,6 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
   in and fade away.
 - **More than one alert box:** one shared box shows everything by default; send any alert to a box
   of its own with **Show in → New alert box…**.
-
-## 0.38.0
-
-- **26 widget themes**, from Material and Windows 98 to Cyberpunk, Cozy café and Game Boy. See-through
-  backgrounds fade only the frame, so text stays crisp.
-- **Emoji and emote picker** in the chat box, with colour emoji and your Twitch, Kick and YouTube
-  emotes. Emotes show as pictures in the on-canvas chat widget.
-- **Bot accounts** for Twitch and Kick, so alerts and timers can post as your bot. **Timers** post
-  chat messages while you're live.
-- A GNOME-style title bar on GNOME.
 
 ## Screenshots
 
@@ -60,7 +61,8 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
   keys, unified Twitch/YouTube/Kick/TikTok chat with moderation, emotes and colour emoji.
 - **Alerts and automations**: follows, subs, gifts, bits and Kicks, raids, channel points, Super
   Chats, donations (StreamElements, Streamlabs, Ko-fi) and chat commands trigger alerts, sounds,
-  chat replies, scene switches and widget updates. Guided setup, built-in sounds and animations,
+  chat replies, scene switches and widget updates, and paid messages can be read aloud. Guided setup,
+  built-in sounds and animations,
   bot accounts and timers.
 - **Widgets**: chat, alerts, goals, now playing (follows your music app), timers, counters, polls,
   checklists, schedules, credits, QR codes and more, in 26 themes.

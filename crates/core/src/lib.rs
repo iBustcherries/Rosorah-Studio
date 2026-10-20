@@ -862,6 +862,27 @@ pub enum ChatSender {
     Bot,
     Streamer,
 }
+/// Reading paid messages aloud: Super Chats, donations, cheers and Kicks.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Speech {
+    pub enabled: bool,
+    /// A Piper voice, such as "en_US-lessac-medium".
+    pub voice: String,
+    /// Starts with "name says:" unless the message already begins with the name.
+    pub read_names: bool,
+    /// Longer messages are cut at a word.
+    pub max_chars: u32,
+    /// Messages with any of these words (comma or line separated) aren't read.
+    pub blocked: String,
+    /// The sound source the speech plays through, made when reading is first turned on.
+    pub source: Option<Id>,
+}
+impl Default for Speech {
+    fn default() -> Self {
+        Self { enabled: false, voice: "en_US-lessac-medium".into(), read_names: true, max_chars: 200, blocked: String::new(), source: None }
+    }
+}
 /// Who and what a shown alert is about, filled in when the alert runs (never saved).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct AlertSubject {
@@ -1138,6 +1159,8 @@ impl Default for BackupPolicy {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Preferences {
     #[serde(default)]
+    pub speech: Speech,
+    #[serde(default)]
     pub backups: BackupPolicy,
     #[serde(default)]
     pub alert_bus: AlertBus,
@@ -1373,6 +1396,7 @@ impl Default for Project {
                 chroma_keys: Default::default(),
                 workspace: Default::default(),
                 automation_history: Default::default(),
+                speech: Default::default(),
                 donations: Default::default(),
                 widget_periods: Default::default(),
                 widget_values: Default::default(),

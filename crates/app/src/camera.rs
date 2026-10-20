@@ -421,6 +421,9 @@ pub fn transform(frame: Frame, settings: &CameraSettings) -> Result<Frame> {
         rgba,
     })
 }
+
+#[cfg(not(windows))]
+fn camera_source(device: &str) -> Result<gst::Element> { gst::ElementFactory::make("v4l2src").property("device", device).build().context("Camera capture needs GStreamer v4l2src") }
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -702,8 +705,5 @@ mod tests {
         Ok(())
     }
 }
-
-#[cfg(not(windows))]
-fn camera_source(device: &str) -> Result<gst::Element> { gst::ElementFactory::make("v4l2src").property("device", device).build().context("Camera capture needs GStreamer v4l2src") }
 #[cfg(windows)]
 include!("platform_windows/camera.rs");

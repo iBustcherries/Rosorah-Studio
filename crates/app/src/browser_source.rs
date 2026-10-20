@@ -26,6 +26,35 @@ pub fn valid_url(url: &str) -> bool {
             && u.password().is_none()
     })
 }
+/// A browser source can also show an overlay saved on this PC (`file:///…`), like OBS's
+/// "Local file" option.
+pub fn valid_source(url: &str) -> bool {
+    valid_url(url) || local_file(url).is_some()
+}
+pub fn local_file(url: &str) -> Option<std::path::PathBuf> {
+    reqwest::Url::parse(url)
+        .ok()
+        .filter(|u| u.scheme() == "file" && u.host_str().is_none_or(|h| h.is_empty() || h == "localhost"))
+        .and_then(|u| u.to_file_path().ok())
+}
+/// Turns what was typed or picked (a web address, a file URL or a plain path) into the address
+/// the page loads.
+pub fn address(text: &str) -> Option<String> {
+    let text = text.trim();
+    if valid_source(text) {
+        return Some(text.to_owned());
+    }
+    let path = std::path::Path::new(text);
+    (path.is_absolute() && path.is_file())
+        .then(|| reqwest::Url::from_file_path(path).ok())
+        .flatten()
+        .map(String::from)
+}
+/// Where a browser source keeps its sign-ins and cookies. Each source has its own, apart from
+/// Rosorah's account sign-ins.
+pub fn storage(id: Id) -> std::path::PathBuf {
+    auroracast_core::platform::config_root().join(format!("rosorah-studio/browser-sources/{id}"))
+}
 pub struct BrowserBackend {
     pub id: Id,
     pub url: String,
@@ -41,7 +70,7 @@ impl Backend for BrowserBackend {
         _: Options,
     ) -> Result<()> {
         self.settings.validate()?;
-        ensure!(valid_url(&self.url), "Use an HTTP or HTTPS browser URL");
+        ensure!(valid_source(&self.url), "Use an HTTP or HTTPS address or a local file");
         ensure!(
             ready(),
             "Browser runtime is not ready; prepare it in source settings"
@@ -62,6 +91,38 @@ impl Backend for BrowserBackend {
         let stdout = child.stdout.take().unwrap();
         let mut config = serde_json::to_value(&self.settings)?;
         config["url"] = self.url.clone().into();
+        config["storage"] = storage(self.id).display().to_string().into();
+        // On Windows the page plays normally and Rosorah records the browser's own sound.
+        config["system_audio"] = cfg!(windows).into();
+        #[cfg(windows)]
+        let windows_audio = self.settings.audio.then(|| {
+            let (pid, bus, id) = (child.id(), self.audio.clone(), self.id);
+            let stop = Arc::new(AtomicBool::new(false));
+            let flag = stop.clone();
+            let worker = std::thread::spawn(move || {
+                // Retries while the page starts its sound process; reports only the first failure.
+                let mut logged = false;
+                while !flag.load(Ordering::Relaxed) {
+                    let result = rosorah_windows::audio::run(rosorah_windows::audio::Input::Process(pid), &flag, |packet| {
+                        let bytes: Vec<u8> = packet.samples.iter().flat_map(|v| v.to_le_bytes()).collect();
+                        bus.push(id, &bytes);
+                        Ok(())
+                    });
+                    if let Err(e) = result
+                        && !std::mem::replace(&mut logged, true)
+                    {
+                        crate::capture_log::event(format!("Browser source sound: {e}"));
+                    }
+                    for _ in 0..20 {
+                        if flag.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+            });
+            (stop, worker)
+        });
         if writeln!(stdin, "{config}").is_err() {
             let _ = child.kill();
             let _ = child.wait();
@@ -99,6 +160,11 @@ impl Backend for BrowserBackend {
         let result = read_packets(stdout, &output, &self.audio, self.id);
         done.store(true, Ordering::Relaxed);
         let _ = controller.join();
+        #[cfg(windows)]
+        if let Some((stop, worker)) = windows_audio {
+            stop.store(true, Ordering::Relaxed);
+            let _ = worker.join();
+        }
         self.audio.clear(self.id);
         result
     }
@@ -152,7 +218,7 @@ fn packet_valid(kind: u32, w: u32, h: u32, n: u32) -> bool {
                 && w * h <= 1920 * 1080
                 && n == w * h * 4
         }
-        2 => w == 0 && h == 0 && n > 0 && n <= 38400 && n % 8 == 0,
+        2 => w == 0 && h == 0 && n > 0 && n <= 38400 && n.is_multiple_of(8),
         3 => w == 0 && h == 0 && n <= 4096,
         _ => false,
     }
@@ -174,6 +240,22 @@ mod tests {
         assert!(valid_url("http://localhost:3000"));
         assert!(!valid_url("file:///etc/passwd"));
         assert!(!valid_url("javascript:alert(1)"));
+        assert!(valid_source("file:///home/me/overlay.html"));
+        assert!(!valid_source("file://server/share/overlay.html"));
+        assert!(!valid_source("javascript:alert(1)"));
+    }
+    #[test]
+    fn typed_paths_become_file_addresses() {
+        let dir = std::env::temp_dir().join(format!("rosorah-overlay-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("my overlay.html");
+        std::fs::write(&file, "<p>hi</p>").unwrap();
+        let url = address(&file.display().to_string()).unwrap();
+        assert!(url.starts_with("file:///") && url.ends_with("my%20overlay.html"));
+        assert_eq!(local_file(&url).unwrap(), file);
+        assert_eq!(address(" https://example.com/a ").as_deref(), Some("https://example.com/a"));
+        assert_eq!(address(&dir.join("missing.html").display().to_string()), None);
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
 
@@ -224,6 +306,7 @@ mod integration_tests {
                     fps: 15,
                     audio: true,
                     enabled: true,
+                    ..Default::default()
                 },
                 audio: bus.clone(),
                 commands: rx,

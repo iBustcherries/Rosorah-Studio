@@ -130,6 +130,21 @@ pub struct Settings {
     pub chat_name_colors: bool,
     /// Chat: set apart paid, first-time and highlighted messages.
     pub chat_highlights: bool,
+    /// Chat: leaves out well-known bots such as Nightbot and StreamElements.
+    pub chat_hide_bots: bool,
+    /// Chat: chatters whose messages never show, separated by commas or lines.
+    pub chat_hidden: String,
+}
+/// Bots many channels use; their messages are left out of chat widgets unless asked for.
+pub const KNOWN_BOTS: [&str; 22] = [
+    "nightbot", "streamelements", "streamlabs", "moobot", "fossabot", "wizebot", "sery_bot",
+    "soundalerts", "streamstickers", "kofistreambot", "botrix", "botrixoficial", "kickbot",
+    "commanderroot", "pokemoncommunitygame", "lumiastream", "blerp", "own3d", "deepbot",
+    "phantombot", "coebot", "songlistbot",
+];
+/// A chatter's name as it's compared: no "@", spaces at the ends or capitals.
+fn chatter(name: &str) -> String {
+    name.trim().trim_start_matches('@').trim().to_lowercase()
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -177,6 +192,8 @@ impl Default for Settings {
             chat_badges: true,
             chat_name_colors: true,
             chat_highlights: true,
+            chat_hide_bots: true,
+            chat_hidden: String::new(),
         }
     }
 }
@@ -227,6 +244,23 @@ impl Default for Sports {
     }
 }
 impl Settings {
+    /// Whether a chat widget leaves out this chatter's messages.
+    pub fn hides_chatter(&self, name: &str) -> bool {
+        let name = chatter(name);
+        (self.chat_hide_bots && KNOWN_BOTS.contains(&name.as_str()))
+            || self.chat_hidden.split([',', '\n']).any(|n| !n.trim().is_empty() && chatter(n) == name)
+    }
+    /// Adds a chatter to this widget's hidden list, unless they're on it already.
+    pub fn hide_chatter(&mut self, name: &str) {
+        let name = name.trim().trim_start_matches('@').trim();
+        if name.is_empty() || self.chat_hidden.split([',', '\n']).any(|n| chatter(n) == chatter(name)) {
+            return;
+        }
+        if !self.chat_hidden.trim().is_empty() {
+            self.chat_hidden = format!("{}, ", self.chat_hidden.trim_end().trim_end_matches(','));
+        }
+        self.chat_hidden.push_str(name);
+    }
     pub fn is_goal(&self) -> bool {
         matches!(
             self.kind,

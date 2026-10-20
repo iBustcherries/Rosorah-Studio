@@ -244,6 +244,15 @@ impl State {
         self.revision = self.revision.wrapping_add(1);
     }
 }
+/// Keeps the rows marked in `keep` (one per message). The timing queues line up with the newest
+/// messages, so they're matched from the end.
+fn keep_rows<T>(rows: &mut VecDeque<T>, keep: &[bool]) {
+    let mut i = keep.len().saturating_sub(rows.len());
+    rows.retain(|_| {
+        i += 1;
+        keep.get(i - 1).copied().unwrap_or(true)
+    });
+}
 #[derive(Clone, Default)]
 pub struct Hub(pub Arc<Mutex<BTreeMap<Id, Arc<Mutex<State>>>>>);
 impl Hub {
@@ -430,7 +439,7 @@ impl Hub {
             let mut s = state.lock().unwrap();
             // Paid messages from donation services count as every platform's.
             let paid = platform == Platform::Donations && look.highlight == "paid" && s.settings.chat_highlights;
-            if s.settings.kind == Kind::Chat && (s.settings.platforms.contains(&platform) || paid) {
+            if s.settings.kind == Kind::Chat && (s.settings.platforms.contains(&platform) || paid) && !s.settings.hides_chatter(author) {
                 s.messages.push_back(format!(
                     "{} · {marks}{}: {}",
                     platform.name(),
@@ -456,6 +465,23 @@ impl Hub {
                 }
                 s.revision = s.revision.wrapping_add(1);
             }
+        }
+    }
+    /// Takes a chatter's messages off chat widgets that now hide them.
+    pub fn drop_hidden(&self) {
+        for state in self.0.lock().unwrap().values() {
+            let mut s = state.lock().unwrap();
+            if s.settings.kind != Kind::Chat {
+                continue;
+            }
+            let keep: Vec<bool> = s.messages.iter().map(|m| !s.settings.hides_chatter(chat_row(m).author)).collect();
+            if keep.iter().all(|k| *k) {
+                continue;
+            }
+            keep_rows(&mut s.messages, &keep);
+            keep_rows(&mut s.arrived, &keep);
+            keep_rows(&mut s.shown, &keep);
+            s.revision = s.revision.wrapping_add(1);
         }
     }
     #[cfg(test)]
@@ -1198,6 +1224,32 @@ mod tests {
         assert_eq!(s.lines(), "Chat\nTwitch · old: first\nTwitch · new: second");
     }
     #[test]
+    fn hidden_chatters_and_bots_stay_out() {
+        let settings = Settings { kind: Kind::Chat, label: "Chat".into(), chat_animate: false, chat_hidden: "RudeViewer, @spammer".into(), ..Default::default() };
+        let hub = Hub::default();
+        hub.0.lock().unwrap().insert(1, Arc::new(Mutex::new(State::new(settings))));
+        for (name, text) in [("Nightbot", "!discord"), ("rudeviewer", "boo"), ("Spammer", "buy followers"), ("friend", "hi"), ("Later", "hello")] {
+            hub.chat(Platform::Twitch, name, text, &ChatLook::default());
+        }
+        let state = hub.0.lock().unwrap()[&1].clone();
+        {
+            let mut s = state.lock().unwrap();
+            assert_eq!(s.messages.len(), 2);
+            // Hiding someone later takes their messages off, keeping the others' timing.
+            s.settings.hide_chatter("later");
+            s.settings.hide_chatter("LATER");
+            assert_eq!(s.settings.chat_hidden, "RudeViewer, @spammer, later");
+        }
+        hub.drop_hidden();
+        let mut s = state.lock().unwrap();
+        assert_eq!((s.messages.len(), s.arrived.len(), s.shown.len()), (1, 1, 1));
+        s.arrived[0] = Instant::now() - crate::avatars::WAIT;
+        assert_eq!(s.lines(), "Chat\nTwitch · friend: hi");
+        // Bots show again when the widget asks for them.
+        s.settings.chat_hide_bots = false;
+        assert!(!s.settings.hides_chatter("nightbot") && s.settings.hides_chatter(" @Spammer "));
+    }
+    #[test]
     fn chat_messages_slide_in_and_out() {
         let settings = Settings { kind: Kind::Chat, label: "Chat".into(), chat_hide_after: 10, theme: Theme::Terminal, ..Default::default() };
         let hub = Hub::default();
@@ -1504,6 +1556,11 @@ pub fn controls(ui: &mut eframe::egui::Ui, s: &mut Settings) {
         ui.checkbox(&mut s.chat_badges, "Badges (moderator, subscriber…)");
         ui.checkbox(&mut s.chat_name_colors, "Names in each chatter's colour");
         ui.checkbox(&mut s.chat_highlights, "Set apart paid, first-time and highlighted messages");
+        ui.checkbox(&mut s.chat_hide_bots, "Hide well-known bots")
+            .on_hover_text("Nightbot, StreamElements, Streamlabs, Moobot, Fossabot, Botrix and other common chat bots");
+        ui.label("Don't show these chatters");
+        ui.add(eframe::egui::TextEdit::multiline(&mut s.chat_hidden).hint_text("Names, separated by commas. Your own bot account, a rude viewer…").desired_rows(2).desired_width(f32::INFINITY));
+        ui.small("You can also right-click someone's message in Chat and choose \"Hide from chat widgets\".");
         ui.horizontal(|ui| {
             let mut hide = s.chat_hide_after > 0;
             if ui.checkbox(&mut hide, "Hide each message after").changed() {
@@ -1832,7 +1889,7 @@ mod widget_regressions {
         };
         compose_media_layout(&mut f, &v, true, auroracast_core::widgets::AlertLayout::Over);
         assert_eq!(f.rgba[3], 0);
-        assert_eq!(f.rgba[(1 * 4 + 1) * 4], 255);
+        assert_eq!(f.rgba[(4 + 1) * 4], 255);
     }
 }
 #[cfg(test)]mod alert_layout_tests{use super::*;use auroracast_core::widgets::AlertLayout;
@@ -1917,5 +1974,38 @@ mod gallery {
                 .unwrap();
             }
         }
+    }
+}
+#[cfg(test)]
+mod readme {
+    use super::*;
+    /// The README's stream picture: ROSORAH_README=<dir> cargo test readme_canvas -- --ignored
+    #[test]
+    #[ignore]
+    fn readme_canvas() {
+        let dir = std::env::var("ROSORAH_README").unwrap();
+        crate::demo::pictures();
+        let mut canvas = image::open(crate::demo::background()).unwrap().to_rgba8();
+        let mut place = |f: Frame, x: u32, y: u32| {
+            let layer = image::RgbaImage::from_raw(f.width, f.height, f.rgba).unwrap();
+            image::imageops::overlay(&mut canvas, &layer, x as i64, y as i64);
+        };
+        let mut rows = String::from("Chat");
+        for (platform, name, color, badges, highlight, text) in crate::demo::CHAT.iter().skip(1) {
+            let badges: Vec<String> = badges.iter().map(|b| b.to_string()).collect();
+            rows.push_str(&format!("\n{} · {}{name}: {text}", platform.name(), chat_look(color, highlight, &badges)));
+        }
+        let mut chat = Settings { kind: Kind::Chat, layout_width: 540, layout_height: 590, label: String::new(), ..Default::default() };
+        chat.apply_theme(Theme::Unified);
+        chat.font_size = 24;
+        place(polished_chat(&chat, &rows, 0), 1350, 230);
+        let mut goal = Settings { kind: Kind::SubGoal, label: "Sub goal: new camera".into(), layout_width: 600, layout_height: 150, target: 50, ..Default::default() };
+        goal.apply_theme(Theme::Material);
+        place(polished_goal(&goal, 37), 40, 40);
+        let mut alert = Settings { kind: Kind::AlertBox, layout_width: 960, layout_height: 300, ..Default::default() };
+        alert.apply_theme(Theme::Material);
+        let subject = auroracast_core::AlertSubject { kind: Some(auroracast_core::EventKind::Raid), platform: Some(Platform::Twitch), author: "NovaRaider".into() };
+        place(polished_alert(&alert, &format!("{}NovaRaider is raiding with 42 viewers!", alert_head(&subject))), 300, 700);
+        canvas.save(format!("{dir}/stream.png")).unwrap();
     }
 }

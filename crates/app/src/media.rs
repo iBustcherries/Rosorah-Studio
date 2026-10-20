@@ -385,6 +385,11 @@ pub fn self_check() -> Result<()> {
     );
     Ok(())
 }
+/// Seconds since Rosorah started, for things that change on a schedule (slideshows).
+pub fn seconds_running() -> f64 {
+    static START: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
+    START.elapsed().as_secs_f64()
+}
 
 #[cfg(test)]
 mod cache_tests {
@@ -481,9 +486,4 @@ mod cache_tests {
         std::fs::remove_file(file)?;
         Ok(())
     }
-}
-/// Seconds since Rosorah started, for things that change on a schedule (slideshows).
-pub fn seconds_running() -> f64 {
-    static START: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
-    START.elapsed().as_secs_f64()
 }

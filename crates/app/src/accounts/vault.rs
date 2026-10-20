@@ -277,6 +277,30 @@ pub(super) fn forget(platform: Platform, config: &ClientConfig) {
     }
 }
 
+pub(super) fn donation_secret(
+    value: Option<&str>,
+    remove: bool,
+    cancel: &AtomicBool,
+) -> Result<Option<String>> {
+    Vault::new()?.operation(Platform::Donations, "donations-v1", value, remove, cancel)
+}
+
+pub(super) fn kofi_secret(
+    value: Option<&str>,
+    remove: bool,
+    cancel: &AtomicBool,
+) -> Result<Option<String>> {
+    Vault::new()?.operation(Platform::Donations, "kofi-v1", value, remove, cancel)
+}
+
+pub(super) fn stream_keys_secret(
+    value: Option<&str>,
+    remove: bool,
+    cancel: &AtomicBool,
+) -> Result<Option<String>> {
+    Vault::new()?.operation(Platform::Donations, "stream-keys-v1", value, remove, cancel)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,28 +356,4 @@ mod tests {
         }
         Ok(())
     }
-}
-
-pub(super) fn donation_secret(
-    value: Option<&str>,
-    remove: bool,
-    cancel: &AtomicBool,
-) -> Result<Option<String>> {
-    Vault::new()?.operation(Platform::Donations, "donations-v1", value, remove, cancel)
-}
-
-pub(super) fn kofi_secret(
-    value: Option<&str>,
-    remove: bool,
-    cancel: &AtomicBool,
-) -> Result<Option<String>> {
-    Vault::new()?.operation(Platform::Donations, "kofi-v1", value, remove, cancel)
-}
-
-pub(super) fn stream_keys_secret(
-    value: Option<&str>,
-    remove: bool,
-    cancel: &AtomicBool,
-) -> Result<Option<String>> {
-    Vault::new()?.operation(Platform::Donations, "stream-keys-v1", value, remove, cancel)
 }

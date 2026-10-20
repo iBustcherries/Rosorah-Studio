@@ -53,7 +53,7 @@ impl Studio{
   let media=self.tools.media_folder.clone();let idle=self.tools.job.is_none();
   ui.horizontal_wrapped(|ui|{
    for (label,found) in [("Find OBS on this computer",crate::external_import::obs_folder()),("Find Firebot on this computer",crate::external_import::firebot_folder())]{
-    if let Some(folder)=found{if ui.add_enabled(idle,egui::Button::new(label)).on_hover_text(folder.display().to_string()).clicked(){let media=media.clone();self.tools.spawn(move||crate::external_import::read(folder,media));}}
+    if let Some(folder)=found&& ui.add_enabled(idle,egui::Button::new(label)).on_hover_text(folder.display().to_string()).clicked(){let media=media.clone();self.tools.spawn(move||crate::external_import::read(folder,media));}
    }
    if ui.add_enabled(idle,egui::Button::new("Choose a file or ZIP…")).on_hover_text("OBS scene collection JSON, profile basic.ini or exported ZIP; Firebot backup ZIP or JSON").clicked(){let media=media.clone();self.tools.spawn(move||crate::external_import::read(crate::utilities::picker(false,false,"Choose OBS or Firebot export")?,media));}
    if ui.add_enabled(idle,egui::Button::new("Choose a folder…")).on_hover_text("An OBS settings folder (obs-studio) or Firebot folder (Firebot/v5)").clicked(){let media=media.clone();self.tools.spawn(move||crate::external_import::read(crate::utilities::picker(false,true,"Choose the OBS or Firebot folder")?,media));}

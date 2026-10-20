@@ -61,11 +61,23 @@ pub struct Captures {
     browser_commands:
         std::collections::BTreeMap<Id, std::sync::mpsc::SyncSender<serde_json::Value>>,
     browser_attempts: std::collections::BTreeMap<Id, std::time::Instant>,
+    /// Browser sources on screen at the last check, for visibility events and "refresh on show".
+    browser_shown: std::collections::BTreeSet<Id>,
+    /// Streaming, recording and scene state that pages read through `window.obsstudio`.
+    browser_state: serde_json::Value,
     cameras: std::collections::BTreeMap<Id, auroracast_core::CameraSettings>,
     camera_errors: std::collections::BTreeMap<Id, String>,
     modes: std::collections::BTreeMap<Id, Target>,
     armed: std::collections::BTreeSet<Id>,
     attempts: std::collections::BTreeMap<Id, std::time::Instant>,
+}
+/// Whether a source shows in the scene on one of the canvases right now.
+fn shown(project: &Project, id: Id) -> bool {
+    project
+        .canvases
+        .iter()
+        .filter_map(|c| project.scene(c.scene))
+        .any(|scene| scene.layers.iter().any(|l| l.visible && l.source == id))
 }
 impl Captures {
     pub fn stop_alert_source(&mut self, id: Id) {
@@ -91,11 +103,9 @@ impl Captures {
                         .widget_periods
                         .get(&source.id)
                         .is_none_or(|key| *key == state.period_key)
-                    {
-                        if let Some(value) = project.preferences.widget_values.get(&source.id) {
+                        && let Some(value) = project.preferences.widget_values.get(&source.id) {
                             state.value = *value;
                         }
-                    }
                     std::sync::Arc::new(std::sync::Mutex::new(state))
                 });
                 {
@@ -150,6 +160,16 @@ impl Captures {
             let _ = tx.try_send(serde_json::json!({"type":kind}));
         }
     }
+    /// Tells every page about streaming, recording and the current scene when they change.
+    pub fn browser_state(&mut self, state: serde_json::Value) {
+        if self.browser_state == state {
+            return;
+        }
+        self.browser_state = state;
+        for tx in self.browser_commands.values() {
+            let _ = tx.try_send(serde_json::json!({"type": "state", "state": self.browser_state}));
+        }
+    }
     pub fn browser_status(&self, id: Id) -> String {
         self.engine
             .snapshot(id)
@@ -168,14 +188,10 @@ impl Captures {
                         .get(&s.id)
                         .cloned()
                         .unwrap_or_default();
-                    if settings.enabled
-                        && crate::browser_source::valid_url(url)
-                        && project
-                            .canvases
-                            .iter()
-                            .filter_map(|c| project.scene(c.scene))
-                            .any(|scene| scene.layers.iter().any(|l| l.visible && l.source == s.id))
-                    {
+                    let shown = shown(project, s.id);
+                    let kept = settings.keep_running
+                        && project.scenes.iter().any(|scene| scene.layers.iter().any(|l| l.source == s.id));
+                    if settings.enabled && crate::browser_source::valid_source(url) && (shown || kept) {
                         return Some((s.id, (url.clone(), settings)));
                     }
                 }
@@ -193,7 +209,25 @@ impl Captures {
             self.browsers.remove(&id);
             self.browser_commands.remove(&id);
             self.browser_attempts.remove(&id);
+            self.browser_shown.remove(&id);
             self.videos.bus.clear(id);
+        }
+        for (&id, (_, settings)) in &desired {
+            let now = shown(project, id);
+            if now == self.browser_shown.contains(&id) {
+                continue;
+            }
+            if now {
+                self.browser_shown.insert(id);
+            } else {
+                self.browser_shown.remove(&id);
+            }
+            if let Some(tx) = self.browser_commands.get(&id) {
+                let _ = tx.try_send(serde_json::json!({"type": "visible", "visible": now}));
+                if now && settings.refresh_on_show {
+                    let _ = tx.try_send(serde_json::json!({"type": "reload"}));
+                }
+            }
         }
         for (id, (url, settings)) in desired {
             if self.browsers.get(&id) != Some(&(url.clone(), settings.clone())) {
@@ -212,7 +246,9 @@ impl Captures {
             {
                 continue;
             }
-            let (tx, rx) = std::sync::mpsc::sync_channel(4);
+            let (tx, rx) = std::sync::mpsc::sync_channel(8);
+            let _ = tx.try_send(serde_json::json!({"type": "visible", "visible": self.browser_shown.contains(&id)}));
+            let _ = tx.try_send(serde_json::json!({"type": "state", "state": self.browser_state}));
             self.browser_commands.insert(id, tx);
             self.browser_attempts.insert(id, std::time::Instant::now());
             if let Err(e) = self.engine.start(
@@ -245,6 +281,7 @@ impl Captures {
                     (v.enabled
                         && (alert_media.contains(&s.id)
                             || project.preferences.overlays.values().any(|o| o.source == s.id)
+                            || project.preferences.speech.source == Some(s.id)
                             || project
                                 .canvases
                                 .iter()
@@ -301,6 +338,10 @@ impl Captures {
                 }
             }
         }
+    }
+    /// Whether a media source is playing or about to.
+    pub fn media_playing(&self, id: Id) -> bool {
+        self.engine.running(id) || self.videos.queued.get(&id).is_some_and(|q| *q > 0)
     }
     pub fn video_failure(&self, id: Id) -> Option<String> {
         self.engine

@@ -1219,7 +1219,7 @@ mod tests {
         let probe = Command::new("ffprobe").args(["-v", "error", "-show_entries", "format=duration:stream=codec_type", "-of", "json"]).arg(&path).output()?;
         let info: serde_json::Value = serde_json::from_slice(&probe.stdout)?;
         let duration: f64 = info["format"]["duration"].as_str().unwrap_or("0").parse()?;
-        assert!(duration >= 4.5 && duration <= 8.5, "clip lasts {duration} s");
+        assert!((4.5..=8.5).contains(&duration), "clip lasts {duration} s");
         let kinds: Vec<_> = info["streams"].as_array().unwrap().iter().map(|s| s["codec_type"].as_str().unwrap_or("").to_owned()).collect();
         assert!(kinds.contains(&"video".to_owned()) && kinds.contains(&"audio".to_owned()), "{kinds:?}");
         REPLAY.lock().unwrap().enabled = false;

@@ -433,51 +433,6 @@ fn run(
         }
     }
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn rejects_unsafe_connection_codes() {
-        for url in [
-            "http://relay.example",
-            "https://name:secret@relay.example",
-            "https://relay.example/path",
-            "https://relay.example?key=x",
-        ] {
-            assert!(
-                Connection {
-                    version: 1,
-                    url: url.into(),
-                    key: "a".repeat(43)
-                }
-                .validate()
-                .is_err()
-            );
-        }
-    }
-    #[test]
-    fn simple_token_setup_and_missed_metadata() {
-        let c = simple_connection("https://relay.example", "example-private-kofi-token").unwrap();
-        assert_eq!(c.version, 2);
-        assert_eq!(c.key.len(), 64);
-        assert!(simple_connection("http://relay.example", "example-private-kofi-token").is_err());
-        let v = json!({"owner":"Ko-fi:one","historical":true,"events":[{"seq":4,"id":"missed","hundredths":1200,"currency":"USD","at_ms":1234}]});
-        let batch = parse_batch(&v).unwrap();
-        assert!(batch.donations[0].historical);
-        assert_eq!(batch.donations[0].at_ms, Some(1234));
-    }
-    #[test]
-    fn normalizes_relay_events_without_losing_currency() {
-        let v = json!({"owner":"Ko-fi:abc","events":[{"seq":8,"id":"payment1","name":"Viewer","message":"hi","hundredths":1200,"currency":"USD"}]});
-        let b = parse_batch(&v).unwrap();
-        assert_eq!(b.seq, 8);
-        assert_eq!(b.donations[0].hundredths, 1200);
-        assert_eq!(b.donations[0].provider, Provider::Kofi);
-        let mut bad = v;
-        bad["events"][0]["hundredths"] = (-1).into();
-        assert!(parse_batch(&bad).is_err());
-    }
-}
 
 fn service_url() -> String {
     let packaged = std::env::current_exe()
@@ -576,10 +531,7 @@ fn run_socket(
                         if matches!(
                             e.kind(),
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                        ) =>
-                    {
-                        ()
-                    }
+                        ) => {}
                     Err(_) => anyhow::bail!("Disconnected"),
                     _ => (),
                 }
@@ -607,5 +559,50 @@ fn run_socket(
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn rejects_unsafe_connection_codes() {
+        for url in [
+            "http://relay.example",
+            "https://name:secret@relay.example",
+            "https://relay.example/path",
+            "https://relay.example?key=x",
+        ] {
+            assert!(
+                Connection {
+                    version: 1,
+                    url: url.into(),
+                    key: "a".repeat(43)
+                }
+                .validate()
+                .is_err()
+            );
+        }
+    }
+    #[test]
+    fn simple_token_setup_and_missed_metadata() {
+        let c = simple_connection("https://relay.example", "example-private-kofi-token").unwrap();
+        assert_eq!(c.version, 2);
+        assert_eq!(c.key.len(), 64);
+        assert!(simple_connection("http://relay.example", "example-private-kofi-token").is_err());
+        let v = json!({"owner":"Ko-fi:one","historical":true,"events":[{"seq":4,"id":"missed","hundredths":1200,"currency":"USD","at_ms":1234}]});
+        let batch = parse_batch(&v).unwrap();
+        assert!(batch.donations[0].historical);
+        assert_eq!(batch.donations[0].at_ms, Some(1234));
+    }
+    #[test]
+    fn normalizes_relay_events_without_losing_currency() {
+        let v = json!({"owner":"Ko-fi:abc","events":[{"seq":8,"id":"payment1","name":"Viewer","message":"hi","hundredths":1200,"currency":"USD"}]});
+        let b = parse_batch(&v).unwrap();
+        assert_eq!(b.seq, 8);
+        assert_eq!(b.donations[0].hundredths, 1200);
+        assert_eq!(b.donations[0].provider, Provider::Kofi);
+        let mut bad = v;
+        bad["events"][0]["hundredths"] = (-1).into();
+        assert!(parse_batch(&bad).is_err());
     }
 }

@@ -53,6 +53,8 @@ fn platform_color(p: Platform) -> Color32 {
 enum ChatAction {
     Moderate(Platform, crate::accounts::Moderation),
     Hide(Platform, String),
+    /// Leave this chatter out of every chat widget.
+    HideFromWidgets(String),
     Clear(Option<Platform>),
 }
 const TIMEOUTS: [u32; 5] = [60, 300, 600, 3600, 86400];
@@ -112,6 +114,9 @@ fn message_menu(
     if ui.button("Hide from panel").clicked() {
         *action = Some(ChatAction::Hide(m.platform, m.id.clone()));
     }
+    if ui.button("Hide from chat widgets").on_hover_text(format!("{}'s messages won't show in your on-screen chat", m.author)).clicked() {
+        *action = Some(ChatAction::HideFromWidgets(m.author.clone()));
+    }
 }
 /// A yes/no question in the middle of the screen. Nothing else can be clicked until it's answered;
 /// Esc counts as Cancel. Returns Some(true) for yes, Some(false) for cancel.
@@ -136,6 +141,106 @@ fn confirm(ctx: &egui::Context, id: &str, title: &str, body: &str, yes: &str) ->
         answer = Some(false);
     }
     answer
+}
+/// Pages of the Add dialog.
+#[derive(Clone, Copy, PartialEq)]
+enum AddView {
+    Main,
+    Widgets,
+    Scenes,
+}
+/// What the Add dialog adds.
+#[derive(Clone, Copy)]
+enum AddChoice {
+    Capture,
+    Camera,
+    Media,
+    Image,
+    Slideshow,
+    Playlist,
+    Scene(Id),
+    Browser,
+    Color,
+    Widget(widgets::Kind),
+    Reuse(Id),
+}
+/// An icon and a short name for a kind of layer.
+fn source_kind_label(kind: &SourceKind) -> (&'static str, &'static str) {
+    match kind {
+        SourceKind::ScreenCapture | SourceKind::Game => ("🖥", "Capture"),
+        SourceKind::VideoCamera(_) | SourceKind::Camera => ("📷", "Camera"),
+        SourceKind::VideoFile(_) => ("🎞", "Media"),
+        SourceKind::Image { .. } => ("🖼", "Image"),
+        SourceKind::Slideshow(_) => ("🗐", "Slideshow"),
+        SourceKind::Browser { .. } => ("🌐", "Browser source"),
+        SourceKind::Color(_) => ("🎨", "Colour"),
+        SourceKind::Widget(w) if w.kind == widgets::Kind::AlertBox => ("🔔", "Alerts"),
+        SourceKind::Widget(w) if w.kind == widgets::Kind::Text => ("✏", "Text"),
+        SourceKind::Widget(w) => ("⚙", w.kind.label()),
+        SourceKind::Scene(_) => ("🗖", "Scene"),
+        SourceKind::ChatOverlay => ("💬", "Chat"),
+        SourceKind::TestPattern => ("▦", "Test pattern"),
+    }
+}
+/// Tiles and cards in the Add dialog stand out a little from the dialog behind them.
+fn tile_frame(ui: &egui::Ui) -> egui::Frame {
+    egui::Frame::new().fill(ui.visuals().widgets.inactive.weak_bg_fill).corner_radius(12).inner_margin(12)
+}
+/// Rows of Add dialog tiles, wrapping, with their tops lined up.
+fn tile_rows<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.with_layout(egui::Layout::left_to_right(egui::Align::Min).with_main_wrap(true), |ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(8., 8.);
+        add(ui)
+    })
+    .inner
+}
+/// One tile in the Add dialog. Returns true when clicked.
+fn add_tile(ui: &mut egui::Ui, icon: &str, title: &str, hint: &str, enabled: bool) -> bool {
+    let size = egui::vec2(160., if hint.is_empty() { 74. } else { 104. });
+    let response = ui
+        .allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
+            tile_frame(ui).show(ui, |ui| {
+                // The frame's margins are inside the tile's size.
+                ui.set_width(size.x - 24.);
+                ui.set_height(size.y - 24.);
+                if !enabled {
+                    ui.multiply_opacity(0.4);
+                }
+                ui.allocate_ui(egui::vec2(size.x - 24., 28.), |ui| ui.label(RichText::new(icon).size(22.)));
+                ui.add(egui::Label::new(RichText::new(title).strong()).truncate());
+                if !hint.is_empty() {
+                    ui.add(egui::Label::new(RichText::new(hint).small().color(muted())).wrap());
+                }
+            })
+        })
+        .inner
+        .response;
+    if !enabled {
+        return false;
+    }
+    let response = response.interact(egui::Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    if response.hovered() {
+        ui.painter().rect_stroke(response.rect, 12, egui::Stroke::new(2.0_f32, ui.visuals().selection.bg_fill), egui::StrokeKind::Inside);
+    }
+    response.clicked()
+}
+/// A small copy of a layer's latest frame that fits in `w`×`h`, for previews.
+fn preview_picture(frame: &rosorah_capture::Frame, w: u32, h: u32) -> Option<egui::ColorImage> {
+    let (fw, fh) = (frame.width as usize, frame.height as usize);
+    if fw == 0 || fh == 0 || frame.rgba.len() < fw * fh * 4 {
+        return None;
+    }
+    let scale = (w as f32 / fw as f32).min(h as f32 / fh as f32).min(1.);
+    let (tw, th) = (((fw as f32 * scale) as usize).max(1), ((fh as f32 * scale) as usize).max(1));
+    let mut pixels = Vec::with_capacity(tw * th * 4);
+    for y in 0..th {
+        let row = (y * fh / th) * fw;
+        for x in 0..tw {
+            let i = (row + x * fw / tw) * 4;
+            pixels.extend_from_slice(&frame.rgba[i..i + 4]);
+        }
+    }
+    Some(egui::ColorImage::from_rgba_unmultiplied([tw, th], &pixels))
 }
 /// Guide and checklist windows stay solid even with see-through panels, so they're easy to read.
 fn solid_window(ctx: &egui::Context) -> egui::Frame {
@@ -480,6 +585,8 @@ pub struct Studio {
     slideshow_folder: Option<(Id, mpsc::Receiver<Option<PathBuf>>)>,
     /// A file chooser for a layer's look-up table (true) or mask (false).
     look_picker: Option<(Id, usize, bool, mpsc::Receiver<Option<PathBuf>>)>,
+    /// A local overlay file being chosen for a browser source.
+    browser_picker: Option<(Id, mpsc::Receiver<Option<PathBuf>>)>,
     /// A sound strip being renamed, and the name typed so far.
     sound_rename: Option<(Id, String)>,
     web_docks: crate::browser_dock::Docks,
@@ -500,6 +607,11 @@ pub struct Studio {
     naming_scene: Option<(Id, String, bool)>,
     /// Name and address being entered for a new web page panel.
     web_dock_dialog: Option<(String, String)>,
+    /// The scene the Add dialog adds to, and which page of it shows.
+    add_dialog: Option<(Id, AddView)>,
+    add_search: String,
+    /// Small pictures for the Add dialog's Use again cards, and when each was made.
+    reuse_previews: std::collections::BTreeMap<Id, (egui::TextureHandle, std::time::Instant)>,
     broadcast_window: u8,
     panels_animating: bool,
     toggle_panel: Option<Panel>,
@@ -556,6 +668,7 @@ pub struct Studio {
     filter: Option<Platform>,
     alerts: AlertEngine,
     automation_editor: crate::automations::Editor,
+    speech: crate::speech::Reader,
     rewards_ui:crate::rewards_ui::RewardsUi,
     automation_queue: crate::automations::Scheduler,
     chat_session: alert_filters::ChatSession,
@@ -610,6 +723,10 @@ pub struct Studio {
     window_changed: Option<Instant>,
     loading: Option<Loading>,
     ui_frames: u32,
+    /// Sample content for screenshots: the sample alert box.
+    demo: Option<Id>,
+    /// `--page demo-add`: opens the Add dialog for a new scene.
+    demo_add: bool,
 }
 impl Studio {
     pub fn new(
@@ -619,6 +736,13 @@ impl Studio {
         screenshot: Option<PathBuf>,
         page: String,
     ) -> Self {
+        // `--page demo` (or demo-alerts, demo-activity…) fills the studio with sample content.
+        let (demo, page) = match page.strip_prefix("demo") {
+            Some(rest) => (true, Some(rest.trim_start_matches('-')).filter(|p| !p.is_empty()).unwrap_or("studio").to_string()),
+            None => (false, page),
+        };
+        let demo_add = demo && page == "add";
+        let demo = demo.then(|| crate::demo::project(&mut project));
         project.prepare_workspace();
         if project.preferences.accent == [141, 101, 255] {
             project.preferences.accent = [208, 188, 255];
@@ -767,7 +891,7 @@ impl Studio {
         let mut bots = [crate::accounts::Account::new_bot(Platform::Twitch), crate::accounts::Account::new_bot(Platform::Kick)];
         bots[0].restore(account_config.twitch.clone());
         bots[1].restore(account_config.kick.clone());
-        let first_run = !project_path.exists();
+        let first_run = !project_path.exists() && demo.is_none();
         let tools=crate::utilities::Tools{guide:first_run.then_some(0),..Default::default()};
         // Recordings cut short by a crash are repaired in the background; the original files are kept.
         let unfinished = crate::utilities::incomplete(std::path::Path::new(&record_folder));
@@ -916,6 +1040,7 @@ impl Studio {
             program_drawn: Instant::now(),
             layer_clipboard: Vec::new(),
             look_picker: None,
+            browser_picker: None,
             slideshow_folder: None,
             web_docks: Default::default(),
             announcer: Default::default(),
@@ -930,6 +1055,9 @@ impl Studio {
             // `--page name-scene` opens the name box in the current scene's pill for screenshots.
             naming_scene: (page == "name-scene").then(|| (scene_for_naming, String::new(), false)),
             web_dock_dialog: None,
+            add_dialog: None,
+            add_search: String::new(),
+            reuse_previews: Default::default(),
             broadcast_window: if page == "add-service" { 3 } else { 0 },
             panels_animating: false,
             frame: 0,
@@ -964,6 +1092,7 @@ impl Studio {
             filter: None,
             alerts: AlertEngine::default(),
             automation_editor: crate::automations::Editor::for_page(&page),
+            speech: Default::default(),
             rewards_ui:Default::default(),
             automation_queue: Default::default(),
             chat_session: {
@@ -1016,6 +1145,8 @@ impl Studio {
             window_placement: crate::window_memory::load(),
             window_changed: None,
             ui_frames: 0,
+            demo,
+            demo_add,
         }
     }
     fn remember_capture_mode(&mut self, id: Id) {
@@ -1093,8 +1224,8 @@ impl Studio {
             self.message = "Choose whether to recover the unsaved project first".into();
             return;
         }
-        if let Some(rx) = self.recovery_write.take() {
-            if matches!(
+        if let Some(rx) = self.recovery_write.take()
+            && matches!(
                 rx.recv_timeout(Duration::from_secs(3)),
                 Err(mpsc::RecvTimeoutError::Timeout)
             ) {
@@ -1103,7 +1234,6 @@ impl Studio {
                     "Recovery save is still finishing. Please save again in a moment.".into();
                 return;
             }
-        }
         self.checkpoint_widgets();
         match crate::edit_history::save_with_backups(&self.project, &self.project_path) {
             Ok(()) => {
@@ -1626,7 +1756,7 @@ impl Studio {
                     .filter(|d| d.kind == "Stream/Output/Audio" && !d.app.is_empty() && !followed.contains(&d.app))
                     .map(|d| (d.app.clone(), crate::app_audio::app_name(d)))
                     .collect();
-                apps.sort_by(|a, b| a.1.to_lowercase().cmp(&b.1.to_lowercase()));
+                apps.sort_by_key(|a| a.1.to_lowercase());
                 apps.dedup_by(|a, b| a.0 == b.0);
                 if apps.is_empty() {
                     note(ui, "No app is playing sound right now. Start it playing, then look again.");
@@ -2280,12 +2410,11 @@ impl Studio {
         replay.enabled = self.replay_on;
         replay.seconds = self.project.preferences.replay_seconds;
         drop(replay);
-        if !self.replay_on {
-            if let Some(stream) = self.replay_stream.take() {
+        if !self.replay_on
+            && let Some(stream) = self.replay_stream.take() {
                 stream.stop();
                 self.replay_stopping.push(stream);
             }
-        }
     }
     /// Keeps the replay buffer fed: from the stream while live, otherwise from an encoder of its own.
     fn replay_tick(&mut self) {
@@ -2720,111 +2849,277 @@ impl Studio {
             });
             ui.add_space(6.);
         }
-        egui::containers::menu::MenuButton::from_button(self.primary_button("+ Add")).ui(ui, |ui| {
-            if ui.button("Game, window or screen").clicked() {
-                ui.close();
+        if ui.add(self.primary_button("+ Add")).clicked() {
+            self.add_dialog = Some((self.project.scenes[si].id, AddView::Main));
+            self.add_search.clear();
+        }
+    }
+    /// Layers from other scenes that can be shown here too, newest first, with what they are and
+    /// where they're used. Nested scenes are left out; add those as a scene instead.
+    fn reusable(&self, si: usize) -> Vec<(Id, String, &'static str, &'static str, String)> {
+        let here = &self.project.scenes[si];
+        let mut items: Vec<_> = self
+            .project
+            .sources
+            .iter()
+            .filter(|s| !matches!(s.kind, SourceKind::Scene(_)) && !here.layers.iter().any(|l| l.source == s.id))
+            .filter_map(|s| {
+                let scenes: Vec<_> = self.project.scenes.iter().filter(|sc| sc.layers.iter().any(|l| l.source == s.id)).map(|sc| sc.name.as_str()).collect();
+                let (icon, kind) = source_kind_label(&s.kind);
+                (!scenes.is_empty()).then(|| (s.id, s.name.clone(), icon, kind, format!("In {}", scenes.join(", "))))
+            })
+            .collect();
+        // Ids only grow, so the newest additions come first.
+        items.sort_by(|a, b| b.0.cmp(&a.0));
+        items
+    }
+    /// Scenes that can be shown inside `scene`: not itself, and none that already contain it.
+    fn nestable(&self, scene: Id) -> Vec<(Id, String)> {
+        self.project.scenes.iter().filter(|s| s.id != scene && !self.project.scene_contains(s.id, scene)).map(|s| (s.id, s.name.clone())).collect()
+    }
+    /// Adds what was chosen in the Add dialog to scene `si`.
+    fn add_choice(&mut self, si: usize, choice: AddChoice) {
+        let scene = self.project.scenes[si].id;
+        match choice {
+            AddChoice::Capture => {
                 let id = self.add_source_layer(si, "Window / Screen", SourceKind::ScreenCapture, [0., 0., 1., 1.]);
                 #[cfg(windows)] self.captures.set_mode(id,rosorah_capture::Target::AutoFullscreen);
                 #[cfg(not(windows))] self.captures.start(id);
                 self.remember_capture_mode(id);
             }
-            if ui.button("Camera").on_hover_text("Webcam, USB camera or DroidCam; choose which in the window that opens").clicked() {
-                ui.close();
+            AddChoice::Camera => {
                 let c = &self.project.canvases[self.canvas];
                 let w = 0.28;
                 let rect = [0.68, 0.05, w, w * c.width as f32 / c.height as f32 * 9. / 16.];
                 self.add_source_layer(si, "Camera", SourceKind::VideoCamera(Default::default()), rect);
-                self.layer_properties = Some((self.project.scenes[si].id, self.project.scenes[si].layers.len() - 1));
+                self.layer_properties = Some((scene, self.project.scenes[si].layers.len() - 1));
             }
-            ui.separator();
             // Choosing a file adds it straight away; there's no separate Add step.
-            if ui.button("Media file · video, GIF or sound").clicked() {
-                ui.close();
-                self.pick_media(self.project.scenes[si].id, MediaPick::File, "Choose a video, GIF or sound");
+            AddChoice::Media => self.pick_media(scene, MediaPick::File, "Choose a video, GIF or sound"),
+            AddChoice::Image => self.pick_media(scene, MediaPick::File, "Choose an image"),
+            AddChoice::Slideshow => self.pick_media(scene, MediaPick::Slideshow, "Choose a folder of pictures"),
+            AddChoice::Playlist => self.pick_media(scene, MediaPick::Playlist, "Choose a folder of videos"),
+            AddChoice::Scene(other) => {
+                if let Some(name) = self.project.scene(other).map(|s| s.name.clone()) {
+                    self.add_source_layer(si, &name, SourceKind::Scene(other), [0., 0., 1., 1.]);
+                }
             }
-            if ui.button("Image").clicked() {
-                ui.close();
-                self.pick_media(self.project.scenes[si].id, MediaPick::File, "Choose an image");
-            }
-            if ui.button("Image slideshow").on_hover_text("Every picture in a folder, in turn").clicked() {
-                ui.close();
-                self.pick_media(self.project.scenes[si].id, MediaPick::Slideshow, "Choose a folder of pictures");
-            }
-            if ui.button("Video playlist").on_hover_text("Every video in a folder, one after another").clicked() {
-                ui.close();
-                self.pick_media(self.project.scenes[si].id, MediaPick::Playlist, "Choose a folder of videos");
-            }
-            // Another scene as one layer; scenes that would contain this one are left out.
-            let here = self.project.scenes[si].id;
-            let others: Vec<(Id, String)> = self.project.scenes.iter().filter(|s| s.id != here && !self.project.scene_contains(s.id, here)).map(|s| (s.id, s.name.clone())).collect();
-            ui.add_enabled_ui(!others.is_empty(), |ui| {
-                ui.menu_button("Scene", |ui| {
-                    note(ui, "Shows another scene as one layer");
-                    for (scene, name) in others {
-                        if ui.button(&name).clicked() {
-                            self.add_source_layer(si, &name, SourceKind::Scene(scene), [0., 0., 1., 1.]);
-                            ui.close();
-                        }
-                    }
-                });
-            });
-            if ui.button("Browser source").clicked() {
-                ui.close();
+            AddChoice::Browser => {
                 let id = self.add_source_layer(si, "Browser source", SourceKind::Browser { url: String::new() }, [0., 0., 1., 1.]);
                 self.project.preferences.browser_sources.insert(id, Default::default());
-                self.layer_properties = Some((self.project.scenes[si].id, self.project.scenes[si].layers.len() - 1));
+                self.layer_properties = Some((scene, self.project.scenes[si].layers.len() - 1));
             }
-            if ui.button("Text").on_hover_text("Write a note on the canvas in any font").clicked() {
-                ui.close();
-                self.add_widget(widgets::Kind::Text);
-            }
-            if ui.button("Color").clicked() {
-                ui.close();
+            AddChoice::Color => {
                 self.add_source_layer(si, "Color source", SourceKind::Color([70, 170, 220, 255]), [0.1, 0.1, 0.3, 0.3]);
             }
-            ui.separator();
-            if ui.button("Alerts").on_hover_text("Shows follows, subs, donations and other alerts on screen").clicked(){self.add_widget(widgets::Kind::AlertBox);ui.close();}
-            ui.menu_button("Widgets", |ui| {
-                note(ui, "Goals, timers, counters, chat on screen and more");
-                egui::ScrollArea::vertical().max_height(430.).show(ui, |ui| {
-                    for kind in widgets::Kind::ALL.into_iter().filter(|k| !matches!(k, widgets::Kind::AlertBox | widgets::Kind::Text)) {
-                        if ui.button(kind.label()).clicked() {
-                            self.add_widget(kind);
-                            ui.close();
+            AddChoice::Widget(kind) => self.add_widget(kind),
+            AddChoice::Reuse(id) => {
+                // Same place and look as where it's already used, so a corner camera stays in its corner.
+                let mut layer = self.project.scenes.iter().flat_map(|s| &s.layers).find(|l| l.source == id).cloned().unwrap_or(Layer { crop: [0.; 4], group: 0, frame: Default::default(), look: Default::default(), source: id, rect: [0., 0., 1., 1.], visible: true, locked: false, opacity: 1. });
+                layer.group = 0;
+                layer.visible = true;
+                layer.locked = false;
+                self.project.scenes[si].layers.push(layer);
+                let index = self.project.scenes[si].layers.len() - 1;
+                self.layer = Some(index);
+                self.selections.insert(scene, vec![index]);
+                self.changed();
+            }
+        }
+    }
+    /// The Add dialog: tiles for new layers, then layers from other scenes with a live picture of each.
+    fn add_dialog_ui(&mut self, ctx: &egui::Context) {
+        let Some((scene, view)) = self.add_dialog else {
+            return;
+        };
+        let Some(si) = self.project.scenes.iter().position(|s| s.id == scene) else {
+            self.add_dialog = None;
+            self.reuse_previews.clear();
+            return;
+        };
+        let all = self.reusable(si);
+        let any = !all.is_empty();
+        let search = self.add_search.trim().to_lowercase();
+        let items: Vec<_> = all.into_iter().filter(|(_, name, ..)| search.is_empty() || name.to_lowercase().contains(&search)).take(24).collect();
+        let others = self.nestable(scene);
+        if view == AddView::Main {
+            self.refresh_previews(ctx, &items);
+        }
+        let mut chosen = None;
+        let mut next_view = None;
+        let mut close = false;
+        let modal = egui::Modal::new(egui::Id::new("add-dialog")).frame(solid_window(ctx)).show(ctx, |ui| {
+            // Five tiles to a row on most screens.
+            let width = ui.ctx().content_rect().width().min(888.) - 40.;
+            ui.set_width(width);
+            ui.set_max_width(width);
+            match view {
+                AddView::Main => {
+                    ui.heading(format!("Add to {}", self.project.scenes[si].name));
+                    ui.add_space(6.);
+                    egui::ScrollArea::vertical().max_height(ui.ctx().content_rect().height() * 0.7).show(ui, |ui| {
+                        ui.strong("New");
+                        ui.add_space(4.);
+                        tile_rows(ui, |ui| {
+                            for (icon, title, hint, choice) in [
+                                ("🖥", "Game, window or screen", "Capture what you're playing", Some(AddChoice::Capture)),
+                                ("📷", "Camera", "Webcam, USB camera or DroidCam", Some(AddChoice::Camera)),
+                                ("🎞", "Media file", "Video, GIF or sound", Some(AddChoice::Media)),
+                                ("🖼", "Image", "A picture or logo", Some(AddChoice::Image)),
+                                ("🗐", "Image slideshow", "Every picture in a folder", Some(AddChoice::Slideshow)),
+                                ("▶", "Video playlist", "Every video in a folder", Some(AddChoice::Playlist)),
+                                ("🌐", "Browser source", "A web page or overlay", Some(AddChoice::Browser)),
+                                ("✏", "Text", "Words in any font", Some(AddChoice::Widget(widgets::Kind::Text))),
+                                ("🎨", "Colour", "A solid colour block", Some(AddChoice::Color)),
+                                ("🔔", "Alerts", "Follows, subs and donations", Some(AddChoice::Widget(widgets::Kind::AlertBox))),
+                                ("⚙", "Widgets", "Chat, goals, timers and more", None),
+                            ] {
+                                if add_tile(ui, icon, title, hint, true) {
+                                    match choice {
+                                        Some(c) => chosen = Some(c),
+                                        None => next_view = Some(AddView::Widgets),
+                                    }
+                                }
+                            }
+                            if add_tile(ui, "🗖", "Scene", "Another scene as one layer", !others.is_empty()) {
+                                next_view = Some(AddView::Scenes);
+                            }
+                        });
+                        if any {
+                            ui.add_space(12.);
+                            ui.horizontal(|ui| {
+                                ui.strong("Use again");
+                                note(ui, "from your other scenes, newest first");
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    ui.add(egui::TextEdit::singleline(&mut self.add_search).hint_text("Search").desired_width(160.));
+                                });
+                            });
+                            ui.add_space(4.);
+                            if items.is_empty() {
+                                note(ui, "Nothing matches that search.");
+                            }
+                            tile_rows(ui, |ui| {
+                                for (id, name, icon, kind, place) in &items {
+                                    if self.reuse_card(ui, *id, name, icon, kind, place) {
+                                        chosen = Some(AddChoice::Reuse(*id));
+                                    }
+                                }
+                            });
+                            note(ui, "A reused layer is the same capture, camera or file: changing its settings changes it in every scene.");
                         }
+                    });
+                }
+                AddView::Widgets => {
+                    if ui.button("← Back").clicked() {
+                        next_view = Some(AddView::Main);
                     }
-                });
-            });
-            // Captures and cameras already set up elsewhere, so one device can appear in several scenes.
-            let here: Vec<_> = self.project.scenes[si].layers.iter().map(|l| l.source).collect();
-            let reusable: Vec<_> = self
-                .project
-                .sources
-                .iter()
-                .filter(|s| matches!(s.kind, SourceKind::ScreenCapture | SourceKind::VideoCamera(_)) && !here.contains(&s.id))
-                .map(|s| {
-                    let scenes: Vec<_> = self.project.scenes.iter().filter(|sc| sc.layers.iter().any(|l| l.source == s.id)).map(|sc| sc.name.as_str()).collect();
-                    let kind = if matches!(s.kind, SourceKind::ScreenCapture) { "capture" } else { "camera" };
-                    let place = if scenes.is_empty() { "not in any scene".to_owned() } else { format!("in {}", scenes.join(", ")) };
-                    (s.id, format!("{} · {kind} · {place}", s.name))
-                })
-                .collect();
-            if !reusable.is_empty() {
-                ui.separator();
-                ui.menu_button("Reuse a capture or camera", |ui| {
-                    for (id, label) in reusable {
-                        if ui.button(label).clicked() {
-                            self.project.scenes[si].layers.push(Layer { crop: [0.;4], group: 0, frame: Default::default(), look: Default::default(), source: id, rect: [0., 0., 1., 1.], visible: true, locked: false, opacity: 1. });
-                            let index = self.project.scenes[si].layers.len() - 1;
-                            self.layer = Some(index);
-                            self.selections.insert(self.project.scenes[si].id, vec![index]);
-                            self.changed();
-                            ui.close();
+                    ui.heading("Widgets");
+                    ui.add_space(6.);
+                    egui::ScrollArea::vertical().max_height(ui.ctx().content_rect().height() * 0.7).show(ui, |ui| {
+                        tile_rows(ui, |ui| {
+                            for kind in widgets::Kind::ALL.into_iter().filter(|k| !matches!(k, widgets::Kind::AlertBox | widgets::Kind::Text)) {
+                                if add_tile(ui, "⚙", kind.label(), "", true) {
+                                    chosen = Some(AddChoice::Widget(kind));
+                                }
+                            }
+                        });
+                    });
+                }
+                AddView::Scenes => {
+                    if ui.button("← Back").clicked() {
+                        next_view = Some(AddView::Main);
+                    }
+                    ui.heading("Show another scene");
+                    note(ui, "It appears here as one layer. Scenes that already contain this one are left out.");
+                    ui.add_space(6.);
+                    tile_rows(ui, |ui| {
+                        for (id, name) in &others {
+                            if add_tile(ui, "🗖", name, "", true) {
+                                chosen = Some(AddChoice::Scene(*id));
+                            }
                         }
-                    }
-                });
+                    });
+                }
+            }
+            ui.add_space(8.);
+            if ui.button("Cancel").clicked() {
+                close = true;
             }
         });
+        if modal.should_close() {
+            close = true;
+        }
+        if let Some(view) = next_view {
+            self.add_dialog = Some((scene, view));
+        }
+        if let Some(choice) = chosen {
+            self.add_choice(si, choice);
+            close = true;
+        }
+        if close {
+            self.add_dialog = None;
+            self.reuse_previews.clear();
+        }
+    }
+    /// Updates the Use again pictures: once a second from running captures, cameras, pages and
+    /// widgets; once for pictures on disk.
+    fn refresh_previews(&mut self, ctx: &egui::Context, items: &[(Id, String, &'static str, &'static str, String)]) {
+        let frames: std::collections::BTreeMap<_, _> = self.captures.reader().latest().into_iter().collect();
+        for (id, ..) in items {
+            let image = match self.project.source(*id).map(|s| &s.kind) {
+                Some(SourceKind::Image { path }) => Some(path.clone()),
+                _ => None,
+            };
+            if self.reuse_previews.get(id).is_some_and(|(_, at)| image.is_some() || at.elapsed() < Duration::from_secs(1)) {
+                continue;
+            }
+            let picture = if let Some(path) = image {
+                image::open(&path).ok().map(|p| {
+                    let small = p.thumbnail(320, 180).to_rgba8();
+                    egui::ColorImage::from_rgba_unmultiplied([small.width() as usize, small.height() as usize], &small)
+                })
+            } else if let Some(Some(frame)) = frames.get(id) {
+                preview_picture(frame, 320, 180)
+            } else {
+                None
+            };
+            if let Some(picture) = picture {
+                let texture = ctx.load_texture(format!("add-preview-{id}"), picture, egui::TextureOptions::LINEAR);
+                self.reuse_previews.insert(*id, (texture, std::time::Instant::now()));
+            }
+        }
+        ctx.request_repaint_after(Duration::from_secs(1));
+    }
+    /// One Use again card: its picture (or an icon), name, kind and the scenes it's in.
+    fn reuse_card(&self, ui: &mut egui::Ui, id: Id, name: &str, icon: &str, kind: &str, place: &str) -> bool {
+        let response = ui
+            .allocate_ui_with_layout(egui::vec2(160., 150.), egui::Layout::top_down(egui::Align::Min), |ui| tile_frame(ui).show(ui, |ui| {
+                ui.set_width(136.);
+                let size = egui::vec2(136., 76.5);
+                let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                if let Some((texture, _)) = self.reuse_previews.get(&id) {
+                    let t = texture.size_vec2();
+                    let scale = (size.x / t.x).min(size.y / t.y);
+                    // A dark backdrop behind see-through widgets and pages.
+                    ui.painter().rect_filled(rect, 8, Color32::from_gray(24));
+                    let picture = egui::Rect::from_center_size(rect.center(), t * scale);
+                    ui.painter().image(texture.id(), picture, egui::Rect::from_min_max(egui::pos2(0., 0.), egui::pos2(1., 1.)), Color32::WHITE);
+                } else {
+                    ui.painter().rect_filled(rect, 8, Color32::from_black_alpha(90));
+                    ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, icon, egui::FontId::proportional(26.), muted());
+                }
+                ui.add_space(4.);
+                ui.add(egui::Label::new(RichText::new(name).strong()).truncate());
+                ui.add(egui::Label::new(RichText::new(format!("{kind} · {place}")).small().color(muted())).truncate());
+            }))
+            .inner
+            .response
+            .interact(egui::Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        if response.hovered() {
+            ui.painter().rect_stroke(response.rect, 12, egui::Stroke::new(2.0_f32, ui.visuals().selection.bg_fill), egui::StrokeKind::Inside);
+        }
+        response.clicked()
     }
     /// Opens the file (or folder) chooser; whatever is picked is added to `scene` straight away.
     fn pick_media(&mut self, scene: Id, kind: MediaPick, title: &'static str) {
@@ -3226,12 +3521,17 @@ impl Studio {
         let draft = self.browser_drafts.entry(id).or_insert(current);
         ui.separator();
         ui.strong("Browser source");
-        ui.add(
-            egui::TextEdit::singleline(&mut draft.0)
-                .hint_text("https://… overlay URL")
-                .password(true),
-        );
-        ui.small("Overlay URLs may contain private tokens. HTTP and HTTPS are supported, including local web servers.");
+        let local = crate::browser_source::local_file(&draft.0).is_some();
+        let mut browse = false;
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut draft.0)
+                    .hint_text("https://… overlay URL, or a file on this PC")
+                    .password(!local),
+            );
+            browse = ui.add_enabled(self.browser_picker.is_none(), egui::Button::new("Local file…")).clicked();
+        });
+        ui.small("Overlay URLs may contain private tokens. Web addresses (including local web servers) and HTML files on this PC both work.");
         ui.checkbox(&mut draft.1.enabled, "Enabled");
         ui.horizontal_wrapped(|ui| {
             ui.add(
@@ -3254,12 +3554,43 @@ impl Studio {
             &mut draft.1.audio,
             "Browser audio · independent mixer channel",
         );
-        ui.small("Up to 1920×1080 or 1080×1920. Hidden sources stop; showing them reloads the page. Transparency follows the webpage's background.");
+        if cfg!(windows) && draft.1.audio {
+            ui.small("On Windows you also hear the page through your speakers; Rosorah still gives it its own mixer strip.");
+        }
+        ui.checkbox(&mut draft.1.keep_running, "Keep running when not shown")
+            .on_hover_text("The page keeps going while it's off screen, so alerts and timers don't restart. Without this, hidden pages stop to save power.");
+        ui.checkbox(&mut draft.1.refresh_on_show, "Refresh the page each time it comes on screen");
+        ui.label("Custom CSS");
+        ui.add(
+            egui::TextEdit::multiline(&mut draft.1.css)
+                .code_editor()
+                .desired_rows(3)
+                .desired_width(f32::INFINITY),
+        );
+        ui.horizontal_wrapped(|ui| {
+            ui.small("Added to the page, as in OBS.");
+            if draft.1.css != auroracast_core::browser::DEFAULT_CSS && ui.small_button("Reset to default").clicked() {
+                draft.1.css = auroracast_core::browser::DEFAULT_CSS.into();
+            }
+        });
+        ui.small("Up to 1920×1080 or 1080×1920. Transparency follows the webpage's background.");
         let apply = ui.button("Apply browser settings").clicked();
-        let next = draft.clone();
+        let mut next = draft.clone();
+        if browse {
+            let (tx, rx) = mpsc::channel();
+            self.browser_picker = Some((id, rx));
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::desktop::pick(crate::desktop::Pick::Open, "Choose an overlay (HTML file)", "").ok().flatten());
+            });
+        }
         if apply {
-            if !crate::browser_source::valid_url(&next.0) {
-                self.message = "Enter a valid HTTP or HTTPS overlay URL".into();
+            if let Some(address) = crate::browser_source::address(&next.0) {
+                next.0 = address;
+            }
+            if !crate::browser_source::valid_source(&next.0) {
+                self.message = "Enter a web address (http:// or https://) or choose an HTML file".into();
+            } else if crate::browser_source::local_file(&next.0).is_some_and(|f| !f.is_file()) {
+                self.message = "That overlay file doesn't exist any more".into();
             } else if let Err(e) = next.1.validate() {
                 self.message = e.to_string();
             } else {
@@ -3291,6 +3622,12 @@ impl Studio {
             }
             if ui.button("Interact").clicked() {
                 self.captures.browser_command(id, "interact");
+            }
+            if ui.button("Forget sign-ins")
+                .on_hover_text("Clears this source's cookies and saved sign-ins")
+                .clicked()
+            {
+                self.captures.browser_command(id, "forget");
             }
         });
         if !crate::browser_source::ready() {
@@ -4420,6 +4757,26 @@ impl Studio {
                 };
             }
             Some(ChatAction::Hide(platform, id)) => self.chat.remove(platform, &id),
+            Some(ChatAction::HideFromWidgets(author)) => {
+                let mut any = false;
+                for source in &mut self.project.sources {
+                    if let SourceKind::Widget(w) = &mut source.kind
+                        && w.kind == widgets::Kind::Chat
+                    {
+                        w.hide_chatter(&author);
+                        any = true;
+                    }
+                }
+                if any {
+                    // The widgets take the new settings first, then drop what's already showing.
+                    self.captures.sync_widgets(&self.project);
+                    self.captures.widgets.drop_hidden();
+                    self.changed();
+                    self.tell(format!("{author} won't show in your chat widgets. Undo this in the chat widget's settings."));
+                } else {
+                    self.tell("Add a chat widget first; then hidden chatters stay out of it.".into());
+                }
+            }
             Some(ChatAction::Clear(Some(platform))) => self.chat.clear_author(platform, ""),
             Some(ChatAction::Clear(None)) => self.chat.clear(),
             None => {}
@@ -4859,6 +5216,7 @@ impl Studio {
         self.panels_animating = false;
         self.scene_dialog_ui(ctx);
         self.web_dock_dialog_ui(ctx);
+        self.add_dialog_ui(ctx);
         if self.screenshot.is_none() {
             if crate::window_memory::track(ctx, &mut self.window_placement) {
                 self.window_changed = Some(Instant::now());
@@ -5832,6 +6190,13 @@ if changed{self.changed();}
             }
             Command::Clear => self.automation_queue.clear(),
             Command::NewAlertBox(rule, step) => self.new_alert_box(rule, step),
+            Command::SpeechTest => self.speech.say("Thanks for the support! This is how paid messages will sound.".into()),
+            Command::SpeechSkip => {
+                self.speech.clear();
+                if let Some(id) = self.project.preferences.speech.source {
+                    self.captures.stop_alert_source(id);
+                }
+            }
             Command::TestWith(id, details) => {
                 let Some(mut rule) = self.project.rules.iter().find(|r| r.id == id).cloned() else {
                     return;
@@ -6036,6 +6401,44 @@ if changed{self.changed();}
             .collect();
         let actions = auroracast_core::automation::actions(&actions, &event);
         self.automation_queue.enqueue(format!("TIMER · {}", rule.name), actions);
+    }
+    /// The sound reading aloud plays through, with a "Read aloud" mixer strip; made when first needed.
+    fn speech_source(&mut self) -> Id {
+        if let Some(id) = self.project.preferences.speech.source.filter(|id| self.project.source(*id).is_some()) {
+            return id;
+        }
+        let id = self.project.id();
+        self.project.sources.push(auroracast_core::Source {
+            id,
+            name: "Read aloud".into(),
+            kind: SourceKind::VideoFile(auroracast_core::VideoSettings {
+                path: crate::speech::output().display().to_string(),
+                audio: true,
+                looped: false,
+                automation_only: true,
+                ..Default::default()
+            }),
+        });
+        let channel = self.project.id();
+        self.project.audio.push(auroracast_core::AudioChannel {
+            id: channel,
+            name: "Read aloud".into(),
+            gain_db: 0.,
+            muted: false,
+            tracks: [true, false, false, false, false, false],
+            delay_ms: 0,
+            monitor: true,
+            monitor_only: false,
+            noise_suppression: Default::default(),
+            media_source: Some(id),
+        });
+        // Heard by the streamer too, like alert sounds.
+        if self.project.preferences.monitor_device.is_empty() {
+            self.project.preferences.monitor_device = crate::audio::DEFAULT_MONITOR.into();
+        }
+        self.project.preferences.speech.source = Some(id);
+        self.changed();
+        id
     }
     fn run_actions(&mut self, actions: Vec<Action>) {
         for action in actions {
@@ -6297,6 +6700,17 @@ impl eframe::App for Studio {
                 self.changed();
             }
         }
+        if let Some((id, rx)) = &self.browser_picker
+            && let Ok(path) = rx.try_recv()
+        {
+            let id = *id;
+            self.browser_picker = None;
+            if let Some(address) = path.and_then(|p| crate::browser_source::address(&p.display().to_string()))
+                && let Some(draft) = self.browser_drafts.get_mut(&id)
+            {
+                draft.0 = address;
+            }
+        }
         if let Some((scene, index, lut, rx)) = &self.look_picker
             && let Ok(path) = rx.try_recv()
         {
@@ -6426,6 +6840,12 @@ impl eframe::App for Studio {
                     self.captures
                         .widgets
                         .activity(platform, &event.author, &event.text);
+                    if self.project.preferences.speech.enabled
+                        && matches!(kind, EventKind::SuperChat | EventKind::Donation | EventKind::Bits)
+                        && let Some(line) = crate::speech::spoken(&event.author, &event.text, &self.project.preferences.speech)
+                    {
+                        self.speech.say(line);
+                    }
                     // Super Chats, donations and Kicks show in chat widgets too, set apart. (Twitch
                     // cheers already arrive as chat messages.)
                     if matches!(kind, EventKind::SuperChat | EventKind::SuperSticker | EventKind::Donation)
@@ -6667,8 +7087,30 @@ impl eframe::App for Studio {
         if self.closing && self.live_stream.is_none() && self.live_recording.is_none() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+        let canvas = &self.project.canvases[0];
+        self.captures.browser_state(serde_json::json!({
+            "streaming": self.live_stream.is_some(),
+            "recording": self.live_recording.is_some(),
+            "replaybuffer": self.replay_on,
+            "virtualcam": self.virtual_camera.is_some(),
+            "scene": self.project.scene(canvas.scene).map(|s| s.name.clone()).unwrap_or_default(),
+            "width": canvas.width,
+            "height": canvas.height,
+        }));
         self.captures.sync_browsers(&self.project);
         self.captures.sync_videos(&self.project);
+        if self.project.preferences.speech.enabled {
+            let id = self.speech_source();
+            if self.speech.tick(&self.project.preferences.speech, self.captures.media_playing(id)) {
+                self.captures.videos.trigger(id);
+            }
+        }
+        let waiting = self.speech.waiting();
+        self.automation_editor.speech_status = match (&self.speech.status, waiting) {
+            (status, 0) => status.clone(),
+            (status, n) if status.is_empty() => format!("{n} waiting to be read"),
+            (status, n) => format!("{status} · {n} waiting"),
+        };
         self.audio.media_bus(self.captures.videos.bus.clone());
         let scene = self.project.canvases[self.canvas].scene;
         if self.audio_scene != Some(scene) {
@@ -6828,6 +7270,25 @@ impl eframe::App for Studio {
         self.toast_ui(ctx);
         if self.custom_title_bar {
             crate::title_bar::resize_edges(ctx);
+        }
+        if let Some(alerts) = self.demo {
+            if self.ui_frames == 2 {
+                crate::demo::pictures();
+                for m in crate::demo::messages() {
+                    self.chat.push(m);
+                }
+                for item in crate::demo::activity() {
+                    self.event_history.insert_new(item);
+                }
+            }
+            if self.ui_frames == 12 {
+                crate::demo::widgets(&self.captures.widgets, alerts);
+                if self.demo_add {
+                    let id = self.project.id();
+                    self.project.scenes.push(Scene { id, name: "Just chatting".into(), layers: vec![] });
+                    self.add_dialog = Some((id, AddView::Main));
+                }
+            }
         }
         if self.screenshot.is_some() && !self.screenshot_requested && self.ui_frames >= 20 && self.started.elapsed() > Duration::from_secs(4) && !self.appearance.busy() {
             self.screenshot_requested = true;
@@ -7237,5 +7698,25 @@ mod cursor_tests {
     fn drag_cursors_return() {
         let expected = if cfg!(windows) { [egui::CursorIcon::PointingHand; 2] } else { [egui::CursorIcon::Grab, egui::CursorIcon::Grabbing] };
         assert_eq!([grab_cursor(), grabbing_cursor()], expected);
+    }
+}
+#[cfg(test)]
+mod reuse_preview_tests {
+    use super::*;
+    #[test]
+    fn previews_fit_and_keep_shape() {
+        let (w, h) = (1920u32, 1080u32);
+        let mut rgba = vec![0u8; (w * h * 4) as usize];
+        for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
+            let x = i as u32 % w;
+            px.copy_from_slice(&if x < w / 2 { [255, 0, 0, 255] } else { [0, 0, 255, 255] });
+        }
+        let picture = preview_picture(&rosorah_capture::Frame { width: w, height: h, rgba }, 320, 180).unwrap();
+        assert_eq!(picture.size, [320, 180]);
+        assert_eq!(picture.pixels[0], Color32::from_rgb(255, 0, 0));
+        assert_eq!(picture.pixels[319], Color32::from_rgb(0, 0, 255));
+        let tall = preview_picture(&rosorah_capture::Frame { width: 1080, height: 1920, rgba: vec![9; 1080 * 1920 * 4] }, 320, 180).unwrap();
+        assert_eq!(tall.size, [101, 180]);
+        assert!(preview_picture(&rosorah_capture::Frame { width: 10, height: 10, rgba: vec![] }, 320, 180).is_none());
     }
 }

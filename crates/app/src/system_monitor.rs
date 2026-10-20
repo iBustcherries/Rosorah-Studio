@@ -23,6 +23,7 @@ impl Default for Resources {
         let (stop, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let mut previous = None;
+            #[allow(clippy::default_constructed_unit_structs)] // Empty on Linux, not on Windows.
             let mut platform = Platform::default();
             loop {
                 let (ticks, ram, gpu) = platform.read();

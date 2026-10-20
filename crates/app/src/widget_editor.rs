@@ -87,8 +87,8 @@ impl Studio {
     }
     fn add_widget(&mut self, kind: widgets::Kind) {
         let scene = self.project.canvases[self.canvas].scene;
-        if kind == widgets::Kind::AlertBox {
-            if let Some(id) = self.project.sources.iter().find(|s| matches!(&s.kind, SourceKind::Widget(w) if w.kind == widgets::Kind::AlertBox)).map(|s|s.id) {
+        if kind == widgets::Kind::AlertBox
+            && let Some(id) = self.project.sources.iter().find(|s| matches!(&s.kind, SourceKind::Widget(w) if w.kind == widgets::Kind::AlertBox)).map(|s|s.id) {
                 if let Some(scene) = self.project.scenes.iter_mut().find(|s|s.id==scene) {
                     let index = if let Some(i)=scene.layers.iter().position(|l|l.source==id) {scene.layers[i].visible=true;i} else {
                         scene.layers.push(Layer{ frame: Default::default(), look: Default::default(),source:id,rect:[0.15,0.1,0.7,0.35],visible:true,locked:false,opacity:1.,crop:[0.;4],group:0});scene.layers.len()-1
@@ -99,7 +99,6 @@ impl Studio {
                 self.widget_editor.id=Some(id);self.widget_editor.sample=true;self.widget_editor.key=0;
                 self.message="Using the shared Alerts box".into();self.changed();return;
             }
-        }
         let id = self.create_widget(kind);
         if kind==widgets::Kind::AlertBox {self.route_visual_alerts(id);}
         self.widget_editor.id = Some(id);
@@ -156,7 +155,7 @@ impl Studio {
      self.widget_controls(ui,id);
      ui.separator();ui.strong("Your styles");ui.small("Styles copy appearance only. Goals, text and connections stay intact.");
      let SourceKind::Widget(settings)=&self.project.source(id).unwrap().kind else{return};let style=widgets::Style::from_settings(settings);
-     ui.horizontal(|ui|{if ui.button("Copy style").clicked(){editor.copied=Some(style.clone());}if ui.add_enabled(editor.copied.is_some(),egui::Button::new("Paste style")).clicked(){if let Some(style)=&editor.copied{self.apply_widget_style(id,style);}}});
+     ui.horizontal(|ui|{if ui.button("Copy style").clicked(){editor.copied=Some(style.clone());}if ui.add_enabled(editor.copied.is_some(),egui::Button::new("Paste style")).clicked()&& let Some(style)=&editor.copied{self.apply_widget_style(id,style);}});
      ui.add(egui::TextEdit::singleline(&mut editor.preset_name).hint_text("Name this style").char_limit(60));
      if ui.add_enabled(!editor.preset_name.trim().is_empty(),egui::Button::new("Save style")).clicked(){self.project.preferences.widget_styles.insert(editor.preset_name.trim().to_string(),style.clone());self.changed();}
      let presets:Vec<_>=self.project.preferences.widget_styles.iter().map(|(n,s)|(n.clone(),s.clone())).collect();
@@ -177,7 +176,7 @@ impl Studio {
     }
     if let Some(texture)=&editor.texture{let aspect=texture.size()[0]as f32/texture.size()[1]as f32;let width=ui.available_width().min(390.*aspect);let (rect,_)=ui.allocate_exact_size(egui::vec2(width,width/aspect),egui::Sense::hover());let painter=ui.painter();painter.rect_filled(rect,12.,Color32::from_rgb(38,42,50));for y in 0..((rect.height()/16.).ceil()as i32){for x in 0..((rect.width()/16.).ceil()as i32){if(x+y)%2==0{painter.rect_filled(egui::Rect::from_min_size(rect.min+egui::vec2(x as f32*16.,y as f32*16.),egui::vec2(16.,16.)).intersect(rect),0.,Color32::from_rgb(43,47,56));}}}painter.image(texture.id(),rect,egui::Rect::from_min_max(egui::pos2(0.,0.),egui::pos2(1.,1.)),Color32::WHITE);}
     ui.add_space(16.);ui.strong("On your canvas");ui.label("Resize or move the widget in the canvas. Right-click its layer to edit it again. A shared source keeps the same settings across canvases.");
-    if let Some(Source{kind:SourceKind::Widget(settings),..})=self.project.source(id){if settings.kind==widgets::Kind::NowPlaying {let (_,status)=crate::music::players();ui.separator();ui.label(status);}}
+    if let Some(Source{kind:SourceKind::Widget(settings),..})=self.project.source(id)&& settings.kind==widgets::Kind::NowPlaying {let (_,status)=crate::music::players();ui.separator();ui.label(status);}
    });
   });
         if !open {

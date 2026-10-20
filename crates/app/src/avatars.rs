@@ -66,11 +66,10 @@ pub fn get(platform: &str, author: &str) -> Option<Arc<RgbaImage>> {
     }
     let key = key(platform, author);
     let mut s = store().lock().unwrap();
-    if let Some((picture, at)) = s.pictures.get(&key) {
-        if picture.is_some() || at.elapsed() < RETRY {
+    if let Some((picture, at)) = s.pictures.get(&key)
+        && (picture.is_some() || at.elapsed() < RETRY) {
             return picture.clone();
         }
-    }
     s.remember(&key);
     let hint = s.hints.get(&key).cloned().unwrap_or_default();
     if hint.starts_with("https://") {
@@ -97,11 +96,10 @@ pub fn picture(url: &str) -> Option<Arc<RgbaImage>> {
     };
     let key = format!("url:{url}");
     let mut s = store().lock().unwrap();
-    if let Some((picture, at)) = s.pictures.get(&key) {
-        if picture.is_some() || at.elapsed() < RETRY {
+    if let Some((picture, at)) = s.pictures.get(&key)
+        && (picture.is_some() || at.elapsed() < RETRY) {
             return picture.clone();
         }
-    }
     s.remember(&key);
     s.loading.insert(key.clone());
     s.send(Job::Download(key, url));
@@ -183,8 +181,8 @@ fn work(rx: mpsc::Receiver<Job>) {
         let mut s = store().lock().unwrap();
         s.loading.remove(&key);
         // Forgotten while it loaded: keep it anyway only if someone still wants it.
-        if s.pictures.contains_key(&key) {
-            s.pictures.insert(key, (picture.map(Arc::new), Instant::now()));
+        if let std::collections::hash_map::Entry::Occupied(mut e) = s.pictures.entry(key) {
+            e.insert((picture.map(Arc::new), Instant::now()));
             drop(s);
             crate::chat_render::canvas_changed();
         }
@@ -228,7 +226,7 @@ fn download(client: &reqwest::blocking::Client, url: &str) -> Option<RgbaImage> 
     }
     Some(image.resize_to_fill(SIZE, SIZE, image::imageops::FilterType::Triangle).to_rgba8())
 }
-#[cfg(test)]
+/// A picture known in advance (sample chatters in screenshots and tests).
 pub fn insert(platform: &str, author: &str, picture: RgbaImage) {
     let mut s = store().lock().unwrap();
     s.pictures.insert(key(platform, author), (Some(Arc::new(picture)), Instant::now()));

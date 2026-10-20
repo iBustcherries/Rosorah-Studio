@@ -67,6 +67,8 @@ mod renderer_capture;
 #[path = "platform_windows/renderer_capture.rs"]
 mod renderer_capture;
 mod snapping;
+mod demo;
+mod speech;
 mod sports;
 mod streaming;
 mod updates;

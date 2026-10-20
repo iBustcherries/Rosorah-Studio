@@ -165,6 +165,10 @@ pub enum Command {
     Clear,
     /// Make another alert box and show this rule's step (rule, step index) in it.
     NewAlertBox(Id, usize),
+    /// Read a sample line aloud with the chosen voice.
+    SpeechTest,
+    /// Stop the line being read and drop the ones waiting.
+    SpeechSkip,
 }
 #[derive(Clone, Debug)]
 pub struct TestEvent {
@@ -228,6 +232,8 @@ pub struct Editor {
     tester: Option<(Id, TestEvent)>,
     samples: Vec<crate::alert_samples::Sample>,
     samples_job: Option<mpsc::Receiver<Result<Vec<crate::alert_samples::Sample>, String>>>,
+    /// What reading aloud is doing (a download, an error), and how many lines wait.
+    pub speech_status: String,
 }
 fn rule_menu(ui: &mut egui::Ui, enabled: bool) -> Option<&'static str> {
     let mut result = None;
@@ -361,6 +367,40 @@ fn mode_label(m: Mode) -> &'static str {
         Mode::Overlap => "Play together",
         Mode::Interrupt => "Newest replaces current",
     }
+}
+/// Reading paid messages aloud: its settings, in a small menu beside the alert queue.
+fn speech_menu(ui: &mut egui::Ui, s: &mut auroracast_core::Speech, status: &str, cmds: &mut Vec<Command>) -> bool {
+    let mut changed = false;
+    ui.menu_button(if s.enabled { "Read aloud · on" } else { "Read aloud · off" }, |ui| {
+        ui.set_min_width(320.);
+        changed |= ui.checkbox(&mut s.enabled, "Read paid messages aloud").changed();
+        ui.small("Super Chats, donations, cheers and Kicks. The voice runs on this computer; it's downloaded the first time (about 90 MB).");
+        ui.horizontal(|ui| {
+            ui.label("Voice");
+            egui::ComboBox::from_id_salt("speech_voice").selected_text(crate::speech::voice(&s.voice).label).show_ui(ui, |ui| {
+                for v in &crate::speech::VOICES {
+                    changed |= ui.selectable_value(&mut s.voice, v.id.to_string(), v.label).changed();
+                }
+            });
+        });
+        changed |= ui.checkbox(&mut s.read_names, "Say who sent it").changed();
+        changed |= ui.add(egui::Slider::new(&mut s.max_chars, 40..=400).text("characters at most")).changed();
+        ui.label("Don't read messages with these words (separate with commas):");
+        changed |= ui.add(egui::TextEdit::multiline(&mut s.blocked).desired_rows(2).desired_width(f32::INFINITY)).changed();
+        ui.horizontal(|ui| {
+            if ui.add_enabled(s.enabled, egui::Button::new("Test")).clicked() {
+                cmds.push(Command::SpeechTest);
+            }
+            if ui.button("Skip / stop").on_hover_text("Stops what's being read and drops the rest").clicked() {
+                cmds.push(Command::SpeechSkip);
+            }
+        });
+        if !status.is_empty() {
+            ui.small(status);
+        }
+        ui.small("Set its volume with the \"Read aloud\" strip in the mixer.");
+    });
+    changed
 }
 /// The Alerts page keeps the queue controls in one small menu that shows what's playing.
 pub fn queue_menu(ui: &mut egui::Ui, q: &mut Scheduler, cmds: &mut Vec<Command>) {
@@ -924,7 +964,10 @@ impl Editor {
     fn editor(&mut self, ui: &mut egui::Ui, p: &mut Project, q: &mut Scheduler, cmds: &mut Vec<Command>) -> bool {
         let mut changed = false;
         ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| queue_menu(ui, q, cmds));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                queue_menu(ui, q, cmds);
+                changed |= speech_menu(ui, &mut p.preferences.speech, &self.speech_status, cmds);
+            });
         });
         let Some(index) = Some(self.selected).filter(|i| p.rules.get(*i).is_some()) else {
             ui.add_space(20.);

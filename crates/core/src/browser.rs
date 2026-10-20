@@ -7,7 +7,16 @@ pub struct Settings {
     pub height: u32,
     pub fps: u32,
     pub audio: bool,
+    /// Stylesheet added to every page, like OBS's "Custom CSS".
+    pub css: String,
+    /// Keeps the page running while it's off screen, so it doesn't miss events.
+    pub keep_running: bool,
+    /// Reloads the page each time it comes on screen.
+    pub refresh_on_show: bool,
 }
+/// OBS's default browser-source stylesheet, so overlays made for OBS look the same.
+pub const DEFAULT_CSS: &str =
+    "body { background-color: rgba(0, 0, 0, 0); margin: 0px auto; overflow: hidden; }";
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -16,6 +25,9 @@ impl Default for Settings {
             height: 720,
             fps: 30,
             audio: true,
+            css: DEFAULT_CSS.into(),
+            keep_running: false,
+            refresh_on_show: false,
         }
     }
 }
@@ -28,6 +40,7 @@ impl Settings {
             "Browser source exceeds 1080p pixel budget"
         );
         anyhow::ensure!((1..=60).contains(&self.fps), "Browser FPS must be 1–60");
+        anyhow::ensure!(self.css.len() <= 64 * 1024, "Custom CSS is too long (64 KB at most)");
         Ok(())
     }
 }

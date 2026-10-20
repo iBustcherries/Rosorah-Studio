@@ -42,7 +42,7 @@ pub fn is_music(d: &Device, extra: &[String]) -> bool {
     if d.kind != "Stream/Output/Audio" || d.app.is_empty() {
         return false;
     }
-    if extra.iter().any(|a| *a == d.app) {
+    if extra.contains(&d.app) {
         return true;
     }
     if browser(d) {
