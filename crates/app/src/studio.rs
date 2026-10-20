@@ -1921,8 +1921,14 @@ impl Studio {
                 State::Downloaded(_, path) => {
                     note(ui, format!("Saved to {}", path.display()));
                     if cfg!(windows) {
-                        if ui.add(self.primary_button("Install now")).on_hover_text("Opens the installer. It asks you to close Rosorah first.").clicked() {
-                            let _ = std::process::Command::new(path).spawn();
+                        // The installer can't replace Rosorah's files while it runs, so Rosorah closes
+                        // (saving as usual) once the installer has started.
+                        let busy = self.live_stream.is_some() || self.live_recording.is_some();
+                        if ui.add_enabled(!busy, self.primary_button("Install now")).on_hover_text("Closes Rosorah and opens the installer").on_disabled_hover_text("Stop streaming and recording first").clicked() {
+                            match std::process::Command::new(path).spawn() {
+                                Ok(_) => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
+                                Err(e) => self.tell(format!("Couldn't open the installer: {e}")),
+                            }
                         }
                     } else {
                         let command = if path.extension().is_some_and(|e| e == "deb") { "sudo apt install" } else { "sudo dnf install" };

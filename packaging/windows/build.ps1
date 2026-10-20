@@ -30,11 +30,8 @@ try {
     Copy-Item 'target/camera/x86_64-pc-windows-msvc/release/rosorah_camera.dll' (Join-Path $Output 'rosorah-camera.dll')
     Copy-Item 'browser' $Output -Recurse
     Copy-Item 'fonts' $Output -Recurse
-    Copy-Item 'docs/windows-integration-checkpoint.md' (Join-Path $Output 'README.md')
-    Copy-Item 'packaging/windows/run.cmd' $Output
     Copy-Item 'packaging/windows/setup.cmd' $Output
     Copy-Item 'docs/windows-third-party' (Join-Path $Output 'THIRD-PARTY') -Recurse
-    Copy-Item 'docs/release-0.31-preview6.md' $Output
-    Copy-Item 'docs/windows-preview-start.md' (Join-Path $Output 'START-HERE.md')
+    Copy-Item 'packaging/windows/installed-readme.md' (Join-Path $Output 'START-HERE.md')
     Get-ChildItem $Output -File | Get-FileHash -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Set-Content (Join-Path $Output 'SHA256SUMS.txt')
 } finally { Pop-Location }

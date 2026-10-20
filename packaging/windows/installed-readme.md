@@ -1,22 +1,34 @@
-# Rosorah Studio Windows preview.9
+# Rosorah Studio for Windows
 
-Close Rosorah, run the Setup EXE, then reopen it from the Start menu.
-The desktop shortcut is optional. Existing projects and settings are retained.
-Internet access is needed for the existing media dependencies; official dependency
-installers may request administrator approval. Setup also installs Python 3.13 for
-your account (if missing) so browser chat can download its PySide6 runtime on first use.
+Start Rosorah Studio from the Start menu (or the desktop shortcut, if you chose one).
 
-This build adds Kick account sign-in and automatic stream-key setup. Open
-Settings → Accounts → Kick → Connect. Kick chat and activity events are not
-included. Windows YouTube sign-in now uses the operating system random generator.
+## Updating
 
-The previous build added automatic fullscreen application and individual-window capture,
-cursor capture, application audio, named audio devices, microphone suppression,
-and music discovery through Windows media controls. See release-0.31-preview8.md.
-Existing projects retain their capture settings. Select Automatic fullscreen
-application explicitly to enable automatic capture; it does not capture a whole
-monitor as a fallback. Windows 11 is recommended for application audio.
+Run the new Setup EXE. Close Rosorah first; the installer asks you to if it is still open.
+Your projects, settings and signed-in accounts are kept, because they are stored apart
+from the application.
 
-The Windows application and installer are cross-compiled. Native Windows
-installation, capture, audio and music need user testing. Injected renderer
-hooks are not included; automatic/window capture uses Windows Graphics Capture.
+## What setup installs
+
+The installer includes GStreamer. If they are missing, it also installs the Microsoft
+Visual C++ Runtime, FFmpeg, and Python 3.13 for your account (browser chat and web page
+sources use Python). These downloads need internet access, and the official installers
+may ask for administrator permission. Your graphics drivers are not changed.
+
+If setup stops part way, `setup.log` in this folder says why. Run the Setup EXE again to retry.
+
+## Virtual camera
+
+Windows 11 can show Rosorah as a webcam in Discord, Zoom or a browser. Press
+**Set up virtual camera** in the Stream panel once (Windows asks for permission).
+After an update, the button may read **Update virtual camera**; press it once more.
+
+## If something goes wrong
+
+- Rosorah's log from the last start is in `%LOCALAPPDATA%\RosorahStudio\logs\startup.log`.
+- Report problems at https://github.com/iBustcherries/Rosorah-Studio/issues.
+
+## Uninstalling
+
+Use Windows Settings → Apps → Installed apps → Rosorah Studio. Your projects and
+settings are left in place.

@@ -78,12 +78,10 @@ rm -rf "$bundle/browser/__pycache__"
 cp -r fonts "$bundle/fonts"
 # Twitch/YouTube sign-in registrations; kept out of git (see .gitignore).
 if [ -f packaging/accounts-defaults.json ]; then cp packaging/accounts-defaults.json "$bundle/"; else echo "WARNING: packaging/accounts-defaults.json is missing, so Twitch and YouTube sign-in will be unavailable in this package." >&2; fi
-cp docs/windows-integration-checkpoint.md "$bundle/README.md"
-cp "$here/run.cmd" "$here/setup.cmd" "$here/setup.ps1" "$here/rosorah.ico" "$bundle/"
+cp "$here/setup.cmd" "$here/setup.ps1" "$here/rosorah.ico" "$bundle/"
 mkdir -p "$bundle/runtime"
 cp "$runtime_msi" "$bundle/runtime/gstreamer-1.26.10.msi"
 cp -r docs/windows-third-party "$bundle/THIRD-PARTY"
-cp docs/release-0.31-preview6.md "$bundle/"
 cp "$here/installed-readme.md" "$bundle/START-HERE.md"
 # cmd.exe misreads batch files without Windows (CRLF) line endings.
 for f in "$bundle"/*.cmd; do sed -i 's/\r$//; s/$/\r/' "$f"; done
@@ -95,6 +93,7 @@ echo "== Building the installer"
     find . -mindepth 1 -type d | sed 's|^\./||' | awk '{print length, $0}' | sort -rn | cut -d' ' -f2- | while read -r d; do printf 'RMDir "$INSTDIR\\%s"\n' "${d//\//\\}"; done
 ) > "$here/uninstall-files.nsh"
 mkdir -p dist
-setup="$root/dist/Rosorah-Studio-0.35.0-Setup.exe"
-makensis -WX -V2 "-DPAYLOAD=$bundle" "-DOUTPUT=$setup" "$here/installer.nsi"
+version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+setup="$root/dist/Rosorah-Studio-$version-Setup.exe"
+makensis -WX -V2 "-DPAYLOAD=$bundle" "-DOUTPUT=$setup" "-DVERSION=$version" "$here/installer.nsi"
 sha256sum "$setup"

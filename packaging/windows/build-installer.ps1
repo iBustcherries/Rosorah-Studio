@@ -1,5 +1,5 @@
 # Run after build.ps1 in x64 Developer PowerShell. Requires NSIS 3 on PATH.
-param([string]$Bundle = 'dist/windows-development', [string]$Output = 'dist/Rosorah-Studio-0.35.0-Setup.exe')
+param([string]$Bundle = 'dist/windows-development', [string]$Output = '')
 $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 Push-Location $root
@@ -21,8 +21,10 @@ try {
         $lines += 'RMDir "$INSTDIR\' + $relative + '"'
     }
     $lines | Set-Content -Encoding utf8 (Join-Path $PSScriptRoot 'uninstall-files.nsh')
+    $version = (Select-String -Path 'Cargo.toml' -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+    if (-not $Output) { $Output = "dist/Rosorah-Studio-$version-Setup.exe" }
     $outputPath = [IO.Path]::GetFullPath($Output)
     New-Item -ItemType Directory -Force (Split-Path $outputPath) | Out-Null
-    & makensis /WX "/DPAYLOAD=$bundlePath" "/DOUTPUT=$outputPath" (Join-Path $PSScriptRoot 'installer.nsi')
+    & makensis /WX "/DPAYLOAD=$bundlePath" "/DOUTPUT=$outputPath" "/DVERSION=$version" (Join-Path $PSScriptRoot 'installer.nsi')
     if ($LASTEXITCODE) { throw 'Installer compilation failed' }
 } finally { Pop-Location }
