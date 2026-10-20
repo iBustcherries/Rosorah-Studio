@@ -1808,7 +1808,10 @@ mod selective_upload_tests {
             &mut previous,
         )?;
         assert_eq!(g.uploads, 3, "stopped source must clear immediately");
-        assert_eq!(g.render(&p, &p.canvases[0], 64, 36)?[0], 16);
+        // The canvas background, not the red frame. Its red is 15.56 after sRGB encoding, and
+        // drivers may round that either way (Mesa RADV gives 15, others 16).
+        let red = g.render(&p, &p.canvases[0], 64, 36)?[0];
+        assert!((15..=16).contains(&red), "stopped source still shown: red = {red}");
         // Replacing a live layer with an image/color must not be overwritten by
         // a frame still present in the asynchronous capture registry.
         p.sources[1].kind = auroracast_core::SourceKind::Color([0, 255, 0, 255]);
