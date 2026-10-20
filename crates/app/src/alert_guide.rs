@@ -98,13 +98,13 @@ impl Guide {
  use super::*;
  #[test]fn guided_media_is_audible_without_disabling_stream_audio(){
   let path=std::env::temp_dir().join(format!("rosorah-alert-audio-{}.wav",std::process::id()));std::fs::write(&path,b"test").unwrap();
-  let result=(||{let mut p=Project::default();let mut g=Guide::default();g.media=path.to_string_lossy().into();let id=g.create(&mut p,false).unwrap();
+  let result=||{let mut p=Project::default();let mut g=Guide::default();g.media=path.to_string_lossy().into();let id=g.create(&mut p,false).unwrap();
    let media=match p.rules.iter().find(|r|r.id==id).unwrap().actions[0]{Action::DisplayAlert{media:Some(id),..}=>id,_=>panic!("missing media")};
    let channel=p.audio.iter().find(|c|c.media_source==Some(media)).unwrap();assert!(channel.monitor);assert!(channel.tracks[0]);assert!(!channel.monitor_only);assert_eq!(p.preferences.monitor_device,crate::audio::DEFAULT_MONITOR);
    assert!(!p.audio_for_scene(p.canvases[0].scene).iter().find(|c|c.media_source==Some(media)).unwrap().muted);
    p.preferences.monitor_device="user-chosen-headphones".into();g.create(&mut p,false).unwrap();assert_eq!(p.preferences.monitor_device,"user-chosen-headphones");
    let mut p=Project::default();g.monitor=false;g.create(&mut p,false).unwrap();assert!(p.preferences.monitor_device.is_empty());assert!(p.audio.iter().filter(|c|c.media_source.is_some()).all(|c|!c.monitor));
-  });result();let _=std::fs::remove_file(path);
+  };result();let _=std::fs::remove_file(path);
  }
 }
 

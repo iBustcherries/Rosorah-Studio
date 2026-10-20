@@ -271,18 +271,6 @@ impl Hub {
             }
         }
     }
-    pub fn alert_text(&self, text: &str, seconds: u32, media: Option<Id>) {
-        for state in self.0.lock().unwrap().values() {
-            let mut s = state.lock().unwrap();
-            if s.settings.kind == Kind::AlertBox && s.queue.len() < 32 {
-                s.queue.push_back((
-                    text.chars().take(400).collect(),
-                    media,
-                    seconds.clamp(1, 60),
-                ));
-            }
-        }
-    }
     pub fn target_alert(&self,id:Id,text:&str,seconds:u32,media:Option<Id>){
         if let Some(s)=self.0.lock().unwrap().get(&id){let mut s=s.lock().unwrap();if s.settings.kind==Kind::AlertBox&&s.queue.len()<32{s.queue.push_back((text.chars().take(400).collect(),media,seconds.clamp(1,60)));}}
     }
@@ -1390,7 +1378,6 @@ pub fn controls(ui: &mut eframe::egui::Ui, s: &mut Settings) {
     }
 }
 
-fn compose_media(frame: &mut Frame, video: &Frame, fit: bool) { compose_media_layout(frame,video,fit,auroracast_core::widgets::AlertLayout::Over); }
 fn compose_media_layout(frame: &mut Frame, video: &Frame, fit: bool, layout:auroracast_core::widgets::AlertLayout) {
     if video.width == 0 || video.height == 0 {
         return;
@@ -1564,7 +1551,7 @@ mod widget_regressions {
             height: 1,
             rgba: [255, 0, 0, 255].repeat(2),
         };
-        compose_media(&mut f, &v, true);
+        compose_media_layout(&mut f, &v, true, auroracast_core::widgets::AlertLayout::Over);
         assert_eq!(f.rgba[3], 0);
         assert_eq!(f.rgba[(1 * 4 + 1) * 4], 255);
     }

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use auroracast_core::{Canvas, Project, SourceKind};
 use auroracast_gpu::{Compositor, test_pattern};
 use std::{
@@ -120,18 +120,18 @@ impl Sources {
     }
 }
 
-pub fn snapshot(project: &Project, output: &Path) -> Result<()> {
+/// Snapshots and demo renders take generated sources only, not live screen or camera capture.
+fn synthetic_only(project: &Project) -> Result<()> {
     project.validate()?;
-    if project.sources.iter().any(|s| {
-        matches!(
-            s.kind,
-            SourceKind::ScreenCapture | SourceKind::VideoCamera(_)
-        )
-    }) {
-        bail!(
-            "Live capture recording/export is not implemented yet. Use a synthetic-only project for this test."
-        );
-    }
+    ensure!(
+        !project.sources.iter().any(|s| matches!(s.kind, SourceKind::ScreenCapture | SourceKind::VideoCamera(_))),
+        "Live capture recording/export is not implemented yet. Use a synthetic-only project for this test."
+    );
+    Ok(())
+}
+
+pub fn snapshot(project: &Project, output: &Path) -> Result<()> {
+    synthetic_only(project)?;
     std::fs::create_dir_all(output)?;
     let mut gpu = pollster::block_on(Compositor::new())?;
     let mut sources = Sources::default();
@@ -240,17 +240,7 @@ impl Drop for Encoder {
 }
 
 pub fn render_demo(project: &Project, output: &Path, seconds: u32) -> Result<()> {
-    project.validate()?;
-    if project.sources.iter().any(|s| {
-        matches!(
-            s.kind,
-            SourceKind::ScreenCapture | SourceKind::VideoCamera(_)
-        )
-    }) {
-        bail!(
-            "Live capture recording/export is not implemented yet. Use a synthetic-only project for this test."
-        );
-    }
+    synthetic_only(project)?;
     // One clock drives all canvases in this first encoder proof.
     let fps = project.canvases[0].fps;
     if project

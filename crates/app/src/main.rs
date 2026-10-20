@@ -1,3 +1,4 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
 mod system_monitor;
 mod accounts;
 mod activity;
@@ -70,7 +71,6 @@ mod video;
 mod virtual_camera;
 mod widgets;
 mod window_memory;
-#[path = "dock_workspace.rs"]
 mod workspace;
 
 use anyhow::{Context, Result, bail};
@@ -84,7 +84,107 @@ fn option(args: &[String], flag: &str) -> Option<String> {
         .cloned()
 }
 
+/// Puts GStreamer and the bundled FFmpeg on the search path, so starting rosorah-studio.exe directly
+/// works as well as starting it from the Rosorah launcher. Without GStreamer it explains and stops.
+#[cfg(windows)]
+fn windows_runtime() {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn MessageBoxW(hwnd: *mut std::ffi::c_void, text: *const u16, title: *const u16, flags: u32) -> i32;
+        fn ShowWindow(hwnd: *mut std::ffi::c_void, show: i32) -> i32;
+        fn IsWindowVisible(hwnd: *mut std::ffi::c_void) -> i32;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetConsoleWindow() -> *mut std::ffi::c_void;
+        fn GetConsoleProcessList(list: *mut u32, count: u32) -> u32;
+        fn AttachConsole(process: u32) -> i32;
+        fn AllocConsole() -> i32;
+        fn GetStdHandle(which: u32) -> *mut std::ffi::c_void;
+        fn SetStdHandle(which: u32, handle: *mut std::ffi::c_void) -> i32;
+        fn GetModuleHandleW(name: *const u16) -> *mut std::ffi::c_void;
+        fn GetProcAddress(module: *mut std::ffi::c_void, name: *const u8) -> *mut std::ffi::c_void;
+    }
+    // Rosorah is a windowed program, so Windows gives it no console. It still needs one: the FFmpeg
+    // and Python helpers it starts would each open a console window without it, and so does
+    // NVIDIA Broadcast's camera driver, which prints a log when the cameras are listed. So it makes
+    // a console with no window (Windows 11 24H2 and later), or uses the command prompt it was
+    // started from. Output the launcher sends to startup.log keeps going there.
+    #[repr(C)]
+    struct AllocConsoleOptions {
+        mode: i32,
+        use_show_window: i32,
+        show_window: u16,
+    }
+    const NO_WINDOW: i32 = 2;
+    const STD_HANDLES: [u32; 3] = [-10i32 as u32, -11i32 as u32, -12i32 as u32];
+    fn hide_own_console() {
+        unsafe {
+            let mut processes = [0u32; 2];
+            let window = GetConsoleWindow();
+            if !window.is_null() && IsWindowVisible(window) != 0 && GetConsoleProcessList(processes.as_mut_ptr(), 2) == 1 {
+                ShowWindow(window, 0);
+            }
+        }
+    }
+    unsafe {
+        if AttachConsole(u32::MAX) == 0 {
+            let saved = STD_HANDLES.map(|h| GetStdHandle(h));
+            let kernel32: Vec<u16> = "kernel32.dll".encode_utf16().chain(Some(0)).collect();
+            let with_options = GetProcAddress(GetModuleHandleW(kernel32.as_ptr()), c"AllocConsoleWithOptions".as_ptr().cast());
+            if with_options.is_null() {
+                // Older Windows: the console has a window, hidden straight away.
+                AllocConsole();
+                hide_own_console();
+            } else {
+                let alloc: unsafe extern "system" fn(*const AllocConsoleOptions, *mut i32) -> i32 = std::mem::transmute(with_options);
+                let mut result = 0;
+                alloc(&AllocConsoleOptions { mode: NO_WINDOW, use_show_window: 0, show_window: 0 }, &mut result);
+            }
+            for (which, handle) in STD_HANDLES.into_iter().zip(saved) {
+                if !handle.is_null() && handle as isize != -1 {
+                    SetStdHandle(which, handle);
+                }
+            }
+        }
+    }
+    let gst = std::env::var_os("GSTREAMER_1_0_ROOT_MSVC_X86_64")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\gstreamer\1.0\msvc_x86_64"));
+    if !gst.join("bin/gstreamer-1.0-0.dll").is_file() {
+        let text: Vec<u16> = "Rosorah Studio can't start because its media runtime (GStreamer) is missing.\n\nRun the Rosorah Studio installer again to repair it."
+            .encode_utf16().chain(Some(0)).collect();
+        let title: Vec<u16> = "Rosorah Studio".encode_utf16().chain(Some(0)).collect();
+        unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), 0x10) };
+        std::process::exit(1);
+    }
+    let mut paths = vec![gst.join("bin")];
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("runtime/ffmpeg-9.0.2-essentials_build/bin"))) {
+        paths.push(dir);
+    }
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    let existing: Vec<PathBuf> = std::env::split_paths(&current).collect();
+    paths.retain(|p| !existing.contains(p));
+    paths.extend(existing);
+    // SAFETY: called first thing in main, before any other thread exists.
+    unsafe {
+        if let Ok(joined) = std::env::join_paths(paths) {
+            std::env::set_var("PATH", joined);
+        }
+        if std::env::var_os("GST_PLUGIN_PATH").is_none() {
+            std::env::set_var("GST_PLUGIN_PATH", gst.join("lib/gstreamer-1.0"));
+        }
+    }
+    // In case anything still opens a console window of its own inside Rosorah.
+    std::thread::spawn(|| loop {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        hide_own_console();
+    });
+}
+
 fn main() -> Result<()> {
+    #[cfg(windows)]
+    windows_runtime();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(

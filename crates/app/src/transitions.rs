@@ -260,19 +260,7 @@ impl Studio {
             name: format!("{label} · {}", path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()),
             kind: SourceKind::VideoFile(auroracast_core::VideoSettings { path: text, audio: true, looped: false, automation_only: true, ..Default::default() }),
         });
-        let audio = self.project.id();
-        self.project.audio.push(auroracast_core::AudioChannel {
-            id: audio,
-            name: label.into(),
-            gain_db: 0.,
-            muted: false,
-            tracks: [true, false, false, false, false, false],
-            delay_ms: 0,
-            monitor: false,
-            monitor_only: false,
-            noise_suppression: Default::default(),
-            media_source: Some(id),
-        });
+        self.project.add_media_audio(id, label.into());
         id
     }
 }

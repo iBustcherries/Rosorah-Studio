@@ -8,6 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod nv12;
+pub use nv12::Nv12;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, PartialEq)]
 struct Vertex {
@@ -236,6 +239,7 @@ pub struct Compositor {
     vertices: Vec<Vertex>,
     params: Vec<LayerParams>,
     draws: Vec<Draw>,
+    nv12: nv12::State,
 }
 
 /// A .cube colour look-up table: its size and RGBA texels (red varying fastest).
@@ -386,6 +390,7 @@ impl Compositor {
             vertices: Vec::new(),
             params: Vec::new(),
             draws: Vec::new(),
+            nv12: Default::default(),
         }
     }
     fn make_source(device: &wgpu::Device, queue: &wgpu::Queue, layout: &wgpu::BindGroupLayout, sampler: &wgpu::Sampler, width: u32, height: u32, rgba: &[u8]) -> SharedSource {
@@ -1482,5 +1487,62 @@ mod look_tests {
         let fading = render(&mut g, &p)?;
         assert!(px(&fading, 18, 16)[0] > 60, "still fading out");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod nv12_tests {
+    use super::*;
+    fn two_colours() -> Result<(Project, Compositor)> {
+        let mut p = Project::default();
+        p.preferences.transition = auroracast_core::Transition::Cut;
+        let id = p.sources[0].id;
+        let mut layer = p.scenes[0].layers[0].clone();
+        (layer.source, layer.rect, layer.visible, layer.opacity, layer.crop) = (id, [0., 0., 1., 1.], true, 1., [0.; 4]);
+        p.scenes[0].layers = vec![layer];
+        let mut g = pollster::block_on(Compositor::new())?;
+        // White on the left half, red on the right.
+        g.upload(id, 2, 1, &[255, 255, 255, 255, 255, 0, 0, 255])?;
+        Ok((p, g))
+    }
+    #[test]
+    #[ignore = "requires Vulkan; exercised in release validation"]
+    fn matches_the_rgba_canvas_and_letterboxes() -> Result<()> {
+        let (p, mut g) = two_colours()?;
+        let rgba = g.render(&p, &p.canvases[0], 32, 16)?;
+        let picture = &g.render_nv12(&p, &p.canvases[0], 32, 16, &[Nv12::same(32, 16).unwrap()])?[0];
+        assert_eq!(picture.len(), 32 * 16 * 3 / 2);
+        for (i, px) in rgba.chunks(4).enumerate() {
+            let [r, g, b] = [px[0], px[1], px[2]].map(|v| v as f32 / 255.);
+            let y = (16. + 219. * (0.2126 * r + 0.7152 * g + 0.0722 * b)).round() as i32;
+            assert!((picture[i] as i32 - y).abs() <= 1, "luma at {i}: {} vs {y}", picture[i]);
+        }
+        // Far left is white, far right red (in video range).
+        assert_eq!((picture[0], picture[31]), (235, 63));
+        let uv = &picture[32 * 16..];
+        assert_eq!((uv[0], uv[1]), (128, 128));
+        assert_eq!((uv[30], uv[31]), (102, 240));
+        // Into a wide picture: black bars left and right, the canvas in the middle.
+        let wide = Nv12::fitted(32, 16, 64, 16).unwrap();
+        assert_eq!(wide.fit, [16, 0, 32, 16]);
+        let picture = &g.render_nv12(&p, &p.canvases[0], 32, 16, &[wide])?[0];
+        assert_eq!((picture[0], picture[15], picture[16], picture[47], picture[63]), (16, 16, 235, 63, 16));
+        // Several frames in flight come back in order.
+        for tag in 0..3 {
+            g.begin_nv12(&p, &p.canvases[0], 32, 16, &[wide], tag)?;
+        }
+        assert_eq!(g.nv12_in_flight(), 3);
+        let mut tags = Vec::new();
+        while g.nv12_in_flight() > 0 {
+            tags.extend(g.finished_nv12(true)?.into_iter().map(|(t, _)| t));
+        }
+        assert_eq!(tags, vec![0, 1, 2]);
+        Ok(())
+    }
+    #[test]
+    fn sizes_the_encoders_cannot_take_are_refused() {
+        assert!(Nv12::same(1366, 768).is_none());
+        assert!(Nv12::same(1920, 1081).is_none());
+        assert_eq!(Nv12::fitted(1080, 1920, 1920, 1080).unwrap().fit, [656, 0, 608, 1080]);
     }
 }

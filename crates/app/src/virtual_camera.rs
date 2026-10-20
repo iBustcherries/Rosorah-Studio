@@ -1,6 +1,7 @@
 //! Rosorah's output as a webcam other apps can pick (Discord, Zoom, browsers). On Linux it's a
 //! v4l2loopback device named "Rosorah Virtual Camera"; on Windows 11 the Rosorah camera component
 //! the installer registers reads frames from a pipe.
+#[cfg(not(windows))]
 pub const NAME: &str = "Rosorah Virtual Camera";
 
 /// The device path when Rosorah's camera exists.

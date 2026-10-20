@@ -3,8 +3,9 @@ use anyhow::{Context, Result, ensure};
 use auroracast_core::CameraSettings;
 use gst::prelude::*;
 use rosorah_capture::{Backend, Frame, Options, Producer};
+#[cfg(not(windows))]
+use std::path::Path;
 use std::{
-    path::Path,
     time::{Duration, Instant},
 };
 use tokio::sync::watch;
@@ -64,9 +65,11 @@ pub fn devices() -> Vec<Device> {
     devices.sort_by(|a, b| a.path.cmp(&b.path));
     devices
 }
+#[cfg(any(not(windows), test))]
 fn selectable_device(flags: u32, driver: &str) -> bool {
     flags & (0x1 | 0x1000) != 0 || (flags & (0x2 | 0x2000) != 0 && loopback_driver(driver))
 }
+#[cfg(any(not(windows), test))]
 fn loopback_driver(driver: &str) -> bool {
     ["v4l2 loopback", "v4l2loopback", "v4l2loopback_dc"]
         .contains(&driver.to_ascii_lowercase().as_str())

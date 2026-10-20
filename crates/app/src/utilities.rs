@@ -28,9 +28,6 @@ pub fn remux(path:PathBuf,mp4:bool)->Result<Finished>{
  if !result.status.success(){anyhow::bail!("Conversion failed. The original is unchanged. {}",String::from_utf8_lossy(&result.stderr).chars().take(800).collect::<String>());}
  ensure!(std::fs::metadata(&temporary)?.len()>0,"Conversion produced an empty file");std::fs::hard_link(&temporary,&output).context("Could not save converted recording without replacing an existing file")?;if !mp4{finish_recording(&path,true);}Ok(Finished::Saved(output))
 }
-pub fn gpu_busy()->Vec<(String,u32)>{
- std::fs::read_dir("/sys/class/drm").into_iter().flatten().filter_map(Result::ok).filter_map(|entry|{let name=entry.file_name().to_string_lossy().into_owned();if !name.starts_with("card")||name.contains('-'){return None}let n=std::fs::read_to_string(entry.path().join("device/gpu_busy_percent")).ok()?.trim().parse::<u32>().ok()?;Some((name,n.min(100)))}).collect()
-}
 
 #[cfg(test)] mod tests {
  use super::*;

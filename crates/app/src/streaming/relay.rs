@@ -2,9 +2,11 @@
 use std::os::fd::AsRawFd;
 use super::{Location, Phase, Setup, State, Target};
 use anyhow::{Context, Result, bail, ensure};
+#[cfg(not(windows))]
+use std::io::Write;
 use std::{
     collections::VecDeque,
-    io::{self, BufRead, BufReader, Read, Write},
+    io::{self, BufRead, BufReader, Read},
     process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,

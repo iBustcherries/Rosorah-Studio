@@ -2,6 +2,7 @@
 //! encoder pipe. Fixed-rate writers share a monotonic clock; missed video is
 //! repeated and missing audio is silence, so a stall never shortens one stream.
 mod encoding;
+pub(crate) mod renderer;
 use anyhow::{Context, Result, bail, ensure};
 use auroracast_core::{Canvas, Id, Project};
 use auroracast_gpu::Compositor;
@@ -48,7 +49,8 @@ pub struct View {
 }
 struct Video {
     at: Duration,
-    rgba: Arc<Vec<u8>>,
+    /// The frame as the encoder takes it (NV12, or RGBA for sizes the graphics card can't convert).
+    data: Arc<Vec<u8>>,
 }
 struct Pcm {
     start: u64,
@@ -276,8 +278,11 @@ pub(crate) fn output_path(folder: &Path) -> Result<PathBuf> {
 enum Output {
     Recording(PathBuf),
     Streaming(crate::streaming::Setup),
-    /// A virtual camera device (Linux) or pipe (Windows).
+    /// A virtual camera device (Linux).
     Camera(String),
+    /// The Windows camera: Rosorah converts frames itself and hands them straight over.
+    #[cfg(windows)]
+    WindowsCamera(rosorah_windows::virtual_camera::Sink),
 }
 impl Output {
     fn path(&self) -> PathBuf {
@@ -285,6 +290,8 @@ impl Output {
             Self::Recording(path) => path.clone(),
             Self::Streaming(setup) => setup.recording.clone().unwrap_or_default(),
             Self::Camera(_) => PathBuf::new(),
+            #[cfg(windows)]
+            Self::WindowsCamera(_) => PathBuf::new(),
         }
     }
 }
@@ -318,8 +325,13 @@ impl Recording {
         Self::start_output(project, canvas, frames, Output::Streaming(setup))
     }
     /// Sends the canvas to a virtual camera until stopped.
+    #[cfg_attr(windows, allow(dead_code))]
     pub fn start_camera(project: &Project, canvas: usize, frames: FrameReader, device: String) -> Result<Self> {
         Self::start_output(project, canvas, frames, Output::Camera(device))
+    }
+    #[cfg(windows)]
+    pub fn start_windows_camera(project: &Project, canvas: usize, frames: FrameReader, sink: rosorah_windows::virtual_camera::Sink) -> Result<Self> {
+        Self::start_output(project, canvas, frames, Output::WindowsCamera(sink))
     }
     fn start_output(
         project: &Project,
@@ -373,7 +385,7 @@ impl Recording {
         let worker = thread::Builder::new()
             .name("rosorah-recording".into())
             .spawn(move || {
-                let recovery=match &output{Output::Recording(path)=>Some(path.clone()),Output::Streaming(setup)=>setup.recording.clone(),Output::Camera(_)=>None};if let Some(path)=&recovery{crate::utilities::mark_recording(path);}
+                let recovery=match &output{Output::Recording(path)=>Some(path.clone()),Output::Streaming(setup)=>setup.recording.clone(),_=>None};if let Some(path)=&recovery{crate::utilities::mark_recording(path);}
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run(&s, p, c, frames, &output)
                 }))
@@ -401,6 +413,7 @@ impl Recording {
         )
     }
     pub fn update_project(&self, project: &Project) {
+        renderer::update_project(project);
         let mut p = self.project.lock().unwrap();
         p.0 += 1;
         p.1 = project.clone();
@@ -451,7 +464,7 @@ fn video_writer(s: Arc<Shared>, mut pipe: impl Write, first: Arc<Vec<u8>>) -> Re
         {
             let mut queue = s.video.lock().unwrap();
             while queue.front().is_some_and(|v| v.at <= at) {
-                last = queue.pop_front().unwrap().rgba;
+                last = queue.pop_front().unwrap().data;
             }
         }
         pipe.write_all(&last)
@@ -570,6 +583,10 @@ fn run(
     frames: FrameReader,
     output: &Output,
 ) -> Result<()> {
+    #[cfg(windows)]
+    if let Output::WindowsCamera(sink) = output {
+        return run_windows_camera(s, project, canvas, frames, sink);
+    }
     let path = output.path();
     let mode = project.lock().unwrap().1.preferences.recording_encoder;
     let cancelled = || s.end.lock().unwrap().is_some();
@@ -580,6 +597,8 @@ fn run(
             encoding::select_stream(&canvas, mode, setup.bitrate, cancelled, report)
         }
         // A camera takes plain frames: nothing to choose.
+        #[cfg(windows)]
+        Output::WindowsCamera(_) => unreachable!(),
         Output::Camera(_) => Ok(encoding::Selection { codecs: encoding::Codecs::software("rawvideo", "pcm_f32le"), details: "Virtual camera (no encoding)".into() }),
     }?;
     let codec = selection.codecs;
@@ -589,34 +608,32 @@ fn run(
         s.end.lock().unwrap().is_none(),
         "Recording cancelled before it started"
     );
-    let mut gpu =
-        pollster::block_on(Compositor::new()).context("Initialize recording compositor")?;
-    let (mut revision, initial) = project.lock().unwrap().clone();
-    let mut slideshow_check = Instant::now();
-    let (mut current, mut active_canvas) = selected_project(&initial, &canvas)?;
-    let mut source_uploads = crate::media::Sources::default();
-    source_uploads.upload(&mut gpu, &current, 0, false)?;
-    let mut previous = BTreeMap::new();
-    let mut used = live_sources(&current);
-    upload_frames(&mut gpu, frames.latest(), &used, &mut previous)?;
-    let first = Arc::new(gpu.render(&current, &active_canvas, canvas.width, canvas.height)?);
+    // Frames come from the shared renderer, already in the encoder's picture format.
+    let format = renderer::Format::for_encoder(&canvas);
+    let initial = project.lock().unwrap().1.clone();
+    selected_project(&initial, &canvas)?;
+    let subscription = renderer::Subscription::new(&initial, frames, &canvas, format, canvas.fps);
+    let first = subscription.first(Duration::from_secs(20))?.data;
+    let nv12 = matches!(format, renderer::Format::Nv12(_));
     // Cancel during setup does not create an empty recording.
     if s.end.lock().unwrap().is_some() {
         bail!("Recording cancelled before it started");
     }
     let (mut encoder, video_pipe, audio_pipe) = match output {
         Output::Recording(path) => {
-            encoding::launch_tracks(&canvas, &codec, path, s.audio_channels / 2)
+            encoding::launch_tracks(&canvas, &codec, path, s.audio_channels / 2, nv12)
         }
-        Output::Streaming(_) => encoding::launch_stream(&canvas, &codec),
-        Output::Camera(device) => encoding::launch_camera(&canvas, device),
+        Output::Streaming(_) => encoding::launch_stream(&canvas, &codec, nv12),
+        Output::Camera(device) => encoding::launch_camera(&canvas, device, nv12),
+        #[cfg(windows)]
+        Output::WindowsCamera(_) => unreachable!(),
     }?;
     let hub = match output {
         Output::Streaming(setup) => Some(crate::streaming::Hub::start(
             encoder.0.stdout.take().unwrap(),
             setup,
         )),
-        Output::Recording(_) | Output::Camera(_) => None,
+        _ => None,
     };
     let mut stderr = encoder.0.stderr.take().unwrap();
     let log = Arc::new(Mutex::new(VecDeque::new()));
@@ -645,7 +662,7 @@ fn run(
     let sa = s.clone();
     let video = writer(s.clone(), move || video_writer(sv, video_pipe, first));
     let audio = writer(s.clone(), move || audio_writer(sa, audio_pipe));
-    let mut next_frame = time_of(1, canvas.fps as u64);
+    let mut last_picture: Option<Instant> = None;
     let mut progress = (0, 0);
     let mut progress_at = [Instant::now(); 2];
     let mut finishing = None;
@@ -668,49 +685,28 @@ fn run(
                 s.abort.store(true, Ordering::Relaxed);
             }
         } else {
-            let now = start.elapsed();
-            if now >= next_frame {
-                s.missed_frames.fetch_add(units(now,canvas.fps as u64).saturating_sub(units(next_frame,canvas.fps as u64)),Ordering::Relaxed);
-                let render_started=Instant::now();
-                let result = (|| -> Result<()> {
-                    {
-                        let p = project.lock().unwrap();
-                        if p.0 != revision {
-                            (current, active_canvas) = selected_project(&p.1, &canvas)?;
-                            source_uploads.upload(&mut gpu, &current, 0, false)?;
-                            used = live_sources(&current);
-                            revision = p.0;
-                            slideshow_check = Instant::now();
+            let period = Duration::from_secs(1) / canvas.fps;
+            match subscription.take(Duration::ZERO) {
+                Ok(pictures) => {
+                    for picture in pictures {
+                        // On the output's frame grid, rounded to the nearest frame.
+                        let at = picture.at.saturating_duration_since(start) + period / 2;
+                        if let Some(last) = last_picture
+                            && picture.at.saturating_duration_since(last) > period * 3 / 2
+                        {
+                            s.missed_frames.fetch_add((picture.at - last).as_nanos() as u64 / period.as_nanos() as u64 - 1, Ordering::Relaxed);
+                        }
+                        last_picture = Some(picture.at);
+                        s.render_ns.store(picture.render.as_nanos() as u64, Ordering::Relaxed);
+                        let mut queue = s.video.lock().unwrap();
+                        queue.push_back(Video { at: time_of(units(at, canvas.fps as u64), canvas.fps as u64), data: picture.data });
+                        while queue.len() > s.video_capacity {
+                            queue.pop_front();
+                            s.queue_drops.fetch_add(1, Ordering::Relaxed);
                         }
                     }
-                    // Slideshows change pictures on a timer, not when the project changes.
-                    if slideshow_check.elapsed() >= Duration::from_millis(500) {
-                        slideshow_check = Instant::now();
-                        if current.sources.iter().any(|s| matches!(s.kind, auroracast_core::SourceKind::Slideshow(_))) {
-                            source_uploads.upload(&mut gpu, &current, 0, false)?;
-                        }
-                    }
-                    upload_frames(&mut gpu, frames.latest(), &used, &mut previous)?;
-                    let rgba = gpu.render(&current, &active_canvas, canvas.width, canvas.height)?;
-                    let mut queue = s.video.lock().unwrap();
-                    queue.push_back(Video {
-                        at: time_of(units(now, canvas.fps as u64), canvas.fps as u64),
-                        rgba: Arc::new(rgba),
-                    });
-                    while queue.len() > s.video_capacity {
-                        queue.pop_front();s.queue_drops.fetch_add(1,Ordering::Relaxed);
-                    }
-                    Ok(())
-                })();
-                s.render_ns.store(render_started.elapsed().as_nanos()as u64,Ordering::Relaxed);
-                s.missed_frames.fetch_add(units(start.elapsed(),canvas.fps as u64).saturating_sub(units(now,canvas.fps as u64)),Ordering::Relaxed);
-                if let Err(e) = result {
-                    s.fail(format!("Recording compositor: {e:#}"));
                 }
-                next_frame = time_of(
-                    units(start.elapsed(), canvas.fps as u64) + 1,
-                    canvas.fps as u64,
-                );
+                Err(e) => s.fail(format!("{e:#}")),
             }
         }
         let current_progress = (
@@ -765,6 +761,35 @@ fn run(
             path.metadata().is_ok_and(|m| m.len() > 512),
             "Encoder did not save a recording"
         );
+    }
+    Ok(())
+}
+
+/// The Windows camera's loop: the renderer draws and converts at the camera's rate and the newest
+/// picture is handed straight over. No encoder and no queue, so each picture reaches apps about one
+/// frame after it's drawn.
+#[cfg(windows)]
+fn run_windows_camera(s: &Arc<Shared>, project: Arc<Mutex<(u64, Project)>>, canvas: Canvas, frames: FrameReader, sink: &rosorah_windows::virtual_camera::Sink) -> Result<()> {
+    use rosorah_windows::virtual_camera::{FPS, HEIGHT, WIDTH};
+    let picture = auroracast_gpu::Nv12::fitted(canvas.width, canvas.height, WIDTH, HEIGHT).context("The camera's picture size")?;
+    let initial = project.lock().unwrap().1.clone();
+    selected_project(&initial, &canvas)?;
+    let subscription = renderer::Subscription::new(&initial, frames, &canvas, renderer::Format::Nv12(picture), FPS);
+    let start = Instant::now();
+    *s.clock.lock().unwrap() = Some(start);
+    {
+        let mut view = s.view.lock().unwrap();
+        view.phase = Phase::Recording;
+        view.encoder = "Virtual camera".into();
+        view.details = "Virtual camera (no encoding)".into();
+    }
+    while s.end.lock().unwrap().is_none() && !s.abort.load(Ordering::Relaxed) {
+        // Only the newest picture matters to a camera.
+        if let Some(picture) = subscription.take(Duration::from_millis(100))?.pop() {
+            sink.send(&picture.data);
+            s.render_ns.store(picture.render.as_nanos() as u64, Ordering::Relaxed);
+            s.video_progress.fetch_add(1, Ordering::Relaxed);
+        }
     }
     Ok(())
 }

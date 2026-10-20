@@ -1,16 +1,16 @@
 //! Rosorah's Windows 11 virtual camera. The camera component (crates/camera) is copied to Program
 //! Files and registered once, with the user's permission. While the camera is on, Rosorah asks
-//! Windows to show it (it disappears again when switched off), FFmpeg writes finished frames into
-//! a private pipe, and a relay hands the newest frame to the component whenever it's reading.
+//! Windows to show it (it disappears again when switched off) and hands the newest finished frame
+//! to the component over a pipe whenever it's reading.
 use anyhow::{Context, Result, bail, ensure};
 use std::{
     fs::File,
-    io::{Read, Write},
+    io::Write,
     os::windows::io::{FromRawHandle, OwnedHandle},
     path::PathBuf,
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -87,9 +87,13 @@ pub fn set_up() -> Result<()> {
     let source = bundled_path().filter(|p| p.exists()).context("The camera component is missing from Rosorah's folder; reinstall Rosorah")?;
     let target = installed_path();
     let folder = target.parent().context("No Program Files folder")?;
+    // Windows' camera service (or an app that listed the cameras) can keep the old component open,
+    // which blocks overwriting it. An open file can still be renamed, so the old one is moved aside
+    // and removed on a later update once nothing is using it.
+    let aside = format!("{}.{}.old", target.display(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()));
     let (source, target, folder, key) = (source.display(), target.display(), folder.display(), key());
     let script = format!(
-        r#"/s /c "mkdir "{folder}" 2>nul & copy /y "{source}" "{target}" >nul && reg add "HKLM\SOFTWARE\Classes\CLSID\{CLSID}" /ve /d "{NAME}" /f >nul && reg add "HKLM\{key}" /ve /d "{target}" /f >nul && reg add "HKLM\{key}" /v ThreadingModel /d Both /f >nul""#
+        r#"/s /c "mkdir "{folder}" 2>nul & del /f /q "{folder}\*.old" 2>nul & (copy /y "{source}" "{target}" >nul 2>nul || (move /y "{target}" "{aside}" >nul && copy /y "{source}" "{target}" >nul)) && reg add "HKLM\SOFTWARE\Classes\CLSID\{CLSID}" /ve /d "{NAME}" /f >nul && reg add "HKLM\{key}" /ve /d "{target}" /f >nul && reg add "HKLM\{key}" /v ThreadingModel /d Both /f >nul""#
     );
     run_elevated(&script)?;
     ensure!(installed(), "The camera wasn't set up");
@@ -127,15 +131,32 @@ fn raw(handle: &OwnedHandle) -> HANDLE {
     HANDLE(handle.as_raw_handle())
 }
 
-/// The newest frame from FFmpeg, numbered so the relay sends each one once.
+/// The newest frame from Rosorah, numbered so each connection gets each frame once.
 struct Latest {
     frame: Mutex<(u64, Vec<u8>)>,
     arrived: Condvar,
+    /// Readers connected now (the camera service may open more than one).
+    clients: AtomicU64,
+}
+/// Where Rosorah hands finished NV12 frames to the camera. Only the newest frame is kept, so a
+/// slow reader skips frames instead of falling behind.
+#[derive(Clone)]
+pub struct Sink(Arc<Latest>);
+impl Sink {
+    /// Takes a WIDTH x HEIGHT NV12 frame.
+    pub fn send(&self, frame: &[u8]) {
+        let mut slot = self.0.frame.lock().unwrap();
+        slot.0 += 1;
+        slot.1.copy_from_slice(&frame[..FRAME_BYTES]);
+        self.0.arrived.notify_all();
+    }
+    /// Frames handed over so far, and how many readers Windows has connected.
+    pub fn stats(&self) -> (u64, u64) {
+        (self.0.frame.lock().unwrap().0, self.0.clients.load(Ordering::Relaxed))
+    }
 }
 /// The camera while it's on: Windows shows it to apps until this is dropped.
 pub struct Camera {
-    /// The pipe FFmpeg writes frames into.
-    pub input: String,
     stop: Arc<AtomicBool>,
     latest: Arc<Latest>,
 }
@@ -143,34 +164,31 @@ impl Camera {
     pub fn start() -> Result<Self> {
         ensure!(installed(), "Set up the virtual camera first");
         let stop = Arc::new(AtomicBool::new(false));
-        let latest = Arc::new(Latest { frame: Mutex::new((0, vec![0; FRAME_BYTES])), arrived: Condvar::new() });
-        let input = format!(r"\\.\pipe\RosorahCameraIn-{}-{:x}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos() as u64);
-        // FFmpeg (running as this user) writes in; the camera service reads out.
-        let incoming = pipe(&input, PIPE_ACCESS_INBOUND, "D:P(A;;GA;;;OW)(A;;GA;;;SY)")?;
+        let latest = Arc::new(Latest { frame: Mutex::new((0, vec![0; FRAME_BYTES])), arrived: Condvar::new(), clients: AtomicU64::new(0) });
         let (s, l) = (stop.clone(), latest.clone());
-        std::thread::spawn(move || receive(incoming, &s, &l));
-        let (s, l) = (stop.clone(), latest.clone());
-        std::thread::spawn(move || send(&s, &l));
+        std::thread::spawn(move || serve(&s, &l));
         let (ready_tx, ready) = std::sync::mpsc::channel();
         let s = stop.clone();
         std::thread::spawn(move || {
             let result = show_camera(&s, &ready_tx);
             let _ = ready_tx.send(result);
         });
-        let camera = Self { input, stop, latest };
+        let camera = Self { stop, latest };
         match ready.recv_timeout(Duration::from_secs(20)) {
             Ok(Ok(())) => Ok(camera),
             Ok(Err(e)) => Err(e),
             Err(_) => bail!("Windows' camera service didn't answer"),
         }
     }
+    pub fn sink(&self) -> Sink {
+        Sink(self.latest.clone())
+    }
 }
 impl Drop for Camera {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         self.latest.arrived.notify_all();
-        // Wake the pipes if they're still waiting for someone to connect.
-        let _ = std::fs::OpenOptions::new().write(true).open(&self.input);
+        // Wake the pipe if it's still waiting for someone to connect.
         let _ = File::open(PIPE);
     }
 }
@@ -180,7 +198,8 @@ fn pipe(name: &str, direction: FILE_FLAGS_AND_ATTRIBUTES, sddl: &str) -> Result<
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         ConvertStringSecurityDescriptorToSecurityDescriptorW(&HSTRING::from(sddl), SDDL_REVISION_1, &mut descriptor, None)?;
         let attributes = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: descriptor.0, bInheritHandle: false.into() };
-        let handle = CreateNamedPipeW(&HSTRING::from(name), direction, PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, 4 << 20, 4 << 20, 0, Some(&attributes));
+        // A buffer of about one frame: a reader is never handed a backlog of old pictures.
+        let handle = CreateNamedPipeW(&HSTRING::from(name), direction, PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, PIPE_UNLIMITED_INSTANCES, FRAME_BYTES as u32, 0, 0, Some(&attributes));
         let _ = LocalFree(HLOCAL(descriptor.0));
         ensure!(handle != INVALID_HANDLE_VALUE, "Couldn't make the camera pipe: {}", std::io::Error::last_os_error());
         Ok(owned(handle))
@@ -193,24 +212,11 @@ fn accept(handle: &OwnedHandle) -> bool {
         Err(e) => e.code() == ERROR_PIPE_CONNECTED.to_hresult(),
     }
 }
-fn receive(incoming: OwnedHandle, stop: &AtomicBool, latest: &Latest) {
-    if !accept(&incoming) || stop.load(Ordering::Relaxed) {
-        return;
-    }
-    let mut file = File::from(incoming);
-    let mut buffer = vec![0u8; FRAME_BYTES];
-    while !stop.load(Ordering::Relaxed) && file.read_exact(&mut buffer).is_ok() {
-        let mut slot = latest.frame.lock().unwrap();
-        slot.0 += 1;
-        std::mem::swap(&mut slot.1, &mut buffer);
-        latest.arrived.notify_all();
-    }
-}
-/// Serves frames to the camera component each time it connects.
-fn send(stop: &AtomicBool, latest: &Latest) {
+/// Accepts every reader the camera service opens and feeds each one on its own thread, so an
+/// old connection the service hasn't closed yet can't keep frames from the one apps are using.
+fn serve(stop: &Arc<AtomicBool>, latest: &Arc<Latest>) {
     // The camera service runs as Local Service; it may only read.
     let access = "D:P(A;;GA;;;OW)(A;;GA;;;SY)(A;;GR;;;LS)(A;;GR;;;NS)";
-    let mut frame = vec![0u8; FRAME_BYTES];
     while !stop.load(Ordering::Relaxed) {
         let Ok(handle) = pipe(PIPE, PIPE_ACCESS_OUTBOUND, access) else {
             std::thread::sleep(Duration::from_millis(500));
@@ -219,21 +225,30 @@ fn send(stop: &AtomicBool, latest: &Latest) {
         if !accept(&handle) || stop.load(Ordering::Relaxed) {
             continue;
         }
-        let mut file = File::from(handle);
-        let mut sent = 0;
-        while !stop.load(Ordering::Relaxed) {
-            {
-                let slot = latest.frame.lock().unwrap();
-                let (slot, _) = latest.arrived.wait_timeout_while(slot, Duration::from_millis(250), |s| s.0 == sent && !stop.load(Ordering::Relaxed)).unwrap();
-                if slot.0 == sent {
-                    continue;
-                }
-                sent = slot.0;
-                frame.copy_from_slice(&slot.1);
+        let (s, l) = (stop.clone(), latest.clone());
+        std::thread::spawn(move || {
+            l.clients.fetch_add(1, Ordering::Relaxed);
+            send(File::from(handle), &s, &l);
+            l.clients.fetch_sub(1, Ordering::Relaxed);
+        });
+    }
+}
+/// Writes each new frame to one reader until it disconnects.
+fn send(mut file: File, stop: &AtomicBool, latest: &Latest) {
+    let mut frame = vec![0u8; FRAME_BYTES];
+    let mut sent = 0;
+    while !stop.load(Ordering::Relaxed) {
+        {
+            let slot = latest.frame.lock().unwrap();
+            let (slot, _) = latest.arrived.wait_timeout_while(slot, Duration::from_millis(250), |s| s.0 == sent && !stop.load(Ordering::Relaxed)).unwrap();
+            if slot.0 == sent {
+                continue;
             }
-            if file.write_all(&frame).is_err() {
-                break;
-            }
+            sent = slot.0;
+            frame.copy_from_slice(&slot.1);
+        }
+        if file.write_all(&frame).is_err() {
+            return;
         }
     }
 }

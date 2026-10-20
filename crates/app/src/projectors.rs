@@ -180,7 +180,7 @@ impl Studio {
                                 if let Some(texture) = projector.textures.get(&key) {
                                     ui.painter().image(*texture, target, uv, Color32::WHITE);
                                 }
-                                ui.painter().rect_stroke(target, 2., egui::Stroke::new(2., colour), egui::StrokeKind::Outside);
+                                ui.painter().rect_stroke(target, 2., egui::Stroke::new(2.0_f32, colour), egui::StrokeKind::Outside);
                                 ui.painter().text(target.left_bottom() + egui::vec2(6., -6.), egui::Align2::LEFT_BOTTOM, label, egui::FontId::proportional(13.), Color32::WHITE);
                             }
                             // Clicking a scene tile prepares it (Studio Mode) or switches to it.

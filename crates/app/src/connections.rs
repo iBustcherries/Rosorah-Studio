@@ -202,9 +202,9 @@ impl Studio {
         });
         // Status adds detail beyond the badge (errors, permission hints); skip the plain restatements.
         let routine = ["Disconnected", "Reconnecting saved account…", "Opening account sign-in…"];
-        if !account.connected && !account.status.is_empty() && !routine.contains(&account.status.as_str()) {
-            ui.small(&account.status);
-        } else if account.connected && !account.status.starts_with("Connected as") {
+        if (!account.connected && !account.status.is_empty() && !routine.contains(&account.status.as_str()))
+            || (account.connected && !account.status.starts_with("Connected as"))
+        {
             ui.small(&account.status);
         }
         if !account.remembered_status.is_empty() {

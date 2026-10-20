@@ -144,6 +144,8 @@ pub enum Command {
         title: String,
         category: String,
     },
+    /// Rosorah started (true) or stopped (false) streaming: viewers are only checked while live.
+    Live(bool),
 }
 pub enum Event {
     Moderated(String),
@@ -162,6 +164,8 @@ pub enum Event {
     Categories(Vec<Choice>),
     Broadcasts(Vec<Choice>),
     Chat(ChatMessage),
+    /// People watching now; None while the channel isn't live.
+    Viewers(Option<u64>),
     #[cfg(test)]
     Delete(String),
     #[cfg(test)]
@@ -193,6 +197,10 @@ pub struct Account {
     pub forgotten: bool,
     pub post_results: Vec<Value>,
     pub moderation_results: Vec<String>,
+    /// People watching now (None when offline or unknown).
+    pub viewers: Option<u64>,
+    /// Whether this account's worker was last told Rosorah is streaming.
+    live_sent: Option<bool>,
     worker: Option<std::thread::JoinHandle<()>>,
     saved_config: Option<ClientConfig>,
     tx: Option<mpsc::SyncSender<Command>>,
@@ -225,6 +233,8 @@ impl Account {
             forgotten: false,
             post_results: Vec::new(),
             moderation_results: Vec::new(),
+            viewers: None,
+            live_sent: None,
             worker: None,
             saved_config: None,
             tx: None,
@@ -301,6 +311,8 @@ impl Account {
         self.tx = None;
         self.rx = None;
         self.connected = false;
+        self.viewers = None;
+        self.live_sent = None;
         self.busy = false;
         self.auth_url.clear();
         self.status = "Disconnected".into();
@@ -341,6 +353,18 @@ impl Account {
                 .tx
                 .as_ref()
                 .is_some_and(|tx| tx.try_send(Command::Moderate(action)).is_ok())
+    }
+    /// Tells the account whether Rosorah is streaming (called every frame; sends only changes).
+    pub fn set_live(&mut self, live: bool) {
+        if !self.connected || self.live_sent == Some(live) {
+            return;
+        }
+        if self.tx.as_ref().is_some_and(|tx| tx.try_send(Command::Live(live)).is_ok()) {
+            self.live_sent = Some(live);
+            if !live {
+                self.viewers = None;
+            }
+        }
     }
     pub fn send(&mut self, command: Command) {
         let operation = matches!(
@@ -400,6 +424,7 @@ impl Account {
                 Event::Chat(m) => {
                     feed.push(m);
                 }
+                Event::Viewers(n) => self.viewers = n,
                 #[cfg(test)]
                 Event::Delete(id) => feed.remove(self.platform, &id),
                 #[cfg(test)]
@@ -407,6 +432,7 @@ impl Account {
                 Event::Failed(s) => {
                     self.status = s;
                     self.connected = false;
+                    self.viewers = None;
                     self.operation_busy = false;
                     self.busy = false;
                     self.auth_url.clear();
@@ -444,6 +470,62 @@ fn field<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
         .filter(|s| !s.is_empty())
         .with_context(|| format!("Platform response is missing {key}"))
 }
+/// When to ask a platform how many people are watching. Only while Rosorah is streaming: every
+/// 15 seconds for the first two minutes (until the platform shows the stream as live), then once a
+/// minute, about as often as the platforms refresh the number. After errors it waits longer, so
+/// the count never eats into a platform's request limits.
+pub(super) struct ViewerCheck {
+    next: Instant,
+    failures: u32,
+    live: bool,
+    /// Quick checks left while waiting for the platform to show the stream.
+    early: u8,
+}
+impl Default for ViewerCheck {
+    fn default() -> Self {
+        Self { next: Instant::now(), failures: 0, live: false, early: 0 }
+    }
+}
+impl ViewerCheck {
+    pub fn due(&self) -> bool {
+        self.live && Instant::now() >= self.next
+    }
+    /// Rosorah went live: the first check is 15 seconds in, as platforms take a moment to notice.
+    pub fn start(&mut self) {
+        (self.live, self.failures, self.early) = (true, 0, 8);
+        self.next = Instant::now() + Duration::from_secs(15);
+    }
+    /// Rosorah stopped streaming: no more checks, and the count goes away.
+    pub fn stop(&mut self, tx: &mpsc::SyncSender<Event>) {
+        self.live = false;
+        let _ = tx.try_send(Event::Viewers(None));
+    }
+    pub fn done(&mut self, result: Result<Option<u64>>, tx: &mpsc::SyncSender<Event>) {
+        let wait = match result {
+            Ok(viewers) => {
+                self.failures = 0;
+                let _ = tx.try_send(Event::Viewers(viewers));
+                if viewers.is_some() {
+                    self.early = 0;
+                    60
+                } else if self.early > 0 {
+                    self.early -= 1;
+                    15
+                } else {
+                    // Not shown as live on this platform (perhaps not streaming there).
+                    180
+                }
+            }
+            Err(_) => {
+                // Doubles each time (2, 4, 8 minutes...), at most 15 minutes; the last count stays shown.
+                self.failures = self.failures.saturating_add(1);
+                (60u64 << self.failures.min(4)).min(900)
+            }
+        };
+        self.next = Instant::now() + Duration::from_secs(wait);
+    }
+}
+
 fn json(request: RequestBuilder) -> Result<Value> {
     let response = request.send().context("Could not reach platform")?;
     let status = response.status();
@@ -614,6 +696,7 @@ fn run(
                 };
                 let _ = tx.send(Event::Moderated(text));
             }
+            Ok(Command::Live(live)) => session.watch(live, tx),
             Ok(Command::Rewards(op))=>{
                 let result=if platform==Platform::Twitch{rewards::run(op,&client,&config,&token,session.user_id()).map_err(|e|format!("{e}. If permission is missing, reconnect Twitch in Settings > Accounts."))}else{Err("Rewards require Twitch".into())};
                 let _=tx.send(Event::Rewards(result));
@@ -650,6 +733,7 @@ fn run(
         }
         session.discover_if_due(&client, &config, &token, tx);
         session.subscribers_if_due(&client, &token, tx);
+        session.viewers_if_due(&client, &config, &token, tx);
         // Browser chat owns message delivery. No YouTube message polling or duplicate IRC reader.
     }
     Ok(())
@@ -658,6 +742,38 @@ fn run(
 pub fn thumbnail_preview(path: &str) -> Result<image::DynamicImage> {
     let (bytes, _) = services::thumbnail_bytes(path)?;
     Ok(image::load_from_memory(&bytes)?)
+}
+
+#[cfg(test)]
+mod viewer_tests {
+    use super::*;
+    #[test]
+    fn checks_every_minute_live_less_often_offline_and_backs_off() {
+        let (tx, rx) = mpsc::sync_channel(8);
+        let mut check = ViewerCheck::default();
+        // Nothing is checked until Rosorah goes live.
+        assert!(!check.due());
+        let wait = |c: &ViewerCheck| (c.next - Instant::now()).as_secs_f64().round() as u64;
+        check.start();
+        assert_eq!(wait(&check), 15);
+        // Quick checks until the platform shows the stream...
+        check.done(Ok(None), &tx);
+        assert_eq!(wait(&check), 15);
+        // ...then once a minute.
+        check.done(Ok(Some(69)), &tx);
+        assert_eq!(wait(&check), 60);
+        check.done(Ok(None), &tx);
+        assert_eq!(wait(&check), 180);
+        while rx.try_recv().is_ok() {}
+        for expected in [120, 240, 480, 900, 900] {
+            check.done(Err(anyhow::anyhow!("HTTP 429")), &tx);
+            assert_eq!(wait(&check), expected);
+        }
+        // Errors keep the last count on screen (no event); stopping clears it and the checks.
+        assert!(rx.try_recv().is_err());
+        check.stop(&tx);
+        assert!(matches!(rx.try_recv(), Ok(Event::Viewers(None))) && !check.due());
+    }
 }
 
 #[cfg(test)]

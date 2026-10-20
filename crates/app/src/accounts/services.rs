@@ -113,6 +113,7 @@ pub(super) struct Session {
     next_subscribers: Instant,
     subscribers_seen: std::collections::BTreeSet<String>,
     subscribers_initial: bool,
+    viewers: ViewerCheck,
 }
 impl Session {
     pub fn new(
@@ -154,6 +155,7 @@ impl Session {
             next_subscribers: Instant::now(),
             subscribers_seen: Default::default(),
             subscribers_initial: true,
+            viewers: ViewerCheck::default(),
         };
         let _ = tx.send(Event::Connected(s.name.clone(), s.id.clone()));
         if let Err(e) = s.command(Command::Refresh, client, config, token, tx) {
@@ -295,6 +297,31 @@ impl Session {
                 let _ = tx.send(Event::Status(format!("YouTube subscriber history temporarily unavailable: {e}. Chat remains connected; retrying later.")));
             }
         }
+    }
+    /// Starts or stops the viewer checks as Rosorah goes live or stops.
+    pub fn watch(&mut self, live: bool, tx: &mpsc::SyncSender<Event>) {
+        if live { self.viewers.start() } else { self.viewers.stop(tx) }
+    }
+    /// Asks how many people are watching, when it's time to (see ViewerCheck).
+    pub fn viewers_if_due(&mut self, client: &Client, config: &ClientConfig, token: &Token, tx: &mpsc::SyncSender<Event>) {
+        if !self.viewers.due() {
+            return;
+        }
+        let result = if self.platform == Platform::Twitch {
+            // An empty list means the channel is offline.
+            json(self.twitch(client, config, token, reqwest::Method::GET, "streams").query(&[("user_id", self.id.as_str())]))
+                .map(|v| v["data"][0]["viewer_count"].as_u64())
+        } else if self.broadcast.is_empty() {
+            // Nothing selected or live: no request at all.
+            Ok(None)
+        } else {
+            // One quota unit; YouTube only reports viewers while the broadcast is live.
+            json(self.yt(client, token, reqwest::Method::GET, "videos").query(&[("part", "liveStreamingDetails"), ("id", self.broadcast.as_str())])).map(|v| {
+                let live = &v["items"][0]["liveStreamingDetails"];
+                if live["actualEndTime"].is_string() { None } else { live["concurrentViewers"].as_str().and_then(|n| n.parse().ok()) }
+            })
+        };
+        self.viewers.done(result, tx);
     }
     pub fn reset_chat(&mut self) {
         self.buffer.clear();
@@ -502,6 +529,7 @@ impl Session {
         match command {
             Command::Rewards(_)=>anyhow::bail!("Reward request must use the account worker"),
             Command::Moderate(_) => anyhow::bail!("Moderation must use the account worker"),
+            Command::Live(_) => anyhow::bail!("Going live is handled by the account worker"),
             Command::Discover => {
                 self.discovery_burst = 6;
                 self.next_discovery = Instant::now();

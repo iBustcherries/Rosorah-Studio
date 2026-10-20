@@ -5,12 +5,14 @@ use anyhow::{Context, Result, bail, ensure};
 use auroracast_core::{AudioChannel, Id, mix_audio};
 use rosorah_capture::GameProcess;
 use serde_json::Value;
+#[cfg(not(windows))]
+use std::process::Child;
 use std::{
     collections::{BTreeMap, VecDeque},
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::PathBuf,
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -222,6 +224,7 @@ pub fn live_devices() -> Result<Vec<Device>> {
 fn graph() -> Result<Value> {
     Ok(serde_json::from_slice(&command("pw-dump", &[])?)?)
 }
+#[cfg(any(not(windows), test))]
 fn prop(v: &Value, k: &str) -> String {
     match &v["info"]["props"][k] {
         Value::String(s) => s.clone(),
@@ -284,6 +287,7 @@ fn devices(g: &Value) -> Vec<Device> {
         })
         .collect()
 }
+#[cfg(any(not(windows), test))]
 fn node_pid(g: &Value, node: &Value) -> Option<u32> {
     // PulseAudio supplies the game's PID on the stream node. Its PipeWire
     // client's secured PID belongs to pipewire-pulse, not to the game.
@@ -302,6 +306,7 @@ fn node_pid(g: &Value, node: &Value) -> Option<u32> {
         .ok()
         .filter(|p| *p > 0)
 }
+#[cfg(not(windows))]
 fn output_channels(g: &Value, node: u64) -> Vec<String> {
     let mut ports: Vec<_> = g
         .as_array()
@@ -480,6 +485,7 @@ impl Input {
         Ok(input)
     }
 }
+#[cfg(any(not(windows), test))]
 fn stereo(bytes: &[u8], layout: &[String]) -> Vec<f32> {
     let mut output = Vec::with_capacity(bytes.len() / layout.len() / 2);
     for frame in bytes.chunks_exact(layout.len() * 4) {
@@ -521,6 +527,7 @@ impl Drop for Input {
         }
     }
 }
+#[cfg(any(not(windows), test))]
 fn port_pairs(g: &Value, source: u64, dest: u64) -> Vec<(u64, u64)> {
     let ports: Vec<_> = g
         .as_array()
@@ -637,6 +644,7 @@ struct LiveInput {
     binding: Binding,
     buffer: Arc<Mutex<Buffer>>,
 }
+#[cfg(any(not(windows), test))]
 fn noise_filter(noise: auroracast_core::NoiseSuppression) -> &'static str {
     match noise {
         auroracast_core::NoiseSuppression::Off => "anull",

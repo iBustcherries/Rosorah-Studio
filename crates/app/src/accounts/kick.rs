@@ -43,6 +43,13 @@ fn refresh_channel(client: &Client, token: &Token, tx: &mpsc::SyncSender<Event>)
     Ok(id)
 }
 
+/// People watching the channel's live stream, or None when it's offline.
+fn viewers(client: &Client, token: &Token) -> Result<Option<u64>> {
+    let value = json(client.get(format!("{API}/channels")).bearer_auth(&token.access))?;
+    let stream = &value["data"][0]["stream"];
+    Ok(if stream["is_live"] == true { stream["viewer_count"].as_u64() } else { None })
+}
+
 fn post_chat(client: &Client, token: &Token, channel: u64, text: &str) -> Result<()> {
     let text = text.trim();
     ensure!(!text.is_empty() && text.chars().count() <= 500, "Kick messages must be 1–500 characters");
@@ -131,6 +138,7 @@ pub(super) fn session(client: &Client, config: &ClientConfig, mut token: Token,
         let _ = tx.send(Event::Status("Kick connected. Sign out and connect Kick again once to allow chat, title changes, activity and deleting messages.".into()));
     }
     let mut retry_at = Instant::now();
+    let mut watching = ViewerCheck::default();
     while !cancel.load(Ordering::Relaxed) {
         if token.expiry <= now()/1000 + 90 && Instant::now() >= retry_at {
             match oauth::refresh(client, config, Platform::Kick, &token) {
@@ -184,11 +192,15 @@ pub(super) fn session(client: &Client, config: &ClientConfig, mut token: Token,
                 }
                 Err(e) => {let _ = tx.send(Event::Status(format!("{e}. If permission is missing, sign out and connect Kick again.")));}
             },
+            Ok(Command::Live(live)) => if live { watching.start() } else { watching.stop(tx) },
             Ok(_) => {let _ = tx.send(Event::Status("This option is not available for Kick".into()));}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => (),
         }
         events.poll(client, config, &token, channel, tx);
+        if watching.due() {
+            watching.done(viewers(client, &token), tx);
+        }
     }
     Ok(())
 }

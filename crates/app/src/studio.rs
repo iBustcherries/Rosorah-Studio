@@ -644,7 +644,7 @@ impl Studio {
         style.visuals.window_corner_radius = egui::CornerRadius::same(16);
         style.visuals.window_stroke = egui::Stroke::NONE;
         style.visuals.selection.bg_fill = Color32::from_rgb(208, 188, 255);
-        style.visuals.selection.stroke = egui::Stroke::new(1., Color32::from_rgb(56, 30, 114));
+        style.visuals.selection.stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(56, 30, 114));
         style.spacing.item_spacing = Vec2::new(8., 8.);
         style.spacing.button_padding = Vec2::new(11., 7.);
         for widget in [
@@ -655,7 +655,7 @@ impl Studio {
             widget.bg_fill = Color32::from_rgb(44, 43, 53);
             widget.weak_bg_fill = widget.bg_fill;
             widget.bg_stroke = egui::Stroke::NONE;
-            widget.fg_stroke = egui::Stroke::new(1., Color32::from_rgb(238, 235, 245));
+            widget.fg_stroke = egui::Stroke::new(1.0_f32, Color32::from_rgb(238, 235, 245));
             widget.corner_radius = egui::CornerRadius::same(20);
         }
         style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(61, 57, 73);
@@ -1034,6 +1034,9 @@ impl Studio {
         if let Some(stream) = &self.live_stream {
             stream.update_project(&self.project);
         }
+        if let Some(camera) = &self.virtual_camera {
+            camera.update_project(&self.project);
+        }
     }
     fn accent(&self) -> Color32 {
         let [r, g, b] = self.project.preferences.accent;
@@ -1333,6 +1336,14 @@ impl Studio {
                         }
                     }
                     if self.page == Page::Studio {
+                        let mut studio = self.project.preferences.workspace.studio_mode;
+                        if ui.toggle_value(&mut studio, "Studio Mode").on_hover_text("Prepare scenes in a preview, then send them live with Transition").changed() {
+                            self.project.preferences.workspace.studio_mode = studio;
+                            // The preview starts on what's live.
+                            self.studio_preview = studio.then(|| self.project.canvases[0].scene);
+                            self.revision = true;
+                            self.dirty = true;
+                        }
                         ui.menu_button("Edit", |ui| {
                             if ui.add_enabled(self.edit_history.can_undo(), egui::Button::new("Undo · Ctrl+Z")).clicked() {
                                 self.undo_edit(false);
@@ -1848,16 +1859,6 @@ impl Studio {
                 let name=(1..).map(|n|if n==1{"New Scene".to_owned()}else{format!("New Scene {n}")}).find(|n|!self.project.scenes.iter().any(|s|&s.name==n)).unwrap();
                 self.naming_scene=Some((id,String::new(),false));
                 self.project.scenes.push(Scene{id,name,layers:vec![]});self.project.preferences.workspace.scenes.entry(canvas).or_default().push(id);self.project.switch_scene(canvas,id);self.layer=None;self.changed();}
-            if self.canvas == 0 {
-                let mut studio = self.project.preferences.workspace.studio_mode;
-                if ui.toggle_value(&mut studio, "Studio Mode").on_hover_text("Prepare scenes in a preview, then send them live with Transition").changed() {
-                    self.project.preferences.workspace.studio_mode = studio;
-                    // The preview starts on what's live.
-                    self.studio_preview = studio.then(|| self.project.canvases[0].scene);
-                    self.revision = true;
-                    self.dirty = true;
-                }
-            }
             ui.menu_button("⚙", |ui| {
                 ui.menu_button(format!("Transition · {}", self.project.preferences.transition.label()), |ui| self.transition_menu(ui));
                 if vertical_in_use {
@@ -2283,21 +2284,23 @@ impl Studio {
             self.tell("Set up the virtual camera first (Stream panel).".into());
             return;
         };
-        // Windows shows the camera to apps only while it's on; FFmpeg writes into its pipe.
+        // Windows shows the camera to apps only while it's on; Rosorah hands it frames directly.
         #[cfg(windows)]
-        let device = match rosorah_windows::virtual_camera::Camera::start() {
+        let started = match rosorah_windows::virtual_camera::Camera::start() {
             Ok(camera) => {
-                let input = camera.input.clone();
+                let sink = camera.sink();
                 self.windows_camera = Some(camera);
                 let _ = device;
-                input
+                crate::recording::Recording::start_windows_camera(&self.project, 0, self.captures.reader(), sink)
             }
             Err(e) => {
                 self.tell(format!("The virtual camera couldn't start: {e:#}"));
                 return;
             }
         };
-        match crate::recording::Recording::start_camera(&self.project, 0, self.captures.reader(), device) {
+        #[cfg(not(windows))]
+        let started = crate::recording::Recording::start_camera(&self.project, 0, self.captures.reader(), device);
+        match started {
             Ok(camera) => {
                 self.virtual_camera = Some(camera);
                 self.tell("Virtual camera on: pick “Rosorah Virtual Camera” in Discord, Zoom or your browser.".into());
@@ -2331,7 +2334,15 @@ impl Studio {
                     }
                 }
             } else if ready {
-                if ui.toggle_value(&mut on, "📷 Virtual camera").on_hover_text("Rosorah's main video as a webcam for Discord, Zoom or a browser").changed() {
+                #[allow(unused_mut)]
+                let mut hint = "Rosorah's main video as a webcam for Discord, Zoom or a browser".to_owned();
+                // What Windows is doing with it, to tell "no app reading" from "frames not arriving".
+                #[cfg(windows)]
+                if let Some(camera) = &self.windows_camera {
+                    let (frames, readers) = camera.sink().stats();
+                    hint += &format!("\n{frames} frames sent · {readers} Windows reader(s) connected");
+                }
+                if ui.toggle_value(&mut on, "📷 Virtual camera").on_hover_text(hint).changed() {
                     self.toggle_virtual_camera();
                 }
             } else if crate::virtual_camera::supported() {
@@ -2390,7 +2401,7 @@ impl Studio {
         let target = egui::Rect::from_center_size(rect.center(), size);
         if let Some(texture) = self.program_texture {
             ui.painter().image(texture, target, egui::Rect::from_min_max(egui::pos2(0., 0.), egui::pos2(1., 1.)), Color32::WHITE);
-            ui.painter().rect_stroke(target, 2., egui::Stroke::new(2., Color32::from_rgb(255, 92, 92)), egui::StrokeKind::Outside);
+            ui.painter().rect_stroke(target, 2., egui::Stroke::new(2.0_f32, Color32::from_rgb(255, 92, 92)), egui::StrokeKind::Outside);
         }
         ui.ctx().request_repaint_after(Duration::from_millis(66));
     }
@@ -3108,18 +3119,7 @@ impl Studio {
                     .iter()
                     .any(|c| c.media_source == Some(id))
             {
-                let audio_id = self.project.id();
-                self.project.audio.push(auroracast_core::AudioChannel { monitor_only:false,
-                    id: audio_id,
-                    name,
-                    gain_db: 0.,
-                    muted: false,
-                    tracks: [true, false, false, false, false, false],
-                    delay_ms: 0,
-                    monitor: false,
-                    noise_suppression: Default::default(),
-                    media_source: Some(id),
-                });
+                self.project.add_media_audio(id, name);
             }
             self.changed();
         }
@@ -3194,19 +3194,8 @@ impl Studio {
                     .iter()
                     .any(|c| c.media_source == Some(id))
                 {
-                    let audio_id = self.project.id();
                     let name = self.project.source(id).unwrap().name.clone();
-                    self.project.audio.push(auroracast_core::AudioChannel { monitor_only:false,
-                        id: audio_id,
-                        name,
-                        gain_db: 0.,
-                        muted: false,
-                        tracks: [true, false, false, false, false, false],
-                        delay_ms: 0,
-                        monitor: false,
-                        noise_suppression: Default::default(),
-                        media_source: Some(id),
-                    });
+                    self.project.add_media_audio(id, name);
                 }
                 if !crate::browser_source::ready() && !self.browser_chat.installing() {
                     self.browser_chat.setup();
@@ -6157,10 +6146,14 @@ impl eframe::App for Studio {
         }
 
         self.captures.sync_widgets(&self.project);
+        // Viewer counts are only checked while Rosorah is streaming.
+        let live = self.live_stream.is_some();
         for account in &mut self.accounts {
             account.tick(&mut self.chat);
+            account.set_live(live);
         }
         self.kick_account.tick(&mut self.chat);
+        self.kick_account.set_live(live);
         let mut kick_updated = false;
         if std::mem::take(&mut self.kick_account.forgotten) {
             for service in &mut self.stream_config.services {
@@ -6305,7 +6298,7 @@ impl eframe::App for Studio {
             }
         }
         for account in self.accounts.iter_mut().chain(std::iter::once(&mut self.kick_account)) {
-            if let Some(result) = account.moderation_results.drain(..).last() {
+            if let Some(result) = account.moderation_results.drain(..).next_back() {
                 self.browser_chat.post_status = result;
             }
             for result in account.post_results.drain(..) {

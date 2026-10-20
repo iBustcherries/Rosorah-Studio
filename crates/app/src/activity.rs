@@ -143,6 +143,7 @@ impl History {
         }
     }
     /// True only for a newly received event, never for a replay or an edit.
+    #[cfg(test)]
     pub fn push(&mut self, item: Item) -> bool {
         let live = !item.historical;
         self.insert_new(item) && live
@@ -219,8 +220,19 @@ impl History {
         tiktok: &str,
         show_missed: bool,
     ) {
-        ui.heading("Stream activity");
         let connected: Vec<_> = accounts.iter().filter(|a| a.connected).collect();
+        // The viewer count only shows while at least one platform is live.
+        let live: Vec<_> = connected.iter().filter_map(|a| Some((a, a.viewers?))).collect();
+        if live.is_empty() {
+            ui.heading("Stream activity");
+        } else {
+            let total: u64 = live.iter().map(|(_, n)| n).sum();
+            ui.heading(format!("Stream activity: {}", viewers(total)));
+            for (a, n) in &live {
+                let [r, g, b] = a.platform.color();
+                ui.label(egui::RichText::new(format!("{}: {}", a.platform.name(), viewers(*n))).color(egui::Color32::from_rgb(r, g, b)));
+            }
+        }
         if connected.is_empty() {
             ui.label("Your connected accounts will appear here.");
         } else {
@@ -274,6 +286,9 @@ impl Drop for History {
             let _ = t.join();
         }
     }
+}
+fn viewers(n: u64) -> String {
+    if n == 1 { "1 viewer".into() } else { format!("{n} viewers") }
 }
 fn save(path: &std::path::Path, items: &[Item]) -> anyhow::Result<()> {
     use std::io::Write;

@@ -1390,6 +1390,12 @@ impl Project {
     pub fn source(&self, id: Id) -> Option<&Source> {
         self.sources.iter().find(|s| s.id == id)
     }
+    /// Adds a mixer channel (on track 1) for a media source's sound and returns it.
+    pub fn add_media_audio(&mut self, source: Id, name: String) -> &mut AudioChannel {
+        let id = self.id();
+        self.audio.push(AudioChannel { id, name, gain_db: 0., muted: false, tracks: [true, false, false, false, false, false], delay_ms: 0, monitor: false, monitor_only: false, noise_suppression: Default::default(), media_source: Some(source) });
+        self.audio.last_mut().unwrap()
+    }
     /// Gives every alert sound or video with audio its own mixer channel, so it can be heard.
     /// Returns whether any channel was added.
     pub fn ensure_alert_channels(&mut self) -> bool {
@@ -1414,8 +1420,7 @@ impl Project {
             if self.audio.iter().any(|c| c.media_source == Some(id)) {
                 continue;
             }
-            let channel = self.id();
-            self.audio.push(AudioChannel { id: channel, name, gain_db: 0., muted: false, tracks: [true, false, false, false, false, false], delay_ms: 0, monitor: true, monitor_only: false, noise_suppression: Default::default(), media_source: Some(id) });
+            self.add_media_audio(id, name).monitor = true;
             added = true;
         }
         added
@@ -2000,7 +2005,7 @@ mod transition_media_tests {
     #[test]
     fn alert_bus_controls_alert_sounds_but_not_the_stinger() {
         let mut p = Project::default();
-        let mut channel = |p: &mut Project, name: &str| {
+        let channel = |p: &mut Project, name: &str| {
             let id = p.id();
             p.sources.push(Source { id, name: name.into(), kind: SourceKind::VideoFile(VideoSettings { automation_only: true, ..Default::default() }) });
             let audio = p.id();

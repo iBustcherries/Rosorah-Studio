@@ -127,7 +127,7 @@ pub fn edit_multi(ui:&mut egui::Ui,canvas:Rect,scene:&mut Scene,selected:&mut Op
  let painter=ui.painter().with_clip_rect(canvas.expand(8.));let color=if !unlocked{Color32::GRAY}else if crop_mode{Color32::from_rgb(255,191,90)}else{Color32::from_rgb(173,145,255)};
  for &i in selection.iter(){painter.rect_stroke(screen_rect(scene.layers[i].rect,canvas),0.,(1.,color),egui::StrokeKind::Inside);}
  if let Some(r)=bounds(scene,selection).map(|r|screen_rect(r,canvas)){painter.rect_stroke(r,0.,(1.5,color),egui::StrokeKind::Inside);if unlocked{for point in points(r){painter.rect_filled(Rect::from_center_size(point,Vec2::splat(8.)),2.,color);}}}
- if response.dragged(){let stroke=egui::Stroke::new(1.,Color32::from_rgb(67,221,222));if let Some(x)=guides[0]{let x=canvas.left()+x*canvas.width();painter.line_segment([egui::pos2(x,canvas.top()),egui::pos2(x,canvas.bottom())],stroke);}if let Some(y)=guides[1]{let y=canvas.top()+y*canvas.height();painter.line_segment([egui::pos2(canvas.left(),y),egui::pos2(canvas.right(),y)],stroke);}}
+ if response.dragged(){let stroke=egui::Stroke::new(1.0_f32,Color32::from_rgb(67,221,222));if let Some(x)=guides[0]{let x=canvas.left()+x*canvas.width();painter.line_segment([egui::pos2(x,canvas.top()),egui::pos2(x,canvas.bottom())],stroke);}if let Some(y)=guides[1]{let y=canvas.top()+y*canvas.height();painter.line_segment([egui::pos2(canvas.left(),y),egui::pos2(canvas.right(),y)],stroke);}}
  if response.hovered()&&let Some(point)=ui.input(|i|i.pointer.hover_pos())&&let Some(h)=handle(point){ui.ctx().set_cursor_icon(match h{0|2=>egui::CursorIcon::ResizeNwSe,1|3=>egui::CursorIcon::ResizeNeSw,4|6=>egui::CursorIcon::ResizeVertical,_=>egui::CursorIcon::ResizeHorizontal});}
  (changed,response)
 }

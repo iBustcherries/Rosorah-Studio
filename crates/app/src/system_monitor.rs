@@ -96,6 +96,7 @@ impl Platform {
         (ticks, ram, gpu)
     }
 }
+#[cfg(any(not(windows), test))]
 fn parse_cpu(s: &str) -> Option<(u64, u64)> {
     let mut words = s.lines().next()?.split_whitespace();
     if words.next()? != "cpu" {
@@ -111,6 +112,7 @@ fn parse_cpu(s: &str) -> Option<(u64, u64)> {
     }
     Some((v.iter().sum(), v[3] + v.get(4).copied().unwrap_or(0)))
 }
+#[cfg(any(not(windows), test))]
 fn parse_memory(s: &str) -> Option<f32> {
     let get = |key: &str| {
         s.lines()

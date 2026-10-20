@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Panel {
     Scenes,
     Sources,
@@ -15,6 +15,26 @@ pub enum Panel {
     Broadcast,
     Chat,
     Activity,
+    /// A web page added from the Panels menu, by its id.
+    Web(u64),
+}
+// Saved as plain text ("Chat", "Web:3") because panels are also keys in the saved layout's maps.
+impl Serialize for Panel {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Web(id) => s.serialize_str(&format!("Web:{id}")),
+            other => s.serialize_str(&format!("{other:?}")),
+        }
+    }
+}
+impl<'de> Deserialize<'de> for Panel {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(d)?;
+        if let Some(id) = text.strip_prefix("Web:") {
+            return id.parse().map(Self::Web).map_err(serde::de::Error::custom);
+        }
+        Self::ALL.into_iter().find(|p| format!("{p:?}") == text).ok_or_else(|| serde::de::Error::custom(format!("unknown panel {text}")))
+    }
 }
 impl Panel {
     pub const ALL: [Self; 8] = [
@@ -30,45 +50,99 @@ impl Panel {
     pub fn title(self) -> &'static str {
         match self {
             Self::Scenes => "Scenes",
-            Self::Sources => "Layers",
-            Self::Preview => "Main Canvas",
-            Self::Vertical => "Vertical Canvas",
-            Self::Mixer => "Audio mixer",
-            Self::Broadcast => "Broadcast",
+            Self::Sources => "In this scene",
+            Self::Preview => "Main video",
+            Self::Vertical => "Vertical video",
+            Self::Mixer => "Sound",
+            Self::Broadcast => "Stream",
             Self::Chat => "Chat",
             Self::Activity => "Activity",
+            Self::Web(_) => "Web page",
         }
     }
+}
+/// Where a panel last sat in the main workspace, so docking it again puts it back there.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Home {
+    /// A tab beside these panels, at this position in their tab group.
+    Tab { with: Vec<Panel>, index: usize },
+    /// Its own area, split against the area holding `beside`, on `side` of it.
+    Split { beside: Vec<Panel>, side: Side, fraction: f32 },
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Side {
+    Left,
+    Right,
+    Above,
+    Below,
 }
 #[derive(Serialize, Deserialize)]
 struct Saved {
     version: u32,
     dock: DockState<Panel>,
+    /// Panels shown in their own native windows instead of the dock.
+    #[serde(default)]
+    windows: Vec<Panel>,
+    #[serde(default)]
+    homes: std::collections::BTreeMap<Panel, Home>,
 }
 pub struct Workspace {
     pub dock: DockState<Panel>,
+    pub windows: Vec<Panel>,
+    pub homes: std::collections::BTreeMap<Panel, Home>,
     path: PathBuf,
     last_check: Instant,
     saved: Vec<u8>,
 }
 fn default_dock() -> DockState<Panel> {
     let mut dock = DockState::new(vec![Panel::Preview]);
-    let [center, left] =
+    let [top, bottom] =
         dock.main_surface_mut()
-            .split_left(NodeIndex::root(), 0.14, vec![Panel::Scenes]);
+            .split_below(NodeIndex::root(), 0.55, vec![Panel::Scenes]);
     dock.main_surface_mut()
-        .split_below(left, 0.35, vec![Panel::Sources]);
+        .split_right(bottom, 0.19, vec![Panel::Mixer]);
+    let [center, _] =
+        dock.main_surface_mut()
+            .split_left(top, 0.19, vec![Panel::Chat, Panel::Activity]);
     let [center, right] = dock
         .main_surface_mut()
-        .split_right(center, 0.78, vec![Panel::Broadcast]);
+        .split_right(center, 0.77, vec![Panel::Broadcast]);
     dock.main_surface_mut()
-        .split_below(right, 0.50, vec![Panel::Chat, Panel::Activity]);
-    let [center, _] = dock
-        .main_surface_mut()
-        .split_below(center, 0.78, vec![Panel::Mixer]);
+        .split_below(right, 0.45, vec![Panel::Sources]);
     dock.main_surface_mut()
-        .split_right(center, 0.73, vec![Panel::Vertical]);
+        .split_right(center, 0.77, vec![Panel::Vertical]);
     dock
+}
+/// Every panel in the subtree rooted at `index`.
+fn subtree_tabs(tree: &egui_dock::Tree<Panel>, index: NodeIndex) -> Vec<Panel> {
+    tree.iter()
+        .enumerate()
+        .filter(|(i, _)| {
+            let mut n = Some(NodeIndex(*i));
+            while let Some(at) = n {
+                if at == index {
+                    return true;
+                }
+                n = at.parent();
+            }
+            false
+        })
+        .filter_map(|(_, node)| node.tabs())
+        .flatten()
+        .copied()
+        .collect()
+}
+/// The smallest subtree holding all of `nodes`.
+fn common_ancestor(nodes: &[NodeIndex]) -> Option<NodeIndex> {
+    let path = |n: NodeIndex| {
+        let mut chain = vec![n];
+        while let Some(p) = chain.last().unwrap().parent() {
+            chain.push(p);
+        }
+        chain
+    };
+    let first = path(*nodes.first()?);
+    first.into_iter().find(|candidate| nodes.iter().all(|n| path(*n).contains(candidate)))
 }
 impl Workspace {
     pub fn load(path: PathBuf, window_margin: eframe::egui::Vec2) -> Self {
@@ -80,7 +154,7 @@ impl Workspace {
             .ok()
             .filter(|s| {
                 let tabs: Vec<_> = s.dock.iter_all_tabs().map(|(_, t)| *t).collect();
-                (1..=3).contains(&s.version)
+                (1..=5).contains(&s.version)
                     && tabs.contains(&Panel::Preview)
                     && Panel::ALL
                         .iter()
@@ -88,6 +162,12 @@ impl Workspace {
             })
             .map(|s| s.dock)
             .unwrap_or_else(default_dock);
+        let mut windows = Vec::new();
+        for panel in serde_json::from_slice::<Saved>(&saved).map(|s| s.windows).unwrap_or_default() {
+            if panel != Panel::Preview && !windows.contains(&panel) && dock.find_tab(&panel).is_none() {
+                windows.push(panel);
+            }
+        }
         if old_version
             && dock.find_tab(&Panel::Vertical).is_none()
             && let Some((surface, node, _)) = dock.find_tab(&Panel::Preview)
@@ -121,6 +201,44 @@ impl Workspace {
                 dock.push_to_first_leaf(Panel::Activity);
             }
         }
+        if serde_json::from_slice::<Saved>(&saved)
+            .ok()
+            .is_some_and(|s| s.version == 3)
+        {
+            let backup = path.with_extension("pre-019.json");
+            if !backup.exists() {
+                let _ = std::fs::write(&backup, &saved);
+            }
+            let hidden: Vec<_> = Panel::ALL
+                .into_iter()
+                .filter(|p| dock.find_tab(p).is_none())
+                .collect();
+            dock = default_dock();
+            for panel in hidden {
+                if let Some(at) = dock.find_tab(&panel) {
+                    dock.remove_tab(at);
+                }
+            }
+        }
+        if serde_json::from_slice::<Saved>(&saved)
+            .ok()
+            .is_some_and(|s| s.version == 4)
+        {
+            let backup = path.with_extension("pre-020.json");
+            if !backup.exists() {
+                let _ = std::fs::write(&backup, &saved);
+            }
+            let hidden: Vec<_> = Panel::ALL
+                .into_iter()
+                .filter(|p| dock.find_tab(p).is_none())
+                .collect();
+            dock = default_dock();
+            for panel in hidden {
+                if let Some(at) = dock.find_tab(&panel) {
+                    dock.remove_tab(at);
+                }
+            }
+        }
         // egui window memory is session-local. Restore its position and inner
         // size from the last rendered root rectangle before the first frame.
         for surface in dock.iter_surfaces_mut() {
@@ -134,23 +252,132 @@ impl Workspace {
                     .set_size(rect.size());
             }
         }
+        let homes = serde_json::from_slice::<Saved>(&saved).map(|s| s.homes).unwrap_or_default();
         Self {
             dock,
+            windows,
+            homes,
             path,
             saved,
             last_check: Instant::now(),
         }
     }
     pub fn contains(&self, panel: Panel) -> bool {
-        self.dock.find_tab(&panel).is_some()
+        self.dock.find_tab(&panel).is_some() || self.windows.contains(&panel)
+    }
+    /// Moves a docked or floating panel into its own native window.
+    pub fn pop_out(&mut self, panel: Panel) {
+        if panel == Panel::Preview || self.windows.contains(&panel) {
+            return;
+        }
+        if let Some(location) = self.dock.find_tab(&panel) {
+            self.dock.remove_tab(location);
+        }
+        self.windows.push(panel);
+    }
+    /// Returns a panel from its own window to where it last sat in the workspace.
+    pub fn dock_window(&mut self, panel: Panel) {
+        if !self.windows.contains(&panel) {
+            return;
+        }
+        self.windows.retain(|p| *p != panel);
+        self.dock_home(panel);
+    }
+    /// Records where every panel in the main workspace sits. Called before the dock is
+    /// drawn, so a panel dragged, floated or popped out keeps its last docked position.
+    pub fn remember_homes(&mut self) {
+        let tree = self.dock.main_surface();
+        let mut homes = Vec::new();
+        for (index, node) in tree.iter().enumerate() {
+            let Some(tabs) = node.tabs() else { continue };
+            let index = NodeIndex(index);
+            for (position, panel) in tabs.iter().enumerate() {
+                let others: Vec<_> = tabs.iter().filter(|t| *t != panel).copied().collect();
+                let home = if !others.is_empty() {
+                    Home::Tab { with: others, index: position }
+                } else if let Some(parent) = index.parent() {
+                    let left = index == parent.left();
+                    let sibling = if left { parent.right() } else { parent.left() };
+                    let (fraction, vertical) = match &tree[parent] {
+                        egui_dock::Node::Horizontal(split) => (split.fraction, false),
+                        egui_dock::Node::Vertical(split) => (split.fraction, true),
+                        _ => continue,
+                    };
+                    let side = match (vertical, left) {
+                        (false, true) => Side::Left,
+                        (false, false) => Side::Right,
+                        (true, true) => Side::Above,
+                        (true, false) => Side::Below,
+                    };
+                    Home::Split { beside: subtree_tabs(tree, sibling), side, fraction }
+                } else {
+                    continue;
+                };
+                homes.push((*panel, home));
+            }
+        }
+        self.homes.extend(homes);
+    }
+    /// Puts a panel that is not in the dock back at its remembered home, or beside the main video.
+    fn dock_home(&mut self, panel: Panel) {
+        let main = egui_dock::SurfaceIndex::main();
+        match self.homes.get(&panel).cloned() {
+            Some(Home::Tab { with, index }) => {
+                if let Some((_, node, _)) = with.iter().filter_map(|p| self.dock.find_tab(p)).find(|(s, _, _)| s.is_main()) {
+                    let leaf = self.dock[main][node].get_leaf_mut().unwrap();
+                    let at = index.min(leaf.tabs.len());
+                    leaf.tabs.insert(at, panel);
+                    leaf.set_active_tab(egui_dock::TabIndex(at));
+                    return;
+                }
+            }
+            Some(Home::Split { beside, side, fraction }) => {
+                let leaves: Vec<_> = beside.iter().filter_map(|p| self.dock.find_tab(p)).filter(|(s, _, _)| s.is_main()).map(|(_, n, _)| n).collect();
+                if let Some(target) = common_ancestor(&leaves) {
+                    let split = match side {
+                        Side::Left => egui_dock::Split::Left,
+                        Side::Right => egui_dock::Split::Right,
+                        Side::Above => egui_dock::Split::Above,
+                        Side::Below => egui_dock::Split::Below,
+                    };
+                    self.dock[main].split(target, split, fraction.clamp(0.05, 0.95), egui_dock::Node::leaf(panel));
+                    return;
+                }
+            }
+            None => (),
+        }
+        if let Some((surface, node, _)) = self.dock.find_tab(&Panel::Preview)
+            && surface.is_main()
+        {
+            self.dock[surface][node].append_tab(panel);
+        } else {
+            self.dock.push_to_first_leaf(panel);
+        }
+    }
+    /// Drops web panels whose page was removed (or that a newer layout left behind).
+    pub fn retain_web(&mut self, ids: &[u64]) {
+        let gone = |p: &Panel| matches!(p, Panel::Web(id) if !ids.contains(id));
+        let stale: Vec<Panel> = self.dock.iter_all_tabs().map(|(_, t)| *t).filter(|t| gone(t)).collect();
+        for tab in stale {
+            if let Some(location) = self.dock.find_tab(&tab) {
+                self.dock.remove_tab(location);
+            }
+        }
+        self.windows.retain(|p| !gone(p));
+        self.homes.retain(|p, _| !gone(p));
     }
     pub fn set_visible(&mut self, panel: Panel, visible: bool) {
+        if !visible {
+            self.windows.retain(|p| *p != panel);
+        }
         if !visible && panel != Panel::Preview {
             if let Some(location) = self.dock.find_tab(&panel) {
                 self.dock.remove_tab(location);
             }
         } else if visible && !self.contains(panel) {
-            if panel == Panel::Vertical
+            if self.homes.contains_key(&panel) {
+                self.dock_home(panel);
+            } else if panel == Panel::Vertical
                 && let Some((surface, node, _)) = self.dock.find_tab(&Panel::Preview)
             {
                 self.dock[surface].split_right(node, 0.73, vec![panel]);
@@ -169,24 +396,12 @@ impl Workspace {
             self.dock.detach_tab(location, rect);
         } else {
             self.dock.remove_tab(location);
-            // Find the destination after removal: removing a surface or leaf
-            // can change indices. Prefer Preview; otherwise use the main tree.
-            if let Some((surface, node, _)) = self.dock.find_tab(&Panel::Preview)
-                && surface.is_main()
-            {
-                self.dock[surface][node].append_tab(panel);
-                let last = self.dock[surface][node].tabs_count() - 1;
-                self.dock[surface][node]
-                    .get_leaf_mut()
-                    .unwrap()
-                    .set_active_tab(egui_dock::TabIndex(last));
-            } else {
-                self.dock.push_to_first_leaf(panel);
-            }
+            self.dock_home(panel);
         }
     }
     pub fn reset(&mut self) {
         self.dock = default_dock();
+        self.windows.clear();
     }
     pub fn save(&mut self, force: bool) -> anyhow::Result<()> {
         if !force && self.last_check.elapsed() < Duration::from_secs(1) {
@@ -214,7 +429,7 @@ impl Workspace {
                 egui_dock::Node::Empty => {}
             }
         }
-        let bytes = serde_json::to_vec(&Saved { version: 3, dock })?;
+        let bytes = serde_json::to_vec(&Saved { version: 5, dock, windows: self.windows.clone(), homes: self.homes.clone() })?;
         if bytes != self.saved {
             if let Some(parent) = self.path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -231,9 +446,44 @@ impl Workspace {
 mod tests {
     use super::*;
     #[test]
+    fn docking_again_returns_every_panel_to_its_home() {
+        let mut w = Workspace { dock: default_dock(), windows: vec![], homes: Default::default(), path: PathBuf::new(), last_check: Instant::now(), saved: vec![] };
+        let layout = |w: &Workspace| -> Vec<(usize, Vec<Panel>)> {
+            w.dock.main_surface().iter().enumerate().filter_map(|(i, n)| n.tabs().map(|t| (i, t.to_vec()))).collect()
+        };
+        let original = layout(&w);
+        for panel in Panel::ALL.into_iter().filter(|p| *p != Panel::Preview) {
+            w.remember_homes();
+            w.pop_out(panel);
+            assert_ne!(layout(&w), original);
+            w.dock_window(panel);
+            assert_eq!(layout(&w), original, "{panel:?} did not return home");
+        }
+    }
+    #[test]
+    fn native_windows_round_trip_and_redock() {
+        let path = std::env::temp_dir().join(format!("rosorah-windows-{}.json", std::process::id()));
+        let mut w = Workspace::load(path.clone(), eframe::egui::Vec2::ZERO);
+        w.pop_out(Panel::Chat);
+        w.pop_out(Panel::Preview);
+        assert_eq!(w.windows, [Panel::Chat]);
+        assert!(w.contains(Panel::Chat) && w.dock.find_tab(&Panel::Chat).is_none());
+        w.save(true).unwrap();
+        let mut w = Workspace::load(path.clone(), eframe::egui::Vec2::ZERO);
+        assert_eq!(w.windows, [Panel::Chat]);
+        w.dock_window(Panel::Chat);
+        assert!(w.windows.is_empty() && w.dock.find_tab(&Panel::Chat).is_some());
+        w.pop_out(Panel::Mixer);
+        w.set_visible(Panel::Mixer, false);
+        assert!(!w.contains(Panel::Mixer));
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
     fn float_and_redock_preserves_every_panel() {
         let mut w = Workspace {
             dock: default_dock(),
+            windows: vec![],
+            homes: Default::default(),
             path: PathBuf::new(),
             last_check: Instant::now(),
             saved: vec![],
@@ -326,9 +576,17 @@ mod activity_migration_tests {
         ));
         let mut dock = default_dock();
         dock.remove_tab(dock.find_tab(&Panel::Activity).unwrap());
+        // Real saved layouts have finite geometry. An unrendered tree contains
+        // infinities, which serialize to null and would test reset, not migration.
+        for (_, node) in dock.iter_all_nodes_mut() {
+            node.set_rect(eframe::egui::Rect::ZERO);
+            if let Some(leaf) = node.get_leaf_mut() {
+                leaf.viewport = eframe::egui::Rect::ZERO;
+            }
+        }
         std::fs::write(
             &path,
-            serde_json::to_vec(&Saved { version: 2, dock }).unwrap(),
+            serde_json::to_vec(&Saved { version: 2, dock, windows: vec![], homes: Default::default() }).unwrap(),
         )
         .unwrap();
         let mut w = Workspace::load(path.clone(), eframe::egui::Vec2::ZERO);

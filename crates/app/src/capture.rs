@@ -1,16 +1,22 @@
 //! Desktop adapter for the independent Rosorah capture engine.
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
+#[cfg(not(windows))]
+use anyhow::bail;
 #[cfg(not(windows))]
 use ashpd::desktop::screencast::{CursorMode, Screencast, SelectSourcesOptions, SourceType};
 use auroracast_core::{Id, Project, SourceKind};
 #[cfg(not(windows))]
 use futures_util::StreamExt;
+#[cfg(any(not(windows), test))]
 use gst::prelude::*;
 use gst_video::prelude::*;
-use rosorah_capture::{Backend, Engine, Frame, Options, Producer, Target};
+use rosorah_capture::{Backend, Engine, Frame, Options, Target};
+#[cfg(not(windows))]
+use rosorah_capture::Producer;
 use std::time::Duration;
 #[cfg(not(windows))]
 use std::os::fd::AsRawFd;
+#[cfg(not(windows))]
 use tokio::sync::watch;
 
 #[cfg(not(windows))]
@@ -434,9 +440,6 @@ impl Captures {
         self.armed.contains(&id) || self.running(id) || self.pending.contains_key(&id)
     }
 
-    pub fn any_running(&self) -> bool {
-        self.engine.any_running() || !self.pending.is_empty() || !self.armed.is_empty()
-    }
     pub fn game(&self) -> Option<rosorah_capture::GameProcess> { self.engine.reader().game() }
     pub fn running(&self, id: Id) -> bool {
         self.engine.running(id)
@@ -456,7 +459,7 @@ impl Captures {
     }
     fn desktop_backend(&self, id: Id) -> Box<dyn Backend> {
         #[cfg(not(windows))]
-        { Box::new(DesktopBackend) }
+        { let _ = id; Box::new(DesktopBackend) }
         #[cfg(windows)]
         { if self.mode(id)==Target::Window { Box::new(rosorah_windows::window::WindowBackend{window:self.windows.get(&id).cloned()}) }
           else if self.options.cursor { Box::new(rosorah_windows::window::MonitorBackend{id:self.monitors.get(&id).cloned().unwrap_or_default()}) }
@@ -469,20 +472,17 @@ impl Captures {
         if options.target == Target::AutoFullscreen {
             self.armed.insert(id);
         }
+        self.launch(id, options);
+    }
+    /// Starts capturing `id` with the backend its target needs, keeping any error to show.
+    fn launch(&mut self, id: Id, options: Options) {
         self.attempts.insert(id, std::time::Instant::now());
-        self.error = self
-            .engine
-            .start(
-                id,
-                if options.target == Target::AutoFullscreen {
-                    Box::new(crate::renderer_capture::RendererBackend)
-                } else {
-                    self.desktop_backend(id)
-                },
-                options,
-            )
-            .err()
-            .map(|e| e.to_string());
+        let backend: Box<dyn Backend> = if options.target == Target::AutoFullscreen {
+            Box::new(crate::renderer_capture::RendererBackend)
+        } else {
+            self.desktop_backend(id)
+        };
+        self.error = self.engine.start(id, backend, options).err().map(|e| e.to_string());
     }
     pub fn choose_manual(&mut self, id: Id) {
         self.stop(id);
@@ -543,20 +543,7 @@ impl Captures {
             .collect();
         for id in ready {
             if let Some(options) = self.pending.remove(&id) {
-                self.attempts.insert(id, std::time::Instant::now());
-                self.error = self
-                    .engine
-                    .start(
-                        id,
-                        if options.target == Target::AutoFullscreen {
-                            Box::new(crate::renderer_capture::RendererBackend)
-                        } else {
-                            self.desktop_backend(id)
-                        },
-                        options,
-                    )
-                    .err()
-                    .map(|e| e.to_string());
+                self.launch(id, options);
             }
         }
     }
@@ -584,7 +571,9 @@ impl Captures {
     }
 }
 
+#[cfg(any(not(windows), test))]
 struct Playing(gst::Pipeline);
+#[cfg(any(not(windows), test))]
 impl Drop for Playing {
     fn drop(&mut self) {
         let _ = self.0.set_state(gst::State::Null);
@@ -680,6 +669,7 @@ async fn run(
     result
 }
 
+#[cfg(any(not(windows), test))]
 pub(crate) fn pipeline(source: gst::Element) -> Result<(gst::Pipeline, gst_app::AppSink)> {
     let convert = gst::ElementFactory::make("videoconvert").build()?;
     let scale = gst::ElementFactory::make("videoscale").build()?;

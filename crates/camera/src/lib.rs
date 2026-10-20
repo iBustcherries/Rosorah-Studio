@@ -89,6 +89,10 @@ fn media_type() -> Result<IMFMediaType> {
         t.SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 1)?;
         t.SetUINT32(&MF_MT_DEFAULT_STRIDE, WIDTH)?;
         t.SetUINT32(&MF_MT_SAMPLE_SIZE, FRAME_BYTES as u32)?;
+        // Rosorah converts with HD colours in video range; say so, so apps don't guess.
+        t.SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709.0 as u32)?;
+        t.SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32)?;
+        t.SetUINT32(&MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235.0 as u32)?;
         Ok(t)
     }
 }

@@ -434,19 +434,7 @@ fn add_sample_source(p: &mut Project, sample: &crate::alert_samples::Sample, lay
             ..Default::default()
         }),
     });
-    let audio = p.id();
-    p.audio.push(auroracast_core::AudioChannel {
-        id: audio,
-        name: format!("{} (built-in)", sample.name),
-        gain_db: 0.,
-        muted: false,
-        tracks: [true, false, false, false, false, false],
-        delay_ms: 0,
-        monitor: true,
-        monitor_only: false,
-        noise_suppression: Default::default(),
-        media_source: Some(id),
-    });
+    p.add_media_audio(id, format!("{} (built-in)", sample.name)).monitor = true;
     if p.preferences.monitor_device.is_empty() {
         p.preferences.monitor_device = crate::audio::DEFAULT_MONITOR.into();
     }

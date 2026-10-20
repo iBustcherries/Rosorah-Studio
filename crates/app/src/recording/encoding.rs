@@ -118,7 +118,7 @@ impl Codecs {
                 Acceleration::Nvenc => {
                     cmd.args([
                         "-pix_fmt",
-                        "yuv420p",
+                        "nv12",
                         "-preset",
                         "p4",
                         "-tune",
@@ -136,7 +136,7 @@ impl Codecs {
                 Acceleration::Software => {
                     cmd.args([
                         "-pix_fmt",
-                        "yuv420p",
+                        "nv12",
                         "-preset",
                         "veryfast",
                         "-tune",
@@ -181,7 +181,7 @@ impl Codecs {
             Acceleration::Nvenc => {
                 cmd.args([
                     "-pix_fmt",
-                    "yuv420p",
+                    "nv12",
                     "-preset",
                     "p1",
                     "-tune",
@@ -205,7 +205,8 @@ impl Codecs {
                 cmd.args(["-pix_fmt","nv12","-usage","lowlatency","-quality","balanced","-rc","cqp","-qp_i","23","-qp_p","23","-bf","0","-g"]).arg((fps*2).to_string());
             }
             Acceleration::Software => {
-                cmd.args(["-pix_fmt", "yuv420p"]);
+                // x264 takes NV12 as it is; the other software encoders want planar 4:2:0.
+                cmd.args(["-pix_fmt", if self.video == "libx264" { "nv12" } else { "yuv420p" }]);
                 match self.video {
                     "libx264" => {
                         cmd.args(["-preset", "ultrafast", "-tune", "zerolatency", "-crf", "23"]);
@@ -422,12 +423,13 @@ pub(super) fn select_stream(
 pub(super) fn launch_stream(
     canvas: &Canvas,
     codec: &Codecs,
+    nv12: bool,
 ) -> Result<(Encoder, InputWriter, InputWriter)> {
     ensure!(
         codec.stream_kbps.is_some(),
         "Streaming encoder was not checked"
     );
-    launch_target(canvas, codec, Target::Stream)
+    launch_target_tracks(canvas, codec, Target::Stream, 1, nv12)
 }
 
 #[cfg(unix)]
@@ -449,10 +451,9 @@ enum Target<'a> {
     /// Plain frames to a virtual camera device (no encoding; audio is read and dropped).
     Camera(&'a str),
 }
-/// Sends the canvas to a virtual camera: on Linux a v4l2loopback device, on Windows the pipe the
-/// Rosorah camera component reads.
-pub(super) fn launch_camera(canvas: &Canvas, device: &str) -> Result<(Encoder, InputWriter, InputWriter)> {
-    launch_target(canvas, &Codecs::software("rawvideo", "pcm_f32le"), Target::Camera(device))
+/// Sends the canvas to the Linux virtual camera (a v4l2loopback device).
+pub(super) fn launch_camera(canvas: &Canvas, device: &str, nv12: bool) -> Result<(Encoder, InputWriter, InputWriter)> {
+    launch_target_tracks(canvas, &Codecs::software("rawvideo", "pcm_f32le"), Target::Camera(device), 1, nv12)
 }
 #[cfg(test)]
 pub(super) fn launch(
@@ -472,22 +473,24 @@ pub(super) fn launch_tracks(
     codec: &Codecs,
     path: &Path,
     tracks: usize,
+    nv12: bool,
 ) -> Result<(Encoder, InputWriter, InputWriter)> {
     ensure!(!path.exists(), "Recording already exists");
-    launch_target_tracks(canvas, codec, Target::File(path), tracks)
+    launch_target_tracks(canvas, codec, Target::File(path), tracks, nv12)
 }
 fn launch_target(
     canvas: &Canvas,
     codec: &Codecs,
     target: Target<'_>,
 ) -> Result<(Encoder, InputWriter, InputWriter)> {
-    launch_target_tracks(canvas, codec, target, 1)
+    launch_target_tracks(canvas, codec, target, 1, false)
 }
 fn launch_target_tracks(
     canvas: &Canvas,
     codec: &Codecs,
     target: Target<'_>,
     tracks: usize,
+    nv12: bool,
 ) -> Result<(Encoder, InputWriter, InputWriter)> {
     ensure!((1..=6).contains(&tracks), "Invalid recording track count");
     #[cfg(unix)] let (video_read, video_write) = std::io::pipe()?;
@@ -508,6 +511,11 @@ fn launch_target_tracks(
         "1",
     ]);
     codec.device_args(&mut cmd);
+    if nv12 {
+        // Say what the graphics card produced (BT.709, video range). Untagged, a bt709 output tag makes
+        // FFmpeg add a colour conversion after hwupload, which VA-API can't link ("Impossible to convert").
+        cmd.args(["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]);
+    }
     cmd.args([
         "-thread_queue_size",
         "4",
@@ -518,7 +526,8 @@ fn launch_target_tracks(
         "-f",
         "rawvideo",
         "-pixel_format",
-        "rgba",
+        // NV12 when the graphics card converted the frames (3/8 the size, nothing left for FFmpeg to convert).
+        if nv12 { "nv12" } else { "rgba" },
         "-video_size",
     ])
     .arg(format!("{}x{}", canvas.width, canvas.height))
@@ -546,15 +555,8 @@ fn launch_target_tracks(
     if camera {
         // Video to the camera as plain YUV; the audio input is still read (so it never blocks) and dropped.
         let Target::Camera(device) = &target else { unreachable!() };
-        #[cfg(not(windows))]
+        // (Linux only: the Windows camera gets frames from Rosorah directly, without FFmpeg.)
         cmd.args(["-map", "0:v:0", "-vf", "format=yuv420p", "-f", "v4l2"]).arg(device);
-        #[cfg(windows)]
-        {
-            // The camera component offers one fixed picture; the canvas is fitted into it.
-            use rosorah_windows::virtual_camera::{FPS, HEIGHT, WIDTH};
-            let fit = format!("scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,format=nv12");
-            cmd.args(["-map", "0:v:0", "-vf", &fit, "-r", &FPS.to_string(), "-f", "rawvideo", "-y"]).arg(device);
-        }
         cmd.args(["-map", "1:a:0", "-f", "null", "-"]).stderr(Stdio::piped()).stdout(Stdio::null());
         #[cfg(unix)]
         cmd.stdin(Stdio::from(video_read.try_clone()?));
@@ -936,7 +938,7 @@ mod multitrack_tests {
             scene: 1,
         };
         let (mut encoder, mut video, mut audio) =
-            launch_tracks(&c, &Codecs::software("mpeg4", "flac"), &path, 6)?;
+            launch_tracks(&c, &Codecs::software("mpeg4", "flac"), &path, 6, false)?;
         let v = thread::spawn(move || video.write_all(&vec![128; 64 * 64 * 4 * 10]));
         let a = thread::spawn(move || {
             let mut bytes = Vec::with_capacity(48000 * 12 * 4);
