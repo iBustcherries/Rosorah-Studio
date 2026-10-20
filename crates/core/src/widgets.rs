@@ -122,6 +122,14 @@ pub struct Settings {
     pub chat_hide_after: u32,
     /// Chat: show exactly this many of the newest messages, sized to fit; 0 fits as many as the size allows.
     pub chat_rows: u32,
+    /// Chat: messages slide and fade in, and out when they go.
+    pub chat_animate: bool,
+    /// Chat: badges (moderator, subscriber…) before names.
+    pub chat_badges: bool,
+    /// Chat: names in each chatter's own colour.
+    pub chat_name_colors: bool,
+    /// Chat: set apart paid, first-time and highlighted messages.
+    pub chat_highlights: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -165,6 +173,10 @@ impl Default for Settings {
             shadow: false,
             chat_hide_after: 0,
             chat_rows: 0,
+            chat_animate: true,
+            chat_badges: true,
+            chat_name_colors: true,
+            chat_highlights: true,
         }
     }
 }

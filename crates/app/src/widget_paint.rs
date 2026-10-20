@@ -208,9 +208,10 @@ pub fn preview(s: &Settings, sample: bool) -> anyhow::Result<Frame> {
             return Ok(polished_goal(s, s.target.saturating_mul(65) / 100));
         }
     }
-    let state = State::new(s.clone());
+    let mut state = State::new(s.clone());
     let text = if sample && s.kind == Kind::AlertBox {
-        "Juniper just subscribed!".into()
+        let subject = auroracast_core::AlertSubject { kind: Some(auroracast_core::EventKind::Subscription), platform: Some(Platform::Twitch), author: "juniper".into() };
+        format!("{}juniper just subscribed!", alert_head(&subject))
     } else {
         state.lines()
     };

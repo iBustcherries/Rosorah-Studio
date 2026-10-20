@@ -12,6 +12,15 @@ pub struct ChatMetadata {
     pub user_id: String,
     pub first_ever: bool,
     pub historical: bool,
+    /// The chatter's name colour ("#rrggbb"), where the platform gives one.
+    #[serde(default)]
+    pub color: String,
+    /// Badge pictures (https addresses) or roles ("moderator", "vip"…), in the order shown.
+    #[serde(default)]
+    pub badges: Vec<String>,
+    /// "paid", "first" or "highlight": messages the chat widget sets apart.
+    #[serde(default)]
+    pub highlight: String,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PhraseMode {

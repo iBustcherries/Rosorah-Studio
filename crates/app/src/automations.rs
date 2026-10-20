@@ -163,6 +163,8 @@ pub enum Command {
     Stop,
     Skip,
     Clear,
+    /// Make another alert box and show this rule's step (rule, step index) in it.
+    NewAlertBox(Id, usize),
 }
 #[derive(Clone, Debug)]
 pub struct TestEvent {
@@ -443,7 +445,7 @@ fn template_rule(p: &mut Project, label: &str, event: EventKind, text: &str) -> 
         },
         (_, EventKind::ChatCommand | EventKind::FirstMessage | EventKind::Timer) => vec![Action::SendChat { text: text.into(), platforms: vec![], sender: Default::default() }],
         _ => match alert_box {
-            Some(source) if is_alert(event) => vec![Action::DisplayAlert { source, template: text.into(), media: None, seconds: 6 }],
+            Some(source) if is_alert(event) => vec![Action::DisplayAlert { source, template: text.into(), media: None, seconds: 6, subject: Default::default() }],
             _ => vec![Action::ShowAlert { template: text.into(), seconds: 5 }],
         },
     };
@@ -1115,6 +1117,7 @@ impl Editor {
             let action_count = r.actions.len();
             // Steps slide aside while one is dragged, showing where it will land.
             let mut shift = crate::studio::ShiftDrag::begin(ui, ui.id().with("automation-steps"), false, p.preferences.workspace.animations, action_count);
+            let rule_id = r.id;
             for (i, a) in r.actions.iter_mut().enumerate() {
                 shift.item(ui, i, |ui| {
                     let mut grab = None;
@@ -1133,7 +1136,7 @@ impl Editor {
                                     }
                                 });
                             });
-                            changed |= self.action_body(ui, i, a, &mut p.sources, &p.canvases, &p.scenes, &mut p.audio, &mut p.preferences.monitor_device, cmds, &mut sample_choice);
+                            changed |= self.action_body(ui, (rule_id, i), a, &mut p.sources, &p.canvases, &p.scenes, &mut p.audio, &mut p.preferences.monitor_device, cmds, &mut sample_choice);
                         });
                         ui.add_space(4.);
                     });
@@ -1159,7 +1162,7 @@ impl Editor {
                 if let Some(alert_box) = p.sources.iter().find(|s| matches!(&s.kind, SourceKind::Widget(w) if w.kind == auroracast_core::widgets::Kind::AlertBox)).map(|s| s.id)
                     && ui.button("Show alert").clicked()
                 {
-                    r.actions.push(Action::DisplayAlert { source: alert_box, template: "Thanks, {user}!".into(), media: None, seconds: 6 });
+                    r.actions.push(Action::DisplayAlert { source: alert_box, template: "Thanks, {user}!".into(), media: None, seconds: 6, subject: Default::default() });
                 }
                 if ui.button("Show text").clicked() {
                     r.actions.push(Action::ShowAlert { template: "Thanks, {user}!".into(), seconds: 5 });
@@ -1203,7 +1206,7 @@ impl Editor {
     fn action_body(
         &mut self,
         ui: &mut egui::Ui,
-        i: usize,
+        (rule_id, i): (Id, usize),
         a: &mut Action,
         sources: &mut [auroracast_core::Source],
         canvases: &[auroracast_core::Canvas],
@@ -1217,7 +1220,26 @@ impl Editor {
         let media_name = |sources: &[auroracast_core::Source], id: Id| sources.iter().find(|s| s.id == id).map(|s| s.name.clone());
         let sound = matches!(a, Action::PlaySound { .. });
         match a {
-            Action::DisplayAlert { source, template, media, seconds } => {
+            Action::DisplayAlert { source, template, media, seconds, .. } => {
+                // One shared alert box shows everything; an alert can have a box of its own.
+                ui.horizontal(|ui| {
+                    ui.label("Show in");
+                    let boxes: Vec<(Id, String)> = sources
+                        .iter()
+                        .filter(|s| matches!(&s.kind, SourceKind::Widget(w) if w.kind == auroracast_core::widgets::Kind::AlertBox))
+                        .map(|s| (s.id, s.name.clone()))
+                        .collect();
+                    let current = boxes.iter().find(|(id, _)| id == source).map_or("Alerts", |(_, n)| n.as_str()).to_string();
+                    egui::ComboBox::from_id_salt(("alert_box", i)).selected_text(current).show_ui(ui, |ui| {
+                        for (id, name) in &boxes {
+                            changed |= ui.selectable_value(source, *id, name).changed();
+                        }
+                        ui.separator();
+                        if ui.button("New alert box…").on_hover_text("Adds another alert box to this scene for this alert; move and size it like any layer").clicked() {
+                            cmds.push(Command::NewAlertBox(rule_id, i));
+                        }
+                    });
+                });
                 if let Some(s) = sources.iter_mut().find(|s| s.id == *source)
                     && let SourceKind::Widget(w) = &mut s.kind
                 {

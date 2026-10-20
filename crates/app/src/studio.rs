@@ -5831,6 +5831,7 @@ if changed{self.changed();}
                 }
             }
             Command::Clear => self.automation_queue.clear(),
+            Command::NewAlertBox(rule, step) => self.new_alert_box(rule, step),
             Command::TestWith(id, details) => {
                 let Some(mut rule) = self.project.rules.iter().find(|r| r.id == id).cloned() else {
                     return;
@@ -5978,7 +5979,7 @@ if changed{self.changed();}
     }
     fn shared_alert(&mut self,text:&str,seconds:u32,media:Option<Id>){
         if let Some(id)=self.project.sources.iter().find(|s|matches!(&s.kind,SourceKind::Widget(w) if w.kind==widgets::Kind::AlertBox)).map(|s|s.id){
-            self.captures.widgets.target_alert(id,text,seconds,media);
+            self.captures.widgets.target_alert(id,text,seconds,media,&Default::default());
         }else{
             self.automation_queue.log("Visual alert skipped: add Alerts from In this scene > + Add".into());
         }
@@ -6039,7 +6040,7 @@ if changed{self.changed();}
     fn run_actions(&mut self, actions: Vec<Action>) {
         for action in actions {
             match &action {
-                Action::DisplayAlert{source,template,media,seconds}=>{self.captures.widgets.target_alert(*source,template,*seconds,*media);},
+                Action::DisplayAlert{source,template,media,seconds,subject}=>{self.captures.widgets.target_alert(*source,template,*seconds,*media,subject);},
                 Action::PlaySound{source}=>{self.captures.videos.trigger(*source);},
                 Action::SendChat{text,platforms,sender}=>{
                     for platform in platforms {
@@ -6425,6 +6426,14 @@ impl eframe::App for Studio {
                     self.captures
                         .widgets
                         .activity(platform, &event.author, &event.text);
+                    // Super Chats, donations and Kicks show in chat widgets too, set apart. (Twitch
+                    // cheers already arrive as chat messages.)
+                    if matches!(kind, EventKind::SuperChat | EventKind::SuperSticker | EventKind::Donation)
+                        || (kind == EventKind::Bits && platform == Platform::Kick)
+                    {
+                        let look = crate::widgets::ChatLook { highlight: "paid", ..Default::default() };
+                        self.captures.widgets.chat(platform, &event.author, &event.text, &look);
+                    }
                     if !self.automation_queue.paused {
                         self.captures
                             .widgets
@@ -6582,7 +6591,9 @@ impl eframe::App for Studio {
                         Some(parts) if parts.iter().any(|p| p.src.is_some()) => crate::chat_render::marked(parts, 240),
                         _ => event.text.clone(),
                     };
-                    self.captures.widgets.chat(event.platform, &event.author, &text);
+                    let metadata = self.chat.messages().find(|m| m.platform == event.platform && m.id == event.id).map(|m| m.metadata.clone()).unwrap_or_default();
+                    let look = crate::widgets::ChatLook { color: &metadata.color, badges: &metadata.badges, highlight: &metadata.highlight };
+                    self.captures.widgets.chat(event.platform, &event.author, &text, &look);
                 }
                 self.dispatch_automations(&event, false, false);
             }

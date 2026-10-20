@@ -71,14 +71,7 @@ pub fn get(platform: &str, author: &str) -> Option<Arc<RgbaImage>> {
             return picture.clone();
         }
     }
-    s.pictures.insert(key.clone(), (None, Instant::now()));
-    s.order.retain(|k| k != &key);
-    s.order.push_back(key.clone());
-    while s.order.len() > KEEP {
-        if let Some(old) = s.order.pop_front() {
-            s.pictures.remove(&old);
-        }
-    }
+    s.remember(&key);
     let hint = s.hints.get(&key).cloned().unwrap_or_default();
     if hint.starts_with("https://") {
         s.loading.insert(key.clone());
@@ -95,6 +88,25 @@ pub fn get(platform: &str, author: &str) -> Option<Arc<RgbaImage>> {
     }
     None
 }
+/// A small picture (such as a chat badge) by its address, once loaded. Asking starts loading it.
+pub fn picture(url: &str) -> Option<Arc<RgbaImage>> {
+    // Twitch's badge addresses end in their size; ask for the sharpest.
+    let url = match url.strip_suffix("/1").or_else(|| url.strip_suffix("/2")) {
+        Some(base) if url.starts_with("https://static-cdn.jtvnw.net/badges/") => format!("{base}/3"),
+        _ => url.to_string(),
+    };
+    let key = format!("url:{url}");
+    let mut s = store().lock().unwrap();
+    if let Some((picture, at)) = s.pictures.get(&key) {
+        if picture.is_some() || at.elapsed() < RETRY {
+            return picture.clone();
+        }
+    }
+    s.remember(&key);
+    s.loading.insert(key.clone());
+    s.send(Job::Download(key, url));
+    None
+}
 /// True once the chatter's picture has loaded, turned out not to exist, or has taken longer than
 /// WAIT (it then appears when it arrives).
 pub fn ready(platform: &str, author: &str) -> bool {
@@ -106,6 +118,18 @@ pub fn ready(platform: &str, author: &str) -> bool {
     }
 }
 impl Store {
+    /// Marks a picture as loading, forgetting the oldest beyond KEEP.
+    fn remember(&mut self, key: &str) {
+        self.pictures.insert(key.into(), (None, Instant::now()));
+        self.order.retain(|k| k != key);
+        self.order.push_back(key.into());
+        while self.order.len() > KEEP {
+            if let Some(old) = self.order.pop_front() {
+                self.pictures.remove(&old);
+                self.loading.remove(&old);
+            }
+        }
+    }
     fn send(&mut self, job: Job) {
         if cfg!(test) {
             return;

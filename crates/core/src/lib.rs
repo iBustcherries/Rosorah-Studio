@@ -862,9 +862,23 @@ pub enum ChatSender {
     Bot,
     Streamer,
 }
+/// Who and what a shown alert is about, filled in when the alert runs (never saved).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AlertSubject {
+    pub kind: Option<EventKind>,
+    pub platform: Option<Platform>,
+    pub author: String,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Action {
-    DisplayAlert { source: Id, template: String, media: Option<Id>, seconds: u32 },
+    DisplayAlert {
+        source: Id,
+        template: String,
+        media: Option<Id>,
+        seconds: u32,
+        #[serde(skip)]
+        subject: AlertSubject,
+    },
     PlaySound { source: Id },
     SendChat {
         text: String,

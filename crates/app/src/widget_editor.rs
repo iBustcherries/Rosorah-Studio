@@ -18,7 +18,6 @@ fn widget_settings(kind: widgets::Kind) -> widgets::Settings {
     };
     settings.apply_theme(widgets::Theme::Material);
     if kind == widgets::Kind::AlertBox {
-        settings.background = [0, 0, 0, 0];
         settings.platforms.push(Platform::Donations);
     }
     if kind == widgets::Kind::Chat {
@@ -68,8 +67,23 @@ impl Studio {
         }
     }
 
+    /// Points alerts whose box is gone at `box_id`; alerts given a box of their own keep it.
     fn route_visual_alerts(&mut self,box_id:Id){
-        for rule in &mut self.project.rules {for action in &mut rule.actions {if let auroracast_core::Action::DisplayAlert{source,..}=action{*source=box_id;}}}
+        let boxes:Vec<Id>=self.project.sources.iter().filter(|s|matches!(&s.kind,SourceKind::Widget(w) if w.kind==widgets::Kind::AlertBox)).map(|s|s.id).collect();
+        for rule in &mut self.project.rules {for action in &mut rule.actions {if let auroracast_core::Action::DisplayAlert{source,..}=action && !boxes.contains(source){*source=box_id;}}}
+    }
+    /// Another alert box for one alert step: added to this scene, and the step shows in it.
+    pub(crate) fn new_alert_box(&mut self, rule: Id, step: usize) {
+        let count = self.project.sources.iter().filter(|s| matches!(&s.kind, SourceKind::Widget(w) if w.kind == widgets::Kind::AlertBox)).count();
+        let id = self.create_widget(widgets::Kind::AlertBox);
+        if let Some(s) = self.project.sources.iter_mut().find(|s| s.id == id) {
+            s.name = format!("Alerts {}", count + 1);
+        }
+        if let Some(auroracast_core::Action::DisplayAlert { source, .. }) = self.project.rules.iter_mut().find(|r| r.id == rule).and_then(|r| r.actions.get_mut(step)) {
+            *source = id;
+        }
+        self.message = format!("Added Alerts {}: move and size it on the canvas", count + 1);
+        self.changed();
     }
     fn add_widget(&mut self, kind: widgets::Kind) {
         let scene = self.project.canvases[self.canvas].scene;
@@ -86,6 +100,16 @@ impl Studio {
                 self.message="Using the shared Alerts box".into();self.changed();return;
             }
         }
+        let id = self.create_widget(kind);
+        if kind==widgets::Kind::AlertBox {self.route_visual_alerts(id);}
+        self.widget_editor.id = Some(id);
+        self.widget_editor.sample = true;
+        self.widget_editor.key = 0;
+        self.changed();
+    }
+    /// Adds a new widget of this kind to the current scene and selects its layer.
+    fn create_widget(&mut self, kind: widgets::Kind) -> Id {
+        let scene = self.project.canvases[self.canvas].scene;
         let id = self.project.id();
         let settings = widget_settings(kind);
         let canvas = &self.project.canvases[self.canvas];
@@ -107,11 +131,7 @@ impl Studio {
             self.layer = Some(scene.layers.len() - 1);
         }
         self.selections.insert(scene,vec![self.layer.unwrap_or(0)]);
-        if kind==widgets::Kind::AlertBox {self.route_visual_alerts(id);}
-        self.widget_editor.id = Some(id);
-        self.widget_editor.sample = true;
-        self.widget_editor.key = 0;
-        self.changed();
+        id
     }
     fn widget_editor_window(&mut self, ctx: &egui::Context) {
         let mut editor = std::mem::take(&mut self.widget_editor);

@@ -1763,6 +1763,187 @@ fn title_of(s: &Settings) -> &str {
 
 // ---------- Chat ----------
 
+/// Chat widget rows travel as text: an optional ROW_ANIM part ("enter,leave" in thousandths, while
+/// the message comes or goes), "Platform · ", an optional ROW_LOOK part (name colour, highlight
+/// and badges), then "author: message".
+const ROW_ANIM: [char; 2] = ['\u{e008}', '\u{e009}'];
+const ROW_LOOK: [char; 3] = ['\u{e005}', '\u{e007}', '\u{e006}'];
+/// Seconds a chat message takes to come in, and to go.
+const CHAT_IN: f32 = 0.35;
+const CHAT_OUT: f32 = 0.45;
+/// Longest a chat message gets in the widget.
+const CHAT_LINES: usize = 3;
+
+/// One chat message as the widget shows it.
+struct ChatRow<'a> {
+    platform: &'a str,
+    author: &'a str,
+    body: &'a str,
+    color: Option<[u8; 4]>,
+    highlight: &'a str,
+    badges: Vec<&'a str>,
+    /// 0 → 1 while it comes in, then 1.
+    enter: f32,
+    /// 0, then 0 → 1 while it goes.
+    leave: f32,
+}
+impl ChatRow<'_> {
+    /// How much of the row is there (its height and opacity) while it comes and goes.
+    fn presence(&self) -> f32 {
+        ease(self.enter) * (1. - ease(self.leave))
+    }
+    /// Sideways movement while it comes and goes, as a share of the slide distance.
+    fn slide(&self) -> f32 {
+        -(1. - ease(self.enter)) - ease(self.leave)
+    }
+}
+fn ease(t: f32) -> f32 {
+    1. - (1. - t.clamp(0., 1.)).powi(3)
+}
+fn chat_row(row: &str) -> ChatRow<'_> {
+    let (mut enter, mut leave, mut row) = (1., 0., row);
+    if let Some((anim, rest)) = row.strip_prefix(ROW_ANIM[0]).and_then(|r| r.split_once(ROW_ANIM[1])) {
+        let (a, b) = anim.split_once(',').unwrap_or((anim, "0"));
+        enter = a.parse::<f32>().unwrap_or(1000.) / 1000.;
+        leave = b.parse::<f32>().unwrap_or(0.) / 1000.;
+        row = rest;
+    }
+    let (platform, rest) = row.split_once(" · ").unwrap_or(("", row));
+    let (look, rest) = rest.strip_prefix(ROW_LOOK[0]).and_then(|r| r.split_once(ROW_LOOK[2])).unwrap_or(("", rest));
+    let mut fields = look.split(ROW_LOOK[1]);
+    let color = fields.next().and_then(parse_hex);
+    let highlight = fields.next().unwrap_or("");
+    let badges = fields.filter(|b| !b.is_empty()).collect();
+    let (author, body) = rest.split_once(": ").unwrap_or(("", rest));
+    ChatRow { platform, author, body, color, highlight, badges, enter, leave }
+}
+fn parse_hex(c: &str) -> Option<[u8; 4]> {
+    let c = c.strip_prefix('#').filter(|c| c.len() == 6)?;
+    let n = u32::from_str_radix(c, 16).ok()?;
+    Some([(n >> 16) as u8, (n >> 8) as u8, n as u8, 255])
+}
+/// The ROW_LOOK part for a message; empty when it has no colour, highlight or badges.
+fn chat_look(color: &str, highlight: &str, badges: &[String]) -> String {
+    if color.is_empty() && highlight.is_empty() && badges.is_empty() {
+        return String::new();
+    }
+    let clean = |t: &str| t.chars().filter(|c| !('\u{e000}'..='\u{e00f}').contains(c) && *c != '\n').collect::<String>();
+    let mut out = format!("{}{}{}{}", ROW_LOOK[0], clean(color), ROW_LOOK[1], clean(highlight));
+    for b in badges.iter().take(6) {
+        out.push(ROW_LOOK[1]);
+        out.push_str(&clean(b));
+    }
+    out.push(ROW_LOOK[2]);
+    out
+}
+/// The chat widget's rows, the last `fixed` of them (0: all). While the newest comes in, the one
+/// it pushes out goes.
+fn chat_rows(text: &str, fixed: usize) -> Vec<ChatRow<'_>> {
+    let mut rows: Vec<ChatRow> = text.lines().skip(1).filter(|r| !r.is_empty()).map(chat_row).collect();
+    if fixed > 0 && rows.len() > fixed {
+        let newest = rows.last().map_or(1., |r| r.enter);
+        let keep = if newest < 1. { fixed + 1 } else { fixed };
+        rows.drain(..rows.len() - keep);
+        if rows.len() > fixed {
+            rows[0].leave = rows[0].leave.max(newest);
+        }
+    }
+    rows
+}
+/// Keeps a message to CHAT_LINES lines, ending a cut one with "…".
+fn clip_lines(lines: &mut Vec<String>) {
+    if lines.len() > CHAT_LINES {
+        lines.truncate(CHAT_LINES);
+        lines[CHAT_LINES - 1].push('…');
+    }
+}
+/// Whether the chat widget's look has room for chatters' pictures (text-only themes don't).
+fn chat_pictures(s: &Settings) -> bool {
+    use auroracast_core::widgets::Layout;
+    !matches!(s.theme, Theme::Terminal | Theme::Led | Theme::GameBoy | Theme::Vaporwave) && !(s.theme == Theme::Pixel && s.layout == Layout::Lines)
+}
+/// The colour that sets a highlighted message apart, and its tag.
+fn highlight_style(l: &Look, highlight: &str) -> Option<([u8; 4], &'static str)> {
+    match highlight {
+        "paid" => Some(([255, 184, 48, 255], "SUPPORT")),
+        "first" => Some(([46, 204, 113, 255], "FIRST CHAT")),
+        "highlight" => Some((l.accent, "HIGHLIGHT")),
+        _ => None,
+    }
+}
+/// A chatter's own name colour, adjusted so it reads on this panel.
+fn readable(l: &Look, c: [u8; 4]) -> [u8; 4] {
+    let y = luma(c);
+    if l.light && y > 0.5 {
+        darken(c, ((y - 0.4) * 1.3).min(0.6))
+    } else if !l.light && y < 0.4 {
+        lighten(c, ((0.5 - y) * 1.3).min(0.6))
+    } else {
+        c
+    }
+}
+fn role_badge(role: &str) -> Option<(&'static str, [u8; 4])> {
+    Some(match role {
+        "broadcaster" => ("HOST", [233, 25, 22, 255]),
+        "moderator" => ("MOD", [0, 173, 3, 255]),
+        "vip" => ("VIP", [224, 5, 185, 255]),
+        "subscriber" => ("SUB", [145, 70, 255, 255]),
+        "member" => ("MEMBER", [43, 166, 64, 255]),
+        "founder" => ("FOUNDER", [255, 128, 0, 255]),
+        "og" => ("OG", [214, 158, 16, 255]),
+        "verified" => ("VERIFIED", [62, 130, 247, 255]),
+        "staff" => ("STAFF", [90, 90, 100, 255]),
+        _ => return None,
+    })
+}
+/// Badges before a chatter's name, `h` tall around `mid_y`: the platform's own pictures, or a tag
+/// for the role. Measures only, without a canvas. Returns the width used, gap included.
+fn badges_at(mut p: Option<&mut Paint>, l: &Look, badges: &[&str], x: f32, mid_y: f32, h: f32) -> f32 {
+    let mut pen = x;
+    for b in badges {
+        if b.starts_with("https://") {
+            let Some(picture) = crate::avatars::picture(b) else { continue };
+            let w = (h * picture.width() as f32 / picture.height().max(1) as f32).round().max(1.);
+            if let Some(p) = p.as_deref_mut() {
+                let scaled = image::imageops::resize(picture.as_ref(), w as u32, h.round().max(1.) as u32, image::imageops::FilterType::Triangle);
+                for (px, py, c) in scaled.enumerate_pixels() {
+                    p.blend(pen.round() as i32 + px as i32, (mid_y - h / 2.).round() as i32 + py as i32, c.0, 1.);
+                }
+            }
+            pen += w + h * 0.25;
+        } else if let Some((label, c)) = role_badge(b) {
+            let size = h * 0.55;
+            let w = l.width(Role::Label, label, size) + size * 1.4;
+            if let Some(p) = p.as_deref_mut() {
+                l.pill(p, label, pen + w, mid_y, size, c, [255; 4]);
+            }
+            pen += w + h * 0.25;
+        }
+    }
+    pen - x
+}
+/// Draws one chat row: straight onto the canvas while it's still, or onto a layer that's moved
+/// sideways, faded and kept between `clip` (top, bottom) while it comes and goes.
+fn chat_layer(p: &mut Paint, alpha: f32, dx: f32, clip: (f32, f32), draw: impl FnOnce(&mut Paint)) {
+    if alpha >= 0.999 && dx.abs() < 0.5 {
+        draw(p);
+        return;
+    }
+    let mut layer = Paint { pixels: vec![0; p.pixels.len()], width: p.width, height: p.height };
+    draw(&mut layer);
+    let (y0, y1) = (clip.0.max(0.).floor() as u32, (clip.1.ceil().max(0.) as u32).min(p.height));
+    let dx = dx.round() as i32;
+    for y in y0..y1 {
+        for x in 0..layer.width {
+            let o = ((y * layer.width + x) * 4) as usize;
+            let px = &layer.pixels[o..o + 4];
+            if px[3] > 0 {
+                p.blend(x as i32 + dx, y as i32, [px[0], px[1], px[2], px[3]], alpha);
+            }
+        }
+    }
+}
+
 fn polished_chat(s: &Settings, text: &str, at_ms: u64) -> Frame {
     use auroracast_core::widgets::Layout;
     let l = Look::new(s);
@@ -1799,20 +1980,23 @@ fn polished_chat(s: &Settings, text: &str, at_ms: u64) -> Frame {
         (s.font_size as f32).min(area.w / 11.).min(area.h / 9.5).clamp(13., 44.)
     };
     let fg = if l.retro_window() { l.field_fg } else { l.fg };
-    let rows = chat_rows(text, fixed);
-    let name_color = |platform: &str| -> [u8; 4] {
-        if s.theme == Theme::Unified || l.retro_window() {
-            if l.retro_window() { darken(platform_color(platform), 0.25) } else { lighten(platform_color(platform), 0.25) }
+    // Text-only looks keep their single colour.
+    let own_colors = s.chat_name_colors && !l.glows() && !matches!(s.theme, Theme::GameBoy | Theme::Vaporwave);
+    let name_color = |row: &ChatRow| -> [u8; 4] {
+        if let Some(c) = row.color.filter(|_| own_colors) {
+            readable(&l, c)
+        } else if s.theme == Theme::Unified || l.retro_window() {
+            if l.retro_window() { darken(platform_color(row.platform), 0.25) } else { lighten(platform_color(row.platform), 0.25) }
         } else if l.glows() || s.theme == Theme::GameBoy {
             if l.light { darken(l.fg, 0.2) } else { lighten(l.fg, 0.25) }
         } else {
             l.ink(l.accent)
         }
     };
+    let highlight = |row: &ChatRow| highlight_style(&l, row.highlight).filter(|_| s.chat_highlights);
     // Lay out newest first from the bottom, keeping what fits.
-    struct Row<'a> {
-        platform: &'a str,
-        author: &'a str,
+    struct Placed<'a> {
+        row: ChatRow<'a>,
         lines: Vec<String>,
         h: f32,
     }
@@ -1822,11 +2006,17 @@ fn polished_chat(s: &Settings, text: &str, at_ms: u64) -> Frame {
     let lane_w = area.w - if bubble_avatar > 0. { bubble_avatar + size * 0.4 } else { 0. };
     // Compact lines get a small picture before the name, except on the text-only themes.
     let inline = if log && !l.retro_window() && !matches!(s.theme, Theme::Terminal | Theme::Led | Theme::GameBoy | Theme::Pixel) && area.w >= 260. { size * 1.15 } else { 0. };
-    let mut placed: Vec<Row> = Vec::new();
+    let mut placed: Vec<Placed> = Vec::new();
     let mut total = 0.;
-    for &(platform, author, body) in rows.iter().rev() {
+    for row in chat_rows(text, fixed).into_iter().rev() {
+        let (author, body) = (row.author, row.body);
         let (lines, h) = if log {
-            let lead = l.width(Role::Strong, &format!("{author}  "), size) + if s.theme == Theme::Terminal { l.width(Role::Body, "> ", size) } else { 0. } + if inline > 0. { inline + size * 0.4 } else { 0. };
+            // Measured as drawn: the name, its colon or brackets, and the space after.
+            let name = if s.theme == Theme::Terminal { format!("<{author}>") } else { format!("{author}:") };
+            let lead = l.width(Role::Strong, &name, size) + l.width(Role::Body, " ", size) * 1.6 + 2.
+                + if s.theme == Theme::Terminal { l.width(Role::Body, "> ", size) } else { 0. }
+                + if inline > 0. { inline + size * 0.4 } else { 0. }
+                + if s.chat_badges { badges_at(None, &l, &row.badges, 0., 0., size * 0.95) } else { 0. };
             let mut lines = l.wrap(Role::Body, body, area.w - lead, size);
             clip_lines(&mut lines);
             let n = lines.len() as f32;
@@ -1842,11 +2032,12 @@ fn polished_chat(s: &Settings, text: &str, at_ms: u64) -> Frame {
             let n = lines.len() as f32;
             (lines, size * 0.62 * 1.25 + n * size * 1.24 + size * 0.85)
         };
-        if total + h > area.h && !placed.is_empty() {
+        let room = (h + gap) * row.presence();
+        if total + h * row.presence() > area.h && !placed.is_empty() {
             break;
         }
-        total += h + gap;
-        placed.push(Row { platform, author, lines, h });
+        total += room;
+        placed.push(Placed { row, lines, h });
         if total > area.h {
             break;
         }
@@ -1854,146 +2045,154 @@ fn polished_chat(s: &Settings, text: &str, at_ms: u64) -> Frame {
     if !s.reverse {
         placed.reverse();
     }
+    let slide = (area.w * 0.08).clamp(16., 60.);
     let mut y = if s.reverse { area.y } else { (area.bottom() - total + gap).max(area.y) };
-    for (i, row) in placed.iter().enumerate() {
-        let color = name_color(row.platform);
-        if log {
-            let mut x = area.x;
-            let base = y + size * 1.05;
-            if s.theme == Theme::Terminal {
-                x += l.text(&mut p, Role::Body, "> ", x, base, size, l.ter, 60.);
-            }
-            if inline > 0. {
-                avatar_at(&mut p, &l, row.platform, row.author, x, base - size * 0.92, inline, inline / 2.);
-                x += inline + size * 0.4;
-            }
-            let name = if s.theme == Theme::Terminal { format!("<{}>", row.author) } else { format!("{}:", row.author) };
-            let lead = l.text(&mut p, Role::Strong, &name, x, base, size, color, area.w * 0.4) + l.width(Role::Body, " ", size) * 1.6;
-            for (j, line) in row.lines.iter().enumerate() {
-                l.rich(&mut p, Role::Body, line, x + lead, base + j as f32 * size * 1.32, size, fg, area.right() - x - lead, at_ms);
-            }
-        } else if bubbles {
-            let right = i % 2 == 1;
-            let lane = if bubble_avatar > 0. {
-                let pic_x = if right { area.right() - bubble_avatar } else { area.x };
-                avatar_at(&mut p, &l, row.platform, row.author, pic_x, y + row.h - bubble_avatar, bubble_avatar, bubble_avatar / 2.);
-                Area { x: if right { area.x } else { area.x + area.w - lane_w }, w: lane_w, ..area }
+    for (i, placed_row) in placed.iter().enumerate() {
+        let Placed { row, lines, h } = placed_row;
+        let h = *h;
+        let presence = row.presence();
+        // A row on its way in or out tucks under the widget's edge as its room opens or closes.
+        let top_y = if i == 0 { y - (h + gap) * (1. - presence) } else { y };
+        let color = name_color(row);
+        let shine = highlight(row);
+        let row_badges: &[&str] = if s.chat_badges { &row.badges } else { &[] };
+        let (author, platform) = (row.author, row.platform);
+        // Bubbles: each chatter keeps a side.
+        let right = bubbles && author.bytes().fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32)) % 2 == 1;
+        let dx = row.slide() * slide * if right { -1. } else { 1. };
+        chat_layer(&mut p, presence, dx, (area.y, area.bottom()), |p| {
+            let y = top_y;
+            if log {
+                if let Some((c, _)) = shine {
+                    p.fill_rr(area.x - 6., y, area.w + 12., h, 4., fade(c, 0.24), fade(c, 0.12));
+                    p.fill_rr(area.x - 6., y, 3., h, 0., c, c);
+                }
+                let mut x = area.x;
+                let base = y + size * 1.05;
+                if s.theme == Theme::Terminal {
+                    x += l.text(p, Role::Body, "> ", x, base, size, l.ter, 60.);
+                }
+                if inline > 0. {
+                    avatar_at(p, &l, platform, author, x, base - size * 0.92, inline, inline / 2.);
+                    x += inline + size * 0.4;
+                }
+                x += badges_at(Some(p), &l, row_badges, x, base - size * 0.36, size * 0.95);
+                let name = if s.theme == Theme::Terminal { format!("<{author}>") } else { format!("{author}:") };
+                let lead = l.text(p, Role::Strong, &name, x, base, size, color, area.w * 0.4) + l.width(Role::Body, " ", size) * 1.6;
+                for (j, line) in lines.iter().enumerate() {
+                    l.rich(p, Role::Body, line, x + lead, base + j as f32 * size * 1.32, size, fg, area.right() - x - lead, at_ms);
+                }
+            } else if bubbles {
+                let lane = if bubble_avatar > 0. {
+                    let pic_x = if right { area.right() - bubble_avatar } else { area.x };
+                    avatar_at(p, &l, platform, author, pic_x, y + h - bubble_avatar, bubble_avatar, bubble_avatar / 2.);
+                    Area { x: if right { area.x } else { area.x + area.w - lane_w }, w: lane_w, ..area }
+                } else {
+                    area
+                };
+                let area = lane;
+                let caption = (size * 0.55).max(11.);
+                let badge_w = badges_at(None, &l, row_badges, 0., 0., caption * 1.3);
+                let name_w = l.width(Role::Strong, author, caption) + badge_w;
+                let width = lines.iter().map(|t| l.rich_width(Role::Body, t, size)).fold(0., f32::max) + size * 1.6;
+                let width = width.max(name_w + size * 1.6).min(area.w * 0.8);
+                let bh = h - caption * 1.7;
+                let x = if right { area.right() - width } else { area.x };
+                let by = y + caption * 1.6;
+                let name_x = if right { area.right() - name_w - 6. } else { area.x + 6. };
+                let name_x = name_x + badges_at(Some(p), &l, row_badges, name_x, y + caption * 0.72, caption * 1.3);
+                let name_c = if own_colors && row.color.is_some() { color } else if s.theme == Theme::Transparent { l.fg } else { lighten(platform_color(platform), 0.35) };
+                l.text(p, Role::Strong, author, name_x, y + caption * 1.1, caption, name_c, area.w);
+                let (top, bottom, text_c) = match shine {
+                    Some(([255, 184, 48, 255], _)) => ([255, 200, 80, 245], [240, 160, 30, 245], [40, 26, 0, 255]),
+                    _ if right => (lighten(l.accent, 0.12), darken(l.accent, 0.08), on_color(l.accent)),
+                    _ => ([58, 58, 66, 238], [44, 44, 52, 238], [255; 4]),
+                };
+                p.shadow_rr(x, by + 3., width, bh, size * 0.9, 8., [0, 0, 0, 70]);
+                p.fill_rr(x, by, width, bh, size * 0.9, top, bottom);
+                if let Some((c, _)) = shine {
+                    p.stroke_rr(x, by, width, bh, size * 0.9, 2., c);
+                }
+                // The tail at the bottom corner.
+                let tail_x = if right { x + width - 6. } else { x + 6. };
+                p.circle(tail_x, by + bh - 6., 7., bottom);
+                p.circle(if right { tail_x + 7. } else { tail_x - 7. }, by + bh + 1., 3., bottom);
+                for (j, line) in lines.iter().enumerate() {
+                    l.rich(p, Role::Body, line, x + size * 0.8, by + size * 1.15 + j as f32 * size * 1.3, size, text_c, width - size * 1.6 + 4., at_ms);
+                }
             } else {
-                area
-            };
-            let area = lane;
-            let caption = (size * 0.55).max(11.);
-            let width = row.lines.iter().map(|t| l.rich_width(Role::Body, t, size)).fold(0., f32::max) + size * 1.6;
-            let width = width.max(l.width(Role::Strong, row.author, caption) + size * 1.6).min(area.w * 0.8);
-            let bh = row.h - caption * 1.7;
-            let x = if right { area.right() - width } else { area.x };
-            let by = y + caption * 1.6;
-            let name_x = if right { area.right() - l.width(Role::Strong, row.author, caption) - 6. } else { area.x + 6. };
-            l.text(&mut p, Role::Strong, row.author, name_x, y + caption * 1.1, caption, if s.theme == Theme::Transparent { l.fg } else { lighten(platform_color(row.platform), 0.35) }, area.w);
-            let (top, bottom, text_c) = if right {
-                (lighten(l.accent, 0.12), darken(l.accent, 0.08), on_color(l.accent))
-            } else {
-                ([58, 58, 66, 238], [44, 44, 52, 238], [255; 4])
-            };
-            p.shadow_rr(x, by + 3., width, bh, size * 0.9, 8., [0, 0, 0, 70]);
-            p.fill_rr(x, by, width, bh, size * 0.9, top, bottom);
-            // The tail at the bottom corner.
-            let tail_x = if right { x + width - 6. } else { x + 6. };
-            p.circle(tail_x, by + bh - 6., 7., bottom);
-            p.circle(if right { tail_x + 7. } else { tail_x - 7. }, by + bh + 1., 3., bottom);
-            for (j, line) in row.lines.iter().enumerate() {
-                l.rich(&mut p, Role::Body, line, x + size * 0.8, by + size * 1.15 + j as f32 * size * 1.3, size, text_c, width - size * 1.6, at_ms);
+                // A card per message, with the chatter's picture and the platform.
+                let r = (l.radius * 0.7).clamp(0., 14.);
+                match s.theme {
+                    Theme::Pixel => {
+                        p.fill_rr(area.x, y, area.w, h, 0., darken(l.bg, 0.3), darken(l.bg, 0.3));
+                        p.stroke_rr(area.x, y, area.w, h, 0., 2., fade(l.fg, 0.35));
+                    }
+                    Theme::Broadcast | Theme::Team => {
+                        p.fill_rr(area.x, y, area.w, h, r.min(4.), l.surface, fade(l.surface, 0.6));
+                        p.fill_rr(area.x, y, 4., h, 0., platform_color(platform), platform_color(platform));
+                    }
+                    Theme::Transparent => {
+                        p.fill_rr(area.x, y, area.w, h, r, [0, 0, 0, 90], [0, 0, 0, 60]);
+                    }
+                    Theme::Neubrutalism => {
+                        p.fill_rr(area.x + 4., y + 4., area.w - 4., h, 6., [12, 12, 12, 255], [12, 12, 12, 255]);
+                        p.fill_rr(area.x, y, area.w - 4., h, 6., [255; 4], [255; 4]);
+                        p.stroke_rr(area.x, y, area.w - 4., h, 6., 2.5, [12, 12, 12, 255]);
+                    }
+                    Theme::Cyberpunk => {
+                        let cut = (h * 0.25).min(14.);
+                        let d = |px: f32, py: f32| chamfer_distance(px, py, area.x, y, area.w, h, cut);
+                        p.fill_shape(area.x, y, area.w, h, d, [255, 255, 255, 12], [255, 255, 255, 6]);
+                        p.stroke_shape(area.x, y, area.w, h, d, 1., fade(l.accent, 0.35));
+                        p.fill_rr(area.x, y + cut, 3., h - cut * 2., 0., [0, 240, 255, 255], [0, 240, 255, 255]);
+                    }
+                    Theme::Fantasy | Theme::Cottagecore => {
+                        p.hline(area.x + area.w * 0.1, y + h - 1., area.w * 0.8, fade(l.accent, 0.35));
+                    }
+                    Theme::CozyCafe | Theme::Kawaii | Theme::CleanLight => {
+                        p.fill_rr(area.x, y, area.w, h, r.max(10.), [255, 255, 255, 170], [255, 255, 255, 120]);
+                        p.stroke_rr(area.x, y, area.w, h, r.max(10.), 1., if l.theme == Theme::Kawaii { fade(l.accent, 0.35) } else { [0, 0, 0, 14] });
+                    }
+                    Theme::SciFiHud => {
+                        p.stroke_rr(area.x, y, area.w, h, 0., 1., fade(l.accent, 0.25));
+                        p.fill_rr(area.x, y, 3., h, 0., l.accent, l.accent);
+                    }
+                    _ => {
+                        p.fill_rr(area.x, y, area.w, h, r, lighten(l.surface, 0.02), l.surface);
+                        p.stroke_rr(area.x, y, area.w, h, r, 1., [255, 255, 255, 12]);
+                    }
+                }
+                let cr = if l.square() { 0. } else { r.max(4.) };
+                if let Some((c, _)) = shine {
+                    p.fill_rr(area.x, y, area.w, h, cr, fade(c, 0.2), fade(c, 0.08));
+                    p.stroke_rr(area.x, y, area.w, h, cr, 2., c);
+                }
+                let mut x = area.x + size * 0.7;
+                let top = y + size * 0.45;
+                if avatar > 0. {
+                    let r = if s.theme == Theme::Pixel { 0. } else if l.square() { 3. } else { avatar / 2. };
+                    p.shadow_rr(x, top + 2., avatar, avatar, r, 5., [0, 0, 0, 80]);
+                    avatar_at(p, &l, platform, author, x, top, avatar, r);
+                    x += avatar + size * 0.7;
+                }
+                let name_size = (size * 0.62).max(11.);
+                let name_base = top + name_size * 1.05;
+                let tag = (name_size * 0.72).max(9.);
+                let mut tags = l.pill(p, platform, area.right() - size * 0.6, name_base - name_size * 0.35, tag, fade(platform_color(platform), 0.22), l.ink(platform_color(platform)));
+                if let Some((c, label)) = shine {
+                    tags += l.pill(p, label, area.right() - size * 0.6 - tags - tag * 0.5, name_base - name_size * 0.35, tag, c, on_color(c)) + tag * 0.5;
+                }
+                let name_x = x + badges_at(Some(p), &l, row_badges, x, name_base - name_size * 0.35, name_size * 1.15);
+                l.text(p, Role::Title, author, name_x, name_base, name_size, color, area.right() - name_x - tags - size);
+                for (j, line) in lines.iter().enumerate() {
+                    l.rich(p, Role::Body, line, x, name_base + size * 1.2 + j as f32 * size * 1.24, size, fg, area.right() - x - size * 0.6, at_ms);
+                }
             }
-        } else {
-            // A card per message, with an avatar initial and the platform.
-            let r = (l.radius * 0.7).clamp(0., 14.);
-            match s.theme {
-                Theme::Pixel => {
-                    p.fill_rr(area.x, y, area.w, row.h, 0., darken(l.bg, 0.3), darken(l.bg, 0.3));
-                    p.stroke_rr(area.x, y, area.w, row.h, 0., 2., fade(l.fg, 0.35));
-                }
-                Theme::Broadcast | Theme::Team => {
-                    p.fill_rr(area.x, y, area.w, row.h, r.min(4.), l.surface, fade(l.surface, 0.6));
-                    p.fill_rr(area.x, y, 4., row.h, 0., platform_color(row.platform), platform_color(row.platform));
-                }
-                Theme::Transparent => {
-                    p.fill_rr(area.x, y, area.w, row.h, r, [0, 0, 0, 90], [0, 0, 0, 60]);
-                }
-                Theme::Neubrutalism => {
-                    p.fill_rr(area.x + 4., y + 4., area.w - 4., row.h, 6., [12, 12, 12, 255], [12, 12, 12, 255]);
-                    p.fill_rr(area.x, y, area.w - 4., row.h, 6., [255; 4], [255; 4]);
-                    p.stroke_rr(area.x, y, area.w - 4., row.h, 6., 2.5, [12, 12, 12, 255]);
-                }
-                Theme::Cyberpunk => {
-                    let cut = (row.h * 0.25).min(14.);
-                    let d = |px: f32, py: f32| chamfer_distance(px, py, area.x, y, area.w, row.h, cut);
-                    p.fill_shape(area.x, y, area.w, row.h, d, [255, 255, 255, 12], [255, 255, 255, 6]);
-                    p.stroke_shape(area.x, y, area.w, row.h, d, 1., fade(l.accent, 0.35));
-                    p.fill_rr(area.x, y + cut, 3., row.h - cut * 2., 0., [0, 240, 255, 255], [0, 240, 255, 255]);
-                }
-                Theme::Fantasy | Theme::Cottagecore => {
-                    p.hline(area.x + area.w * 0.1, y + row.h - 1., area.w * 0.8, fade(l.accent, 0.35));
-                }
-                Theme::CozyCafe | Theme::Kawaii | Theme::CleanLight => {
-                    p.fill_rr(area.x, y, area.w, row.h, r.max(10.), [255, 255, 255, 170], [255, 255, 255, 120]);
-                    p.stroke_rr(area.x, y, area.w, row.h, r.max(10.), 1., if l.theme == Theme::Kawaii { fade(l.accent, 0.35) } else { [0, 0, 0, 14] });
-                }
-                Theme::SciFiHud => {
-                    p.stroke_rr(area.x, y, area.w, row.h, 0., 1., fade(l.accent, 0.25));
-                    p.fill_rr(area.x, y, 3., row.h, 0., l.accent, l.accent);
-                }
-                _ => {
-                    p.fill_rr(area.x, y, area.w, row.h, r, lighten(l.surface, 0.02), l.surface);
-                    p.stroke_rr(area.x, y, area.w, row.h, r, 1., [255, 255, 255, 12]);
-                }
-            }
-            let mut x = area.x + size * 0.7;
-            let top = y + size * 0.45;
-            if avatar > 0. {
-                let r = if s.theme == Theme::Pixel { 0. } else if l.square() { 3. } else { avatar / 2. };
-                p.shadow_rr(x, top + 2., avatar, avatar, r, 5., [0, 0, 0, 80]);
-                avatar_at(&mut p, &l, row.platform, row.author, x, top, avatar, r);
-                x += avatar + size * 0.7;
-            }
-            let name_size = (size * 0.62).max(11.);
-            let name_base = top + name_size * 1.05;
-            let tag = (name_size * 0.72).max(9.);
-            let tag_w = l.pill(&mut p, row.platform, area.right() - size * 0.6, name_base - name_size * 0.35, tag, fade(platform_color(row.platform), 0.22), l.ink(platform_color(row.platform)));
-            l.text(&mut p, Role::Title, row.author, x, name_base, name_size, color, area.right() - x - tag_w - size);
-            for (j, line) in row.lines.iter().enumerate() {
-                l.rich(&mut p, Role::Body, line, x, name_base + size * 1.2 + j as f32 * size * 1.24, size, fg, area.right() - x - size * 0.6, at_ms);
-            }
-        }
-        y += row.h + gap;
+        });
+        y += (h + gap) * presence;
     }
     p.finish()
-}
-
-/// Longest a chat message gets in the widget.
-const CHAT_LINES: usize = 3;
-/// Keeps a message to CHAT_LINES lines, ending a cut one with "…".
-fn clip_lines(lines: &mut Vec<String>) {
-    if lines.len() > CHAT_LINES {
-        lines.truncate(CHAT_LINES);
-        lines[CHAT_LINES - 1].push('…');
-    }
-}
-/// Whether the chat widget's look has room for chatters' pictures (text-only themes don't).
-fn chat_pictures(s: &Settings) -> bool {
-    use auroracast_core::widgets::Layout;
-    !matches!(s.theme, Theme::Terminal | Theme::Led | Theme::GameBoy | Theme::Vaporwave) && !(s.theme == Theme::Pixel && s.layout == Layout::Lines)
-}
-/// The chat widget's text as (platform, author, message) rows, the last `fixed` of them (0: all).
-fn chat_rows(text: &str, fixed: usize) -> Vec<(&str, &str, &str)> {
-    let all: Vec<&str> = text.lines().skip(1).filter(|r| !r.is_empty()).collect();
-    all[all.len().saturating_sub(if fixed > 0 { fixed } else { usize::MAX })..]
-        .iter()
-        .map(|row| {
-            let (platform, rest) = row.split_once(" · ").unwrap_or(("", row));
-            let (author, body) = rest.split_once(": ").unwrap_or(("", rest));
-            (platform, author, body)
-        })
-        .collect()
 }
 /// A chatter's profile picture, `d` across with corner radius `r`, or their initial on the
 /// platform's colour until the picture loads (or when there is none).
@@ -2036,38 +2235,59 @@ fn window_chat(s: &Settings, mut l: Look, text: &str, at_ms: u64) -> Frame {
             .clamp(9., 40.)
     };
     let size = fit(chrome(&l));
-    l.title_size = Some((size * 0.6).clamp(11., 22.));
+    let title_size = (size * 0.6).clamp(11., 22.);
+    l.title_size = Some(title_size);
     let (top, bottom, left, right) = chrome(&l);
     let size = fit((top, bottom, 0., 0.));
     let icon = if w >= 260. { (size * 1.9).min(56.) } else { 0. };
     let text_x = if icon > 0. { icon + size * 0.6 } else { 0. };
     let text_w = w - left - right - text_x;
-    struct Row<'a> {
-        platform: &'a str,
-        author: &'a str,
+    // The title bar, as the window themes draw it: (top, height, width of the buttons).
+    let bar = if s.theme == Theme::WindowsXP {
+        let bar = (title_size * 1.8).max(30.);
+        (1., bar, 8. + 3. * (bar - 6.))
+    } else {
+        let bar = (title_size * 1.6).max(26.);
+        (6., bar, 6. + 3. * (bar - 2.))
+    };
+    struct Placed<'a> {
+        row: ChatRow<'a>,
         lines: Vec<String>,
         h: f32,
     }
-    let mut placed: Vec<Row> = Vec::new();
+    let mut placed: Vec<Placed> = Vec::new();
     let mut total = 0.;
-    for (platform, author, body) in chat_rows(text, fixed).into_iter().rev() {
-        let mut lines = l.wrap(Role::Body, body, text_w, size);
+    for row in chat_rows(text, fixed).into_iter().rev() {
+        let mut lines = l.wrap(Role::Body, row.body, text_w, size);
         clip_lines(&mut lines);
         let rh = top + bottom + (lines.len() as f32 * size * 1.3 + size * 0.3).max(icon + 2.);
-        if total + rh > h && !placed.is_empty() {
+        if total + rh * row.presence() > h && !placed.is_empty() {
             break;
         }
-        total += rh + gap;
-        placed.push(Row { platform, author, lines, h: rh });
+        total += (rh + gap) * row.presence();
+        placed.push(Placed { row, lines, h: rh });
     }
     if !s.reverse {
         placed.reverse();
     }
+    let slide = (w * 0.08).clamp(16., 60.);
     let mut y = if s.reverse { 0. } else { (h - total + gap).max(0.) };
-    for row in &placed {
-        let mut window = Paint { pixels: vec![0; (w as usize) * (row.h.ceil() as usize) * 4], width: w as u32, height: row.h.ceil() as u32 };
+    for (i, Placed { row, lines, h: rh }) in placed.iter().enumerate() {
+        let presence = row.presence();
+        let top_y = if i == 0 { y - (rh + gap) * (1. - presence) } else { y };
+        let mut window = Paint { pixels: vec![0; (w as usize) * (rh.ceil() as usize) * 4], width: w as u32, height: rh.ceil() as u32 };
         let title = if row.platform.is_empty() { row.author.to_string() } else { format!("{} - {}", row.author, row.platform) };
         let inner = l.panel(&mut window, &title, false);
+        if let Some((c, _)) = highlight_style(&l, row.highlight).filter(|_| s.chat_highlights) {
+            window.fill_rr(inner.x - 4., inner.y - 3., inner.w + 8., inner.h + 6., 0., fade(c, 0.3), fade(c, 0.15));
+            window.stroke_rr(inner.x - 4., inner.y - 3., inner.w + 8., inner.h + 6., 0., 2., darken(c, 0.2));
+        }
+        if s.chat_badges && !row.badges.is_empty() {
+            // Badges in the title bar, just before the window buttons.
+            let bh = bar.1 * 0.62;
+            let width = badges_at(None, &l, &row.badges, 0., 0., bh);
+            badges_at(Some(&mut window), &l, &row.badges, w - bar.2 - width - 6., bar.0 + bar.1 / 2., bh);
+        }
         if icon > 0. {
             let (r, iy) = (if s.theme == Theme::WindowsXP { 4. } else { 0. }, inner.y + 1.);
             avatar_at(&mut window, &l, row.platform, row.author, inner.x, iy, icon, r);
@@ -2075,17 +2295,183 @@ fn window_chat(s: &Settings, mut l: Look, text: &str, at_ms: u64) -> Frame {
                 window.bevel(inner.x - 1., iy - 1., icon + 2., icon + 2., false);
             }
         }
-        for (j, line) in row.lines.iter().enumerate() {
+        for (j, line) in lines.iter().enumerate() {
             let base = inner.y + size * 1.05 + j as f32 * size * 1.3;
             l.rich(&mut window, Role::Body, line, inner.x + text_x, base, size, l.field_fg, inner.w - text_x, at_ms);
         }
-        let oy = y.round() as i32;
+        let (oy, dx) = (top_y.round() as i32, (row.slide() * slide).round() as i32);
         for (i, px) in window.pixels.chunks_exact(4).enumerate() {
-            if px[3] > 0 {
-                p.blend((i as u32 % window.width) as i32, oy + (i as u32 / window.width) as i32, [px[0], px[1], px[2], px[3]], 1.);
+            let py = oy + (i as u32 / window.width) as i32;
+            if px[3] > 0 && py >= 0 && (py as f32) < h {
+                p.blend((i as u32 % window.width) as i32 + dx, py, [px[0], px[1], px[2], px[3]], presence);
             }
         }
-        y += row.h + gap;
+        y += (rh + gap) * presence;
+    }
+    p.finish()
+}
+
+// ---------- Alerts ----------
+
+/// An alert's text starts with who and what it's about: ALERT_HEAD[0] event ROW_LOOK[1] platform
+/// ROW_LOOK[1] name ALERT_HEAD[1]. The chat widget's ROW_ANIM part may come first.
+const ALERT_HEAD: [char; 2] = ['\u{e00a}', '\u{e00b}'];
+/// Seconds an alert takes to come in, and to go at the end of its time.
+const ALERT_IN: f32 = 0.55;
+const ALERT_OUT: f32 = 0.45;
+
+fn alert_head(subject: &auroracast_core::AlertSubject) -> String {
+    let (Some(kind), Some(platform)) = (subject.kind, subject.platform) else { return String::new() };
+    let author: String = subject.author.chars().filter(|c| !('\u{e000}'..='\u{e00f}').contains(c) && *c != '\n').take(100).collect();
+    format!("{}{kind:?}{}{}{}{author}{}", ALERT_HEAD[0], ROW_LOOK[1], platform.name(), ROW_LOOK[1], ALERT_HEAD[1])
+}
+/// The tag over an alert, and its colour.
+fn alert_tag(kind: auroracast_core::EventKind, platform: &str) -> (&'static str, [u8; 4]) {
+    use auroracast_core::EventKind as E;
+    match kind {
+        E::Follow => ("NEW FOLLOWER", [86, 156, 255, 255]),
+        E::Subscription => ("NEW SUBSCRIBER", [145, 70, 255, 255]),
+        E::Gift => ("GIFTED SUBS", [236, 72, 153, 255]),
+        E::Bits if platform == "Kick" => ("KICKS", [83, 252, 24, 255]),
+        E::Bits => ("CHEER", [155, 90, 255, 255]),
+        E::Donation => ("DONATION", [255, 184, 48, 255]),
+        E::Raid => ("RAID", [255, 92, 72, 255]),
+        E::Redemption => ("REWARD", [52, 200, 190, 255]),
+        E::Membership => ("NEW MEMBER", [43, 166, 64, 255]),
+        E::SuperChat => ("SUPER CHAT", [255, 184, 48, 255]),
+        E::SuperSticker => ("SUPER STICKER", [255, 184, 48, 255]),
+        E::Subscriber => ("NEW SUBSCRIBER", [255, 60, 60, 255]),
+        E::HypeTrain => ("HYPE TRAIN", [255, 120, 40, 255]),
+        E::FirstMessage | E::FirstTimeChatter => ("FIRST CHAT", [46, 204, 113, 255]),
+        E::Poll => ("POLL", [86, 156, 255, 255]),
+        E::Prediction => ("PREDICTION", [86, 156, 255, 255]),
+        E::ChatCommand | E::ChatMessage | E::Timer => ("CHAT", [130, 140, 160, 255]),
+    }
+}
+/// Overshoots a little before settling, for a lively entrance.
+fn ease_back(t: f32) -> f32 {
+    let (c1, t) = (1.70158, t.clamp(0., 1.) - 1.);
+    1. + (c1 + 1.) * t.powi(3) + c1 * t.powi(2)
+}
+/// An alert: a themed card with what happened, the person's picture and the alert's message, above,
+/// below or over the alert's picture or video. It pops in and fades away.
+fn polished_alert(s: &Settings, text: &str) -> Frame {
+    use auroracast_core::widgets::AlertLayout;
+    let mut p = design_canvas(s);
+    let mut l = Look::new(s);
+    let (w, h) = (p.width as f32, p.height as f32);
+    let (mut enter, mut leave, mut text) = (1., 0., text);
+    if let Some((anim, rest)) = text.strip_prefix(ROW_ANIM[0]).and_then(|r| r.split_once(ROW_ANIM[1])) {
+        let (a, b) = anim.split_once(',').unwrap_or((anim, "0"));
+        enter = a.parse::<f32>().unwrap_or(1000.) / 1000.;
+        leave = b.parse::<f32>().unwrap_or(0.) / 1000.;
+        text = rest;
+    }
+    let (subject, text) = match text.strip_prefix(ALERT_HEAD[0]).and_then(|r| r.split_once(ALERT_HEAD[1])) {
+        Some((head, rest)) => {
+            let mut f = head.splitn(3, ROW_LOOK[1]);
+            let kind = f.next().and_then(|k| auroracast_core::EventKind::ALL.into_iter().find(|e| format!("{e:?}") == k));
+            (kind.map(|k| (k, f.next().unwrap_or(""), f.next().unwrap_or(""))), rest)
+        }
+        None => (None, text),
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return p.finish();
+    }
+    let tag = subject.map(|(kind, platform, _)| alert_tag(kind, platform));
+    let (platform, author) = subject.map_or(("", ""), |(_, p, a)| (p, a));
+    // Where the card goes: in the strip kept for text above or below the media, or over its lower part.
+    let region = match s.alert_layout {
+        AlertLayout::Above => Area { x: 0., y: 0., w, h: h * 0.3 },
+        AlertLayout::Below => Area { x: 0., y: h * 0.7, w, h: h * 0.3 },
+        AlertLayout::Over => Area { x: 0., y: 0., w, h },
+    };
+    let strip = s.alert_layout != AlertLayout::Over;
+    let big = (s.font_size as f32 * 1.1).min(if strip { region.h * 0.3 } else { h * 0.11 }).min(w / 14.).clamp(12., 72.);
+    let label = (big * 0.42).max(9.);
+    let picture = if author.is_empty() || !chat_pictures(s) || w < 280. { 0. } else { (big * 2.3).min(region.h * 0.7) };
+    let pad = big * 0.7;
+    let fg = if l.retro_window() { l.field_fg } else { l.fg };
+    if let Some((_, c)) = tag {
+        // The card's accent follows the event (window themes keep their own colours).
+        if !l.retro_window() && !matches!(s.theme, Theme::Terminal | Theme::Led | Theme::GameBoy) {
+            l = l.with_accent(c);
+        }
+    }
+    let max_text = (w * 0.9 - pad * 2. - if picture > 0. { picture + pad } else { 0. }).max(big * 4.);
+    let mut lines = l.wrap(Role::Title, text, max_text, big);
+    clip_lines(&mut lines);
+    let text_w = lines.iter().map(|t| l.rich_width(Role::Title, t, big)).fold(0., f32::max);
+    let tag_h = if tag.is_some() && !l.retro_window() { label * 2.6 } else { 0. };
+    let content_h = (tag_h + lines.len() as f32 * big * 1.22).max(picture);
+    // Measure the theme's frame on a sample card, then size the card around its contents.
+    let probe_w = (text_w.max(if tag.is_some() { l.width(Role::Label, "NEW SUBSCRIBER", label) * 1.2 } else { 0. }) + pad * 2. + if picture > 0. { picture + pad } else { 0. }).min(w * 0.94);
+    let title = if l.retro_window() { tag.map_or("Alert", |t| t.0) } else { "" };
+    if l.retro_window() {
+        l.title_size = Some((big * 0.55).clamp(11., 22.));
+    }
+    let chrome = {
+        let mut probe = Paint { pixels: vec![0; (w as usize) * 200 * 4], width: w as u32, height: 200 };
+        let inner = l.panel_inner(&mut probe, title, false);
+        (inner.x, inner.y, w - inner.right(), 200. - inner.bottom())
+    };
+    let card_w = (probe_w + chrome.0 + chrome.2 - pad * 0.6).min(w - 4.).ceil();
+    let card_h = (content_h + chrome.1 + chrome.3 + pad * 0.3).min(h - 4.).ceil();
+    let mut card = Paint { pixels: vec![0; (card_w as usize) * (card_h as usize) * 4], width: card_w as u32, height: card_h as u32 };
+    let inner = l.panel(&mut card, title, false);
+    let mut x = inner.x + (inner.w - (probe_w - pad * 2.)).max(0.) / 2.;
+    let top = inner.y + (inner.h - content_h) / 2.;
+    if picture > 0. {
+        let r = if l.square() { if s.theme == Theme::WindowsXP { 4. } else { 0. } } else { picture / 2. };
+        let py = top + (content_h - picture) / 2.;
+        if !l.square() {
+            card.circle(x + picture / 2., py + picture / 2., picture / 2. + 3., tag.map_or(l.accent, |t| t.1));
+        }
+        avatar_at(&mut card, &l, platform, author, x, py, picture, r);
+        if s.theme == Theme::Windows98 {
+            card.bevel(x - 1., py - 1., picture + 2., picture + 2., false);
+        }
+        x += picture + pad;
+    }
+    let mut y = top;
+    if let Some((name, c)) = tag.filter(|_| tag_h > 0.) {
+        let pill_w = l.width(Role::Label, name, label) + label * 1.4;
+        l.pill(&mut card, name, x + pill_w, y + label * 1.0, label, c, on_color(c));
+        y += tag_h;
+    }
+    // The person's name stands out in the message.
+    let name_c = if l.retro_window() { darken(l.accent, 0.1) } else { l.ink(tag.map_or(l.accent, |t| t.1)) };
+    for line in &lines {
+        let base = y + big * 0.95;
+        match line.find(author).filter(|_| !author.is_empty()) {
+            Some(at) => {
+                let (before, rest) = line.split_at(at);
+                let after = &rest[author.len()..];
+                let mut pen = x;
+                l.rich(&mut card, Role::Title, before, pen, base, big, fg, inner.right() - pen, 0);
+                pen += l.rich_width(Role::Title, before, big);
+                l.rich(&mut card, Role::Title, author, pen, base, big, name_c, inner.right() - pen, 0);
+                pen += l.rich_width(Role::Title, author, big);
+                l.rich(&mut card, Role::Title, after, pen, base, big, fg, inner.right() - pen, 0);
+            }
+            None => l.rich(&mut card, Role::Title, line, x, base, big, fg, inner.right() - x, 0),
+        }
+        y += big * 1.22;
+    }
+    // Pop in from below, then lift away and fade.
+    let cx = ((w - card_w) / 2.).round();
+    let cy = match s.alert_layout {
+        AlertLayout::Over => (h * 0.66 - card_h / 2.).clamp(2., h - card_h - 2.),
+        _ => region.y + (region.h - card_h) / 2.,
+    };
+    let rise = (1. - ease_back(enter)) * card_h * 0.4 - ease(leave) * card_h * 0.3;
+    let alpha = ease(enter / 0.6) * (1. - ease(leave));
+    let (ox, oy) = (cx as i32, (cy + rise).round() as i32);
+    for (i, px) in card.pixels.chunks_exact(4).enumerate() {
+        if px[3] > 0 {
+            p.blend(ox + (i as u32 % card.width) as i32, oy + (i as u32 / card.width) as i32, [px[0], px[1], px[2], px[3]], alpha);
+        }
     }
     p.finish()
 }

@@ -70,7 +70,7 @@ impl Guide {
     id
   }else{
     let id=p.id();// 16:9 by default, so 16:9 media fills it and 4:3 media fits top to bottom without stretching.
-    let mut settings=Settings{kind:Kind::AlertBox,label:"Alerts".into(),background:[0;4],alert_layout:self.layout,automation_only:true,layout_width:960,layout_height:540,..Default::default()};settings.platforms.push(Platform::Donations);
+    let mut settings=Settings{kind:Kind::AlertBox,label:"Alerts".into(),alert_layout:self.layout,automation_only:true,layout_width:960,layout_height:540,..Default::default()};settings.platforms.push(Platform::Donations);
     p.sources.push(Source{id,name:"Alerts".into(),kind:SourceKind::Widget(settings)});
     if let Some(s)=p.scenes.iter_mut().find(|s|s.id==canvas.scene){s.layers.push(Layer{ frame: Default::default(), look: Default::default(),source:id,rect:alert_box_rect(&canvas),visible:true,locked:false,opacity:1.,crop:[0.;4],group:0});}
     id
@@ -84,7 +84,7 @@ impl Guide {
    Some(id)};
   let media=add(&self.media,false);let sound=add(&self.sound,true);
   if self.monitor&&(media.is_some()||sound.is_some())&&p.preferences.monitor_device.is_empty(){p.preferences.monitor_device=crate::audio::DEFAULT_MONITOR.into();}
-  let mut actions=vec![Action::DisplayAlert{source:box_id,template:self.text.clone(),media,seconds:self.seconds}];if let Some(source)=sound{actions.push(Action::PlaySound{source});}if self.chat_enabled{actions.push(Action::SendChat{text:self.chat.clone(),platforms:self.targets.clone(),sender:Default::default()});}
+  let mut actions=vec![Action::DisplayAlert{source:box_id,template:self.text.clone(),media,seconds:self.seconds,subject:Default::default()}];if let Some(source)=sound{actions.push(Action::PlaySound{source});}if self.chat_enabled{actions.push(Action::SendChat{text:self.chat.clone(),platforms:self.targets.clone(),sender:Default::default()});}
   let id=p.id();p.rules.push(Rule{id,name:self.name.clone(),enabled,platform:self.platform,event:self.event,command:if self.event==EventKind::ChatCommand{self.phrase.clone()}else{String::new()},cooldown_ms:3000,actions,conditions:alert_filters::Conditions{phrase:if self.event==EventKind::ChatMessage{self.phrase.clone()}else{String::new()},reward_id:self.reward.clone(),..Default::default()},options:Default::default()});Ok(id)
  }
 }

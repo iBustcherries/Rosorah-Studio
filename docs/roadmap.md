@@ -1,6 +1,6 @@
 # Rosorah Studio roadmap
 
-Updated for 0.38.0 (October 2026). Rosorah Studio is original code built on
+Updated for 0.39.0 (October 2026). Rosorah Studio is original code built on
 independent libraries (Rust, egui/wgpu, GStreamer, Qt WebEngine). It aims to be an easier
 all-in-one alternative to running OBS, a chat bot and an alert service side by side,
 not a feature-for-feature copy of OBS.
@@ -20,8 +20,8 @@ not a feature-for-feature copy of OBS.
 | Virtual camera | Linux shipped, Windows preview | Rosorah's video as a webcam for Discord, Zoom and browsers (Linux: v4l2loopback; Windows 11: Rosorah's own camera component, untested on real PCs yet) |
 | Hotkeys, remote control and scripts | Shipped | System-wide hotkeys for scenes, mute, push-to-talk and outputs; remote control for Stream Deck, Touch Portal and phone apps (Rosorah's protocol, plus OBS's for tools made for OBS); sandboxed Lua scripts |
 | Accounts | Shipped | Twitch, YouTube and Kick sign-in with renewable tokens in the system keyring, titles/categories, automatic stream keys |
-| Chat and activity | Shipped | Unified Twitch/YouTube/Kick/TikTok chat with moderation, colour emoji (Twemoji), an emoji and emote picker with your own Twitch, YouTube and Kick emotes, emotes and emoji as pictures in the on-canvas chat widget, Activity history for every connected account |
-| Alerts and automations | Shipped | One list grouped by event (follows, subs, bits & donations, raids, channel points, chat, timers), chat timers, bot accounts on Twitch and Kick that send automation chat, guided alert setup, built-in sounds and animations, triggers from follows, subs, gifts, bits/Kicks, raids, redemptions, donations and chat; Twitch rewards editor |
+| Chat and activity | Shipped | Unified Twitch/YouTube/Kick/TikTok chat with moderation, colour emoji (Twemoji), an emoji and emote picker with your own Twitch, YouTube and Kick emotes, emotes and emoji as pictures in the on-canvas chat widget, which also shows profile pictures, badges, name colours and highlighted paid and first-time messages, sliding and fading in and out, Activity history for every connected account |
+| Alerts and automations | Shipped | One list grouped by event (follows, subs, bits & donations, raids, channel points, chat, timers), chat timers, bot accounts on Twitch and Kick that send automation chat, guided alert setup, themed alert cards with the event, the viewer's picture and an entrance animation, one shared alert box plus optional boxes for chosen alerts, built-in sounds and animations, triggers from follows, subs, gifts, bits/Kicks, raids, redemptions, donations and chat; Twitch rewards editor |
 | Donations | Shipped | StreamElements, Streamlabs and Ko-fi (Settings → Accounts → Donations), donation goals |
 | Transitions | Shipped | Cut, fade, wipe, Move (shared layers glide to their new place), stinger videos and transition screens |
 | Projects | Shipped | Profiles, hourly and on-close backups, recording recovery, OBS and Firebot import |

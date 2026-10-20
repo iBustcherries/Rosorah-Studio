@@ -911,6 +911,7 @@ fn parse_irc(line: &str) -> Option<Event> {
             user_id: tags.get("user-id").copied().unwrap_or("").into(),
             first_ever: tags.get("first-msg").copied() == Some("1"),
             historical: false,
+            ..Default::default()
         },
         platform: Platform::Twitch,
         id: tags.get("id")?.to_string(),

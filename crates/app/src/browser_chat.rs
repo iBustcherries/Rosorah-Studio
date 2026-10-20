@@ -636,6 +636,21 @@ impl BrowserChat {
                                     first_ever: false,
                                     historical: v["historical"].as_bool().unwrap_or(false)
                                         || v["kind"] == "activity",
+                                    color: v["color"].as_str().filter(|c| valid_color(c)).unwrap_or("").into(),
+                                    badges: v["badges"]
+                                        .as_array()
+                                        .into_iter()
+                                        .flatten()
+                                        .filter_map(|b| b.as_str())
+                                        .filter(|b| valid_badge(b))
+                                        .take(6)
+                                        .map(Into::into)
+                                        .collect(),
+                                    highlight: v["highlight"]
+                                        .as_str()
+                                        .filter(|h| matches!(*h, "paid" | "first" | "highlight"))
+                                        .unwrap_or("")
+                                        .into(),
                                 },
                                 platform,
                                 id,
@@ -651,6 +666,15 @@ impl BrowserChat {
             }
         }
     }
+}
+/// A name colour from a chat page: "#rrggbb".
+fn valid_color(c: &str) -> bool {
+    c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|c| c.is_ascii_hexdigit())
+}
+/// A badge from a chat page: a picture from a known host, or a role name.
+fn valid_badge(b: &str) -> bool {
+    crate::avatars::safe(b) && b.len() <= 512
+        || matches!(b, "broadcaster" | "moderator" | "vip" | "subscriber" | "member" | "verified" | "founder" | "og" | "staff")
 }
 impl Drop for BrowserChat {
     fn drop(&mut self) {

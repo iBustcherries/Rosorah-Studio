@@ -31,6 +31,34 @@
     return result.slice(0,128).map(p => { const text=p.text.slice(0,left);left-=text.length;return p.src ? {text,src:p.src.slice(0,2048)} : {text}; });
   }
   const text = el => parts(el).map(p=>p.text).join('');
+  // Name colour, badges and highlights, for the chat widget. Badges are pictures where the page
+  // has them, otherwise role names. Pages change; anything not found is simply left out.
+  const hex = c => { const m=/rgba?\((\d+),\s*(\d+),\s*(\d+)/.exec(c||''); return m ? '#'+m.slice(1,4).map(n=>(+n).toString(16).padStart(2,'0')).join('') : ''; };
+  const ROLES=[['broadcaster',/broadcaster|owner|streamer|\bhost\b/i],['moderator',/moderator|\bmod\b/i],['vip',/\bvip\b/i],['founder',/founder/i],['staff',/\bstaff\b|\badmin/i],['og',/^og\b/i],['verified',/verified|partner/i],['subscriber',/subscri|\bsub\b/i],['member',/member/i]];
+  const role = label => (ROLES.find(([,p])=>p.test(label||''))||[''])[0];
+  const badge = b => { const img=b.tagName==='IMG'?b:b.querySelector('img'); const src=img?safeImage(img.currentSrc||img.src):''; return src || role(b.getAttribute('type')||b.getAttribute('title')||b.getAttribute('aria-label')||(img&&img.alt)||''); };
+  function look(el, nameEl, body) {
+    let color='', badges=[], highlight='';
+    if (platform==='YouTube') {
+      const type=el.getAttribute('author-type')||'';
+      color={owner:'#ffd600',moderator:'#5e84f1',member:'#2ba640'}[type]||'';
+      badges=[...el.querySelectorAll('yt-live-chat-author-badge-renderer')].map(badge);
+    } else if (platform==='Twitch') {
+      const name=el.querySelector('.chat-author__display-name,[data-a-target="chat-message-username"]');
+      color=name?hex(name.style.color||getComputedStyle(name).color):'';
+      badges=[...el.querySelectorAll('img.chat-badge,[data-a-target="chat-badge"] img')].map(badge);
+      if (/\bcheer\d+\b/i.test(body) || el.querySelector('[class*="cheer" i]')) highlight='paid';
+      else if (el.querySelector('[class*="first-message" i],[class*="first-time" i]') || /first[- ]time chat/i.test(el.textContent||'')) highlight='first';
+      else if (/highlighted-message|channel-points/i.test((el.className||'')+' '+(el.parentElement?.className||''))) highlight='highlight';
+    } else if (platform==='Kick') {
+      color=nameEl?hex(nameEl.style.color||getComputedStyle(nameEl).color):'';
+      // Badges sit in the header, before the name.
+      const head=nameEl?.parentElement;
+      if (head) badges=[...head.querySelectorAll('img,svg,[title],[aria-label]')].filter(b=>b!==nameEl&&!nameEl.contains(b)&&!b.closest('svg>*')).map(badge);
+    }
+    badges=[...new Set(badges.filter(Boolean))].slice(0,6);
+    return {color,badges,highlight};
+  }
   // The chatter's profile picture, where the chat page shows one (YouTube and TikTok).
   const photo = el => {
     const img = platform==='YouTube' ? el.querySelector('#author-photo img') : platform==='TikTok' ? [...el.querySelectorAll('img')].find(i=>/tiktokcdn/.test(i.currentSrc||i.src)) : null;
@@ -72,7 +100,8 @@
     if((platform==='YouTube' && (el.hasAttribute('is-deleted') || el.querySelector('[is-deleted]'))) || (platform==='Twitch' && el.querySelector('[data-a-target="chat-deleted-message-placeholder"],[data-test-selector="chat-deleted-message-placeholder"]'))){
       if(seen.get(id)!=='deleted'){remember(id,'deleted');emit({type:'delete',platform,id});}return;
     }
-    const author=text(el.querySelector(platform==='YouTube'?'#author-name':platform==='Kick'?'button[title][data-prevent-expand],.chat-entry-username,[data-chat-entry-user-id]':'[data-a-target="chat-message-username"]')).trim().slice(0,100);
+    const nameEl=el.querySelector(platform==='YouTube'?'#author-name':platform==='Kick'?'button[title][data-prevent-expand],.chat-entry-username,[data-chat-entry-user-id]':'[data-a-target="chat-message-username"]');
+    const author=text(nameEl).trim().slice(0,100);
     let fragments=[];
     if(platform==='YouTube') {
       for(const sel of ['#purchase-amount','#header-subtext','#message','#sticker']) {
@@ -105,7 +134,7 @@
     const activity_kind = ({'YT-LIVE-CHAT-PAID-MESSAGE-RENDERER':'super_chat','YT-LIVE-CHAT-PAID-STICKER-RENDERER':'super_sticker','YT-LIVE-CHAT-MEMBERSHIP-ITEM-RENDERER':'membership','YT-LIVE-CHAT-SPONSORSHIPS-GIFT-PURCHASE-ANNOUNCEMENT-RENDERER':'gift','YT-LIVE-CHAT-SPONSORSHIPS-GIFT-REDEMPTION-ANNOUNCEMENT-RENDERER':'gift'})[el.tagName] || '';
     // Twitch exposes the sender's login, which moderation actions need; display names can differ.
     const author_id=platform==='Twitch'?(el.getAttribute('data-a-user')||el.querySelector('[data-a-user]')?.getAttribute('data-a-user')||'').slice(0,25):'';
-    emit({type:'message',platform,id:id.slice(0,200),author:author||'Viewer',author_id,author_photo:photo(el),text:body||text(el).trim().slice(0,2000),parts:fragments,kind,activity_kind,historical:initial || Date.now()-opened<5000});
+    emit({type:'message',platform,id:id.slice(0,200),author:author||'Viewer',author_id,author_photo:photo(el),...look(el,nameEl,body),text:body||text(el).trim().slice(0,2000),parts:fragments,kind,activity_kind,historical:initial || Date.now()-opened<5000});
   }
   function remember(id,value){seen.set(id,value);while(seen.size>3000)seen.delete(seen.keys().next().value);}
   function scan(root=document) {

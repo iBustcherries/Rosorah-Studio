@@ -107,7 +107,13 @@ pub fn actions(actions: &[Action], e: &Event) -> Vec<Action> {
     actions
         .iter()
         .map(|a| match a {
-            Action::DisplayAlert { source, template, media, seconds } => Action::DisplayAlert { source: *source, template: expand(template,e), media:*media, seconds:*seconds },
+            Action::DisplayAlert { source, template, media, seconds, .. } => Action::DisplayAlert {
+                source: *source,
+                template: expand(template, e),
+                media: *media,
+                seconds: *seconds,
+                subject: crate::AlertSubject { kind: Some(e.kind), platform: Some(e.platform), author: e.author.clone() },
+            },
             Action::SendChat { text, platforms, sender } => Action::SendChat { text:expand(text,e), platforms: if platforms.is_empty(){vec![e.platform]}else{platforms.clone()}, sender:*sender },
             Action::ShowAlert { template, seconds } => Action::ShowAlert {
                 template: expand(template, e),

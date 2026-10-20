@@ -18,12 +18,15 @@ pub struct State {
     messages: VecDeque<String>,
     /// When each chat message arrived, for messages that disappear after a while.
     arrived: VecDeque<Instant>,
+    /// When each chat message first showed (after waiting for its chatter's picture).
+    shown: VecDeque<Option<Instant>>,
     until: Option<Instant>,
     revision: u64,
     pub period_key: String,
     started: Instant,
     stream_started_ms: u64,
-    alert: Option<(String, Option<Id>, Instant)>,
+    /// The alert showing: text, media, when it ends, when it started.
+    alert: Option<(String, Option<Id>, Instant, Instant)>,
     queue: VecDeque<(String, Option<Id>, u32)>,
 }
 impl State {
@@ -39,36 +42,63 @@ impl State {
             text: String::new(),
             messages: VecDeque::new(),
             arrived: VecDeque::new(),
+            shown: VecDeque::new(),
             until: None,
             revision: 1,
         }
     }
-    fn lines(&self) -> String {
+    fn lines(&mut self) -> String {
         let label = &self.settings.label;
         match self.settings.kind {
             Kind::QrCode => format!("{label}\n{}", self.settings.content),
             Kind::Text => self.settings.content.clone(),
-            Kind::AlertBox => self.alert.as_ref().map(|a| a.0.clone()).unwrap_or_default(),
+            Kind::AlertBox => match &self.alert {
+                // Coming in and going out, as the chat widget's messages do.
+                Some((text, _, end, start)) if !text.is_empty() => {
+                    let now = Instant::now();
+                    let enter = (now.duration_since(*start).as_secs_f32() / ALERT_IN).min(1.);
+                    let left = end.saturating_duration_since(now).as_secs_f32();
+                    let leave = (1. - left / ALERT_OUT).clamp(0., 1.);
+                    if enter < 1. || leave > 0. {
+                        format!("{}{},{}{}{text}", ROW_ANIM[0], (enter * 1000.) as u32, (leave * 1000.) as u32, ROW_ANIM[1])
+                    } else {
+                        text.clone()
+                    }
+                }
+                _ => String::new(),
+            },
             Kind::Chat => {
                 let keep = Duration::from_secs(u64::from(self.settings.chat_hide_after));
-                // A new message waits (half a second at most) for its chatter's picture, so the
-                // two appear together; later messages wait behind it to keep the order.
                 let pictures = chat_pictures(&self.settings);
-                let ready = |m: &str| {
-                    let (platform, rest) = m.split_once(" · ").unwrap_or(("", m));
-                    crate::avatars::ready(platform, rest.split_once(": ").map_or("", |(a, _)| a))
-                };
-                format!(
-                    "{label}\n{}",
-                    self.messages
-                        .iter()
-                        .zip(&self.arrived)
-                        .take_while(|(m, at)| !pictures || at.elapsed() >= crate::avatars::WAIT || ready(m))
-                        .filter(|(_, at)| keep.is_zero() || at.elapsed() < keep)
-                        .map(|(m, _)| m.clone())
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                )
+                let animate = self.settings.chat_animate;
+                let now = Instant::now();
+                self.shown.resize(self.messages.len(), None);
+                let mut rows = Vec::new();
+                for (i, (m, at)) in self.messages.iter().zip(&self.arrived).enumerate() {
+                    // A new message waits (half a second at most) for its chatter's picture, so
+                    // the two appear together; later messages wait behind it to keep the order.
+                    if pictures && at.elapsed() < crate::avatars::WAIT {
+                        let row = chat_row(m);
+                        if !crate::avatars::ready(row.platform, row.author) {
+                            break;
+                        }
+                    }
+                    let age = now.duration_since(*self.shown[i].get_or_insert(now));
+                    let enter = if animate { (age.as_secs_f32() / CHAT_IN).min(1.) } else { 1. };
+                    let leave = match age.checked_sub(keep) {
+                        Some(over) if !keep.is_zero() => if animate { over.as_secs_f32() / CHAT_OUT } else { 1. },
+                        _ => 0.,
+                    };
+                    if leave >= 1. {
+                        continue;
+                    }
+                    rows.push(if enter < 1. || leave > 0. {
+                        format!("{}{},{}{}{m}", ROW_ANIM[0], (enter * 1000.) as u32, (leave * 1000.) as u32, ROW_ANIM[1])
+                    } else {
+                        m.clone()
+                    });
+                }
+                format!("{label}\n{}", rows.join("\n"))
             }
             Kind::SubGoal | Kind::CommunityGoal => {
                 format!("{label}\n{} / {}", self.value, self.settings.target)
@@ -268,6 +298,7 @@ impl Hub {
         author: &str,
         text: &str,
     ) {
+        let head = alert_head(&auroracast_core::AlertSubject { kind: Some(event), platform: Some(platform), author: author.into() });
         for state in self.0.lock().unwrap().values() {
             let mut s = state.lock().unwrap();
             if s.settings.kind != Kind::AlertBox || s.settings.automation_only || !s.settings.platforms.contains(&platform) {
@@ -287,12 +318,18 @@ impl Hub {
                 (format!("{} · {}\n{}", author, event.label(), text), None, 6)
             };
             if s.queue.len() < 32 {
-                s.queue.push_back((text, media, seconds.clamp(1, 60)));
+                s.queue.push_back((format!("{head}{text}"), media, seconds.clamp(1, 60)));
             }
         }
     }
-    pub fn target_alert(&self,id:Id,text:&str,seconds:u32,media:Option<Id>){
-        if let Some(s)=self.0.lock().unwrap().get(&id){let mut s=s.lock().unwrap();if s.settings.kind==Kind::AlertBox&&s.queue.len()<32{s.queue.push_back((text.chars().take(400).collect(),media,seconds.clamp(1,60)));}}
+    pub fn target_alert(&self, id: Id, text: &str, seconds: u32, media: Option<Id>, subject: &auroracast_core::AlertSubject) {
+        if let Some(s) = self.0.lock().unwrap().get(&id) {
+            let mut s = s.lock().unwrap();
+            if s.settings.kind == Kind::AlertBox && s.queue.len() < 32 {
+                let text: String = text.chars().take(400).collect();
+                s.queue.push_back((format!("{}{text}", alert_head(subject)), media, seconds.clamp(1, 60)));
+            }
+        }
     }
     pub fn clear_alerts(&self) {
         for state in self.0.lock().unwrap().values() {
@@ -329,11 +366,7 @@ impl Hub {
                 if let Some(id) = media {
                     start.push(id)
                 }
-                s.alert = Some((
-                    text,
-                    media,
-                    Instant::now() + Duration::from_secs(seconds as u64),
-                ));
+                s.alert = Some((text, media, Instant::now() + Duration::from_secs(seconds as u64), Instant::now()));
                 s.revision = s.revision.wrapping_add(1);
             }
         }
@@ -391,12 +424,15 @@ impl Hub {
             *s = State::new(settings);
         }
     }
-    pub fn chat(&self, platform: Platform, author: &str, text: &str) {
+    pub fn chat(&self, platform: Platform, author: &str, text: &str, look: &ChatLook) {
+        let marks = chat_look(look.color, look.highlight, look.badges);
         for state in self.0.lock().unwrap().values() {
             let mut s = state.lock().unwrap();
-            if s.settings.kind == Kind::Chat && s.settings.platforms.contains(&platform) {
+            // Paid messages from donation services count as every platform's.
+            let paid = platform == Platform::Donations && look.highlight == "paid" && s.settings.chat_highlights;
+            if s.settings.kind == Kind::Chat && (s.settings.platforms.contains(&platform) || paid) {
                 s.messages.push_back(format!(
-                    "{} · {}: {}",
+                    "{} · {marks}{}: {}",
                     platform.name(),
                     author,
                     // Marked emotes are already limited by chat_render::marked.
@@ -407,11 +443,16 @@ impl Hub {
                     // Start loading the picture now, so it's ready when the message shows.
                     crate::avatars::get(platform.name(), author);
                 }
-                while s.messages.len() > 7 {
+                // One more than the most shown, so the oldest can slide out as the newest comes in.
+                while s.messages.len() > 8 {
                     s.messages.pop_front();
                 }
                 while s.arrived.len() > s.messages.len() {
                     s.arrived.pop_front();
+                }
+                s.shown.push_back(None);
+                while s.shown.len() > s.messages.len() {
+                    s.shown.pop_front();
                 }
                 s.revision = s.revision.wrapping_add(1);
             }
@@ -486,6 +527,15 @@ fn deadline_passed(date: &str) -> bool {
         .ok()
         .and_then(|d| d.format("%Y-%m-%d").ok())
         .is_some_and(|d| d.as_str() > date)
+}
+/// How a chat message is set apart in the chat widget.
+#[derive(Default)]
+pub struct ChatLook<'a> {
+    /// "#rrggbb", or empty.
+    pub color: &'a str,
+    pub badges: &'a [String],
+    /// "paid", "first", "highlight" or empty.
+    pub highlight: &'a str,
 }
 pub struct Renderer(pub Arc<Mutex<State>>, pub rosorah_capture::FrameReader);
 impl Backend for Renderer {
@@ -607,7 +657,9 @@ impl Backend for Renderer {
                 out.publish(frame)?;
                 previous = Some(key);
             }
-            std::thread::sleep(Duration::from_millis(if animate { 50 } else { 100 }));
+            // Chat messages coming and going move smoothly.
+            let moving = (chat || settings.kind == Kind::AlertBox) && lines.contains(ROW_ANIM[0]);
+            std::thread::sleep(Duration::from_millis(if moving { 30 } else if animate { 50 } else { 100 }));
         }
         Ok(())
     }
@@ -811,7 +863,10 @@ fn render_frame(s: &Settings, text: &str, value: u64, elapsed: f32) -> anyhow::R
     if matches!(s.kind, Kind::Timer | Kind::Counter) {
         return Ok(polished_number(s, text));
     }
-    if !(s.kind == Kind::AlertBox && text.is_empty()) {
+    if s.kind == Kind::AlertBox && !text.is_empty() {
+        return Ok(polished_alert(s, text));
+    }
+    if s.kind != Kind::AlertBox {
         return Ok(polished_info(s, text, elapsed));
     }
     // An alert box without text is a clear picture at the box's own size, so media fits its shape.
@@ -1123,20 +1178,54 @@ mod tests {
     }
     #[test]
     fn chat_messages_can_disappear_after_a_while() {
-        let settings = Settings { kind: Kind::Chat, label: "Chat".into(), chat_hide_after: 30, ..Default::default() };
+        let settings = Settings { kind: Kind::Chat, label: "Chat".into(), chat_hide_after: 30, chat_animate: false, ..Default::default() };
         let hub = Hub::default();
         hub.0.lock().unwrap().insert(1, Arc::new(Mutex::new(State::new(settings))));
-        hub.chat(Platform::Twitch, "old", "first");
-        hub.chat(Platform::Twitch, "new", "second");
+        hub.chat(Platform::Twitch, "old", "first", &ChatLook::default());
+        hub.chat(Platform::Twitch, "new", "second", &ChatLook::default());
         let state = hub.0.lock().unwrap()[&1].clone();
         let mut s = state.lock().unwrap();
-        s.arrived[0] = Instant::now() - Duration::from_secs(31);
-        // "new" waits for its picture (which can't load in tests) for half a second at most.
+        // Messages wait for their pictures (which can't load in tests) for half a second at most.
         assert_eq!(s.lines(), "Chat\n");
+        s.arrived[0] = Instant::now() - crate::avatars::WAIT;
+        assert_eq!(s.lines(), "Chat\nTwitch · old: first");
         s.arrived[1] = Instant::now() - crate::avatars::WAIT;
+        assert_eq!(s.lines(), "Chat\nTwitch · old: first\nTwitch · new: second");
+        // The time on screen counts from when each one showed.
+        s.shown[0] = Some(Instant::now() - Duration::from_secs(31));
         assert_eq!(s.lines(), "Chat\nTwitch · new: second");
         s.settings.chat_hide_after = 0;
         assert_eq!(s.lines(), "Chat\nTwitch · old: first\nTwitch · new: second");
+    }
+    #[test]
+    fn chat_messages_slide_in_and_out() {
+        let settings = Settings { kind: Kind::Chat, label: "Chat".into(), chat_hide_after: 10, theme: Theme::Terminal, ..Default::default() };
+        let hub = Hub::default();
+        hub.0.lock().unwrap().insert(1, Arc::new(Mutex::new(State::new(settings))));
+        let look = ChatLook { color: "#ff0000", badges: &["moderator".into()], highlight: "first" };
+        hub.chat(Platform::Kick, "viewer", "hello", &look);
+        let state = hub.0.lock().unwrap()[&1].clone();
+        let mut s = state.lock().unwrap();
+        // Just arrived: on its way in.
+        let lines = s.lines();
+        let row = chat_row(lines.lines().nth(1).unwrap());
+        assert!(row.enter < 0.2 && row.leave == 0.);
+        assert_eq!((row.author, row.body, row.highlight, row.badges.as_slice()), ("viewer", "hello", "first", &["moderator"][..]));
+        assert_eq!(row.color, Some([255, 0, 0, 255]));
+        // Settled, then on its way out after its time on screen, then gone.
+        s.shown[0] = Some(Instant::now() - Duration::from_secs(5));
+        assert!(!s.lines().contains(ROW_ANIM[0]));
+        s.shown[0] = Some(Instant::now() - Duration::from_millis(10_200));
+        let lines = s.lines();
+        let row = chat_row(lines.lines().nth(1).unwrap());
+        assert!(row.leave > 0.2 && row.leave < 0.8);
+        s.shown[0] = Some(Instant::now() - Duration::from_secs(11));
+        assert_eq!(s.lines(), "Chat\n");
+        // With "Messages shown: 3", the oldest slides out while a fourth comes in.
+        let text = format!("Chat\nKick · a: 1\nKick · b: 2\nKick · c: 3\n{}500,0{}Kick · d: 4", ROW_ANIM[0], ROW_ANIM[1]);
+        let rows = chat_rows(&text, 3);
+        assert_eq!(rows.iter().map(|r| r.author).collect::<Vec<_>>(), ["a", "b", "c", "d"]);
+        assert!(rows[0].leave == 0.5 && rows[3].enter == 0.5);
     }
     #[test]
     fn chat_widget_draws_emote_pictures() {
@@ -1411,6 +1500,10 @@ pub fn controls(ui: &mut eframe::egui::Ui, s: &mut Settings) {
                 ui.selectable_value(&mut s.chat_rows, rows, label).on_hover_text(if rows == 0 { "As many as fit at the text size" } else { "Always this many, with the text sized to fit" });
             }
         });
+        ui.checkbox(&mut s.chat_animate, "Slide and fade messages in and out");
+        ui.checkbox(&mut s.chat_badges, "Badges (moderator, subscriber…)");
+        ui.checkbox(&mut s.chat_name_colors, "Names in each chatter's colour");
+        ui.checkbox(&mut s.chat_highlights, "Set apart paid, first-time and highlighted messages");
         ui.horizontal(|ui| {
             let mut hide = s.chat_hide_after > 0;
             if ui.checkbox(&mut hide, "Hide each message after").changed() {
@@ -1744,7 +1837,7 @@ mod widget_regressions {
 }
 #[cfg(test)]mod alert_layout_tests{use super::*;use auroracast_core::widgets::AlertLayout;
  #[test]fn below_text_region_is_never_covered_by_media(){let mut f=Frame{width:10,height:10,rgba:vec![0;400]};let video=Frame{width:1,height:1,rgba:vec![255,0,0,255]};compose_media_layout(&mut f,&video,false,AlertLayout::Below);assert_eq!(f.rgba[3],255);assert_eq!(f.rgba[(9*10)*4+3],0);}
- #[test]fn targeted_alerts_do_not_broadcast_to_other_boxes(){let hub=Hub::default();for id in [1,2]{hub.0.lock().unwrap().insert(id,Arc::new(Mutex::new(State::new(Settings{kind:Kind::AlertBox,..Default::default()}))));}hub.target_alert(1,"Hello",5,None);assert_eq!(hub.0.lock().unwrap()[&1].lock().unwrap().queue.len(),1);assert!(hub.0.lock().unwrap()[&2].lock().unwrap().queue.is_empty());}
+ #[test]fn targeted_alerts_do_not_broadcast_to_other_boxes(){let hub=Hub::default();for id in [1,2]{hub.0.lock().unwrap().insert(id,Arc::new(Mutex::new(State::new(Settings{kind:Kind::AlertBox,..Default::default()}))));}hub.target_alert(1,"Hello",5,None,&Default::default());assert_eq!(hub.0.lock().unwrap()[&1].lock().unwrap().queue.len(),1);assert!(hub.0.lock().unwrap()[&2].lock().unwrap().queue.is_empty());}
 }
 #[cfg(test)]
 mod music_text_tests {
