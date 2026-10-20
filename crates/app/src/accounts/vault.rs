@@ -240,7 +240,7 @@ pub(super) fn load(
     config: &ClientConfig,
     cancel: &AtomicBool,
 ) -> Result<Option<Token>> {
-    let value = Vault::new()?.operation(platform, &config.id, None, false, cancel)?;
+    let value = Vault::new()?.operation(platform, &config.vault_id(), None, false, cancel)?;
     value
         .map(|v| serde_json::from_str(&v).context("Saved sign-in could not be read"))
         .transpose()
@@ -257,23 +257,23 @@ pub(super) fn save(
     );
     Vault::new()?.operation(
         platform,
-        &config.id,
+        &config.vault_id(),
         Some(&serde_json::to_string(token)?),
         false,
         cancel,
     )?;
     if !cancel.load(Ordering::Relaxed) {
-        mark(platform, &config.id, true)?;
+        mark(platform, &config.vault_id(), true)?;
     }
     Ok(())
 }
 pub(super) fn forget_marker(platform: Platform, config: &ClientConfig) {
-    let _ = mark(platform, &config.id, false);
+    let _ = mark(platform, &config.vault_id(), false);
 }
 pub(super) fn forget(platform: Platform, config: &ClientConfig) {
-    let _ = mark(platform, &config.id, false);
+    let _ = mark(platform, &config.vault_id(), false);
     if let Ok(vault) = Vault::new() {
-        let _ = vault.operation(platform, &config.id, None, true, &AtomicBool::new(false));
+        let _ = vault.operation(platform, &config.vault_id(), None, true, &AtomicBool::new(false));
     }
 }
 

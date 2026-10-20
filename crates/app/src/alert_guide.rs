@@ -84,7 +84,7 @@ impl Guide {
    Some(id)};
   let media=add(&self.media,false);let sound=add(&self.sound,true);
   if self.monitor&&(media.is_some()||sound.is_some())&&p.preferences.monitor_device.is_empty(){p.preferences.monitor_device=crate::audio::DEFAULT_MONITOR.into();}
-  let mut actions=vec![Action::DisplayAlert{source:box_id,template:self.text.clone(),media,seconds:self.seconds}];if let Some(source)=sound{actions.push(Action::PlaySound{source});}if self.chat_enabled{actions.push(Action::SendChat{text:self.chat.clone(),platforms:self.targets.clone()});}
+  let mut actions=vec![Action::DisplayAlert{source:box_id,template:self.text.clone(),media,seconds:self.seconds}];if let Some(source)=sound{actions.push(Action::PlaySound{source});}if self.chat_enabled{actions.push(Action::SendChat{text:self.chat.clone(),platforms:self.targets.clone(),sender:Default::default()});}
   let id=p.id();p.rules.push(Rule{id,name:self.name.clone(),enabled,platform:self.platform,event:self.event,command:if self.event==EventKind::ChatCommand{self.phrase.clone()}else{String::new()},cooldown_ms:3000,actions,conditions:alert_filters::Conditions{phrase:if self.event==EventKind::ChatMessage{self.phrase.clone()}else{String::new()},reward_id:self.reward.clone(),..Default::default()},options:Default::default()});Ok(id)
  }
 }

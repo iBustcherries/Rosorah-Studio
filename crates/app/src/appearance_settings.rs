@@ -12,6 +12,25 @@ impl Studio {
                     changed |= ui.selectable_value(&mut look.theme, mode, label).changed();
                 }
             });
+            #[cfg(not(windows))]
+            {
+                use auroracast_core::workspace::TitleBar;
+                ui.add_space(8.);
+                ui.strong("Title bar");
+                ui.horizontal(|ui| {
+                    for (choice, label) in [(TitleBar::Automatic, "Automatic"), (TitleBar::Always, "GNOME style"), (TitleBar::Never, "Desktop's own")] {
+                        changed |= ui.selectable_value(&mut look.title_bar, choice, label).changed();
+                    }
+                });
+                note(
+                    ui,
+                    if crate::title_bar::gnome() {
+                        "Automatic: you're on GNOME, so Rosorah's header is also the title bar, with GNOME's window buttons."
+                    } else {
+                        "Automatic: your desktop draws the title bar, matching its theme. GNOME style is only used on GNOME."
+                    },
+                );
+            }
             ui.add_space(8.);
             ui.strong("Background");
             ui.horizontal(|ui| {

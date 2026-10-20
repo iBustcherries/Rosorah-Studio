@@ -23,7 +23,11 @@ mod camera_layout;
 mod canvas_edit;
 mod capture;
 mod capture_log;
+mod avatars;
 mod chat_render;
+mod twemoji;
+mod emote_picker;
+mod title_bar;
 #[cfg(not(windows))]
 mod desktop;
 #[cfg(windows)]
@@ -248,6 +252,7 @@ fn main() -> Result<()> {
         .with_inner_size([1440., 900.])
         .with_min_inner_size([1100., 700.])
         .with_app_id("io.rosorah.Studio")
+        .with_decorations(!title_bar::wanted(project.preferences.workspace.appearance.title_bar))
         .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icons/app-256.png")).unwrap_or_default());
     // Open the way it was left (screenshots always use the standard window).
     let viewport = if screenshot.is_none() { window_memory::apply(viewport, &window_memory::load()) } else { viewport };

@@ -19,7 +19,7 @@ pub(super) fn load(
     cancel: &AtomicBool,
 ) -> Result<Option<Token>> {
     ensure!(!cancel.load(Ordering::Relaxed), "Sign-in cancelled");
-    credentials::read(&key(platform, &config.id))?
+    credentials::read(&key(platform, &config.vault_id()))?
         .map(|v| serde_json::from_slice(&v).context("Saved sign-in could not be read"))
         .transpose()
 }
@@ -34,18 +34,18 @@ pub(super) fn save(
         !token.refresh.is_empty(),
         "This account did not provide a renewable sign-in"
     );
-    credentials::write(&key(platform, &config.id), &serde_json::to_vec(token)?)?;
+    credentials::write(&key(platform, &config.vault_id()), &serde_json::to_vec(token)?)?;
     if !cancel.load(Ordering::Relaxed) {
-        credentials::write(&marker(platform, &config.id), b"1")?;
+        credentials::write(&marker(platform, &config.vault_id()), b"1")?;
     }
     Ok(())
 }
 pub(super) fn forget_marker(platform: Platform, config: &ClientConfig) {
-    let _ = credentials::delete(&marker(platform, &config.id));
+    let _ = credentials::delete(&marker(platform, &config.vault_id()));
 }
 pub(super) fn forget(platform: Platform, config: &ClientConfig) {
     forget_marker(platform, config);
-    let _ = credentials::delete(&key(platform, &config.id));
+    let _ = credentials::delete(&key(platform, &config.vault_id()));
 }
 fn secret(
     client: &str,

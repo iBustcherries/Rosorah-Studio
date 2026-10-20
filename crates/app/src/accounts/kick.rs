@@ -124,6 +124,35 @@ fn update_channel(client: &Client, token: &Token, title: &str, category: &str) -
     Ok(())
 }
 
+/// The channel's emotes plus Kick's global ones. Kick's public API has no emote list, so this
+/// reads the list kick.com's own chat uses; it needs no sign-in.
+fn emotes(client: &Client, slug: &str) -> Result<Vec<crate::chat_render::Emote>> {
+    ensure!(!slug.is_empty() && slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'), "Kick channel unknown");
+    let sets = json(client.get(format!("https://kick.com/emotes/{slug}")).header(reqwest::header::USER_AGENT, "Mozilla/5.0 (X11; Linux x86_64) Rosorah Studio"))?;
+    let mut list = Vec::new();
+    for (index, set) in sets.as_array().into_iter().flatten().enumerate() {
+        let group = match set["name"].as_str() {
+            _ if index == 0 && set["slug"].is_string() => "Your channel",
+            Some("Emojis") => "Kick emoji",
+            _ => "Kick",
+        };
+        for e in set["emotes"].as_array().into_iter().flatten() {
+            let (Some(id), Some(name)) = (e["id"].as_u64(), e["name"].as_str()) else { continue };
+            if name.is_empty() || name.len() > 100 || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                continue;
+            }
+            list.push(crate::chat_render::Emote {
+                group: group.into(),
+                name: name.into(),
+                // Kick chat turns this into the picture.
+                insert: format!("[emote:{id}:{name}]"),
+                src: format!("https://files.kick.com/emotes/{id}/fullsize"),
+            });
+        }
+    }
+    Ok(list)
+}
+
 pub(super) fn session(client: &Client, config: &ClientConfig, mut token: Token,
     tx: &mpsc::SyncSender<Event>, commands: mpsc::Receiver<Command>, cancel: &AtomicBool) -> Result<()> {
     let identity = json(client.post("https://id.kick.com/oauth/token/introspect").bearer_auth(&token.access))?;
@@ -193,6 +222,9 @@ pub(super) fn session(client: &Client, config: &ClientConfig, mut token: Token,
                 Err(e) => {let _ = tx.send(Event::Status(format!("{e}. If permission is missing, sign out and connect Kick again.")));}
             },
             Ok(Command::Live(live)) => if live { watching.start() } else { watching.stop(tx) },
+            Ok(Command::Emotes(slug)) => {
+                let _ = tx.send(Event::Emotes(emotes(client, &slug).map_err(|e| format!("Couldn't load your Kick emotes: {e}"))));
+            }
             Ok(_) => {let _ = tx.send(Event::Status("This option is not available for Kick".into()));}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => (),

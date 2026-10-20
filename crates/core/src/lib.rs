@@ -771,9 +771,10 @@ impl ChatFeed {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum EventKind {
     Donation,
+    #[default]
     Follow,
     Subscription,
     ChatCommand,
@@ -791,9 +792,11 @@ pub enum EventKind {
     HypeTrain,
     Poll,
     Prediction,
+    /// Runs on a schedule (see automation::Options), not because of a viewer.
+    Timer,
 }
 impl EventKind {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::Donation,
         Self::Follow,
         Self::Subscription,
@@ -812,6 +815,7 @@ impl EventKind {
         Self::HypeTrain,
         Self::Poll,
         Self::Prediction,
+        Self::Timer,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -833,6 +837,7 @@ impl EventKind {
             Self::HypeTrain => "Hype Train",
             Self::Poll => "Poll",
             Self::Prediction => "Prediction",
+            Self::Timer => "Timer",
         }
     }
 }
@@ -849,11 +854,24 @@ pub struct Event {
     pub at_ms: u64,
 }
 
+/// Which account an automation's chat message comes from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ChatSender {
+    /// The bot account when one is connected for that platform, otherwise the streamer.
+    #[default]
+    Bot,
+    Streamer,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Action {
     DisplayAlert { source: Id, template: String, media: Option<Id>, seconds: u32 },
     PlaySound { source: Id },
-    SendChat { text: String, platforms: Vec<Platform> },
+    SendChat {
+        text: String,
+        platforms: Vec<Platform>,
+        #[serde(default)]
+        sender: ChatSender,
+    },
     Wait {
         milliseconds: u64,
     },
@@ -1600,7 +1618,7 @@ impl Project {
                         bail!("Invalid scene action")
                     }
                     Action::DisplayAlert{source,media,..} if !self.source(*source).is_some_and(|s|matches!(&s.kind,SourceKind::Widget(w) if w.kind==widgets::Kind::AlertBox)) || media.is_some_and(|id|self.source(id).is_none())=>{bail!("Alert references a missing alert box or media source")},
-                    Action::SendChat{text,platforms} if text.trim().is_empty()||text.chars().count()>500||platforms.iter().any(|p|!matches!(p,Platform::Twitch|Platform::YouTube|Platform::Kick))=>{bail!("Invalid automation chat message or platform")},
+                    Action::SendChat{text,platforms,..} if text.trim().is_empty()||text.chars().count()>500||platforms.iter().any(|p|!matches!(p,Platform::Twitch|Platform::YouTube|Platform::Kick))=>{bail!("Invalid automation chat message or platform")},
                     Action::Wait { milliseconds } if *milliseconds > 3600000 => {
                         bail!("Automation wait exceeds one hour")
                     }

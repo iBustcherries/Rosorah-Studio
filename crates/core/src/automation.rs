@@ -30,6 +30,12 @@ pub struct Options {
     pub scene: Option<Id>,
     pub hotkey: u8,
     pub missed_alerts: bool,
+    /// Timers: minutes between runs (at least 1).
+    pub timer_minutes: u32,
+    /// Timers: chat messages needed since the last run, so a quiet chat isn't spammed.
+    pub timer_messages: u32,
+    /// Timers: also run while not streaming.
+    pub timer_offline: bool,
 }
 impl Options {
     pub fn reason(&self, e: &Event) -> Option<&'static str> {
@@ -102,7 +108,7 @@ pub fn actions(actions: &[Action], e: &Event) -> Vec<Action> {
         .iter()
         .map(|a| match a {
             Action::DisplayAlert { source, template, media, seconds } => Action::DisplayAlert { source: *source, template: expand(template,e), media:*media, seconds:*seconds },
-            Action::SendChat { text, platforms } => Action::SendChat { text:expand(text,e), platforms: if platforms.is_empty(){vec![e.platform]}else{platforms.clone()} },
+            Action::SendChat { text, platforms, sender } => Action::SendChat { text:expand(text,e), platforms: if platforms.is_empty(){vec![e.platform]}else{platforms.clone()}, sender:*sender },
             Action::ShowAlert { template, seconds } => Action::ShowAlert {
                 template: expand(template, e),
                 seconds: *seconds,

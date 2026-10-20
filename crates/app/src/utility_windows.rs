@@ -69,10 +69,10 @@ impl Studio{
  if r.checking{ui.spinner();ui.label("Checking desktop services…");ctx.request_repaint_after(Duration::from_millis(100));}
  ui.separator();ui.strong("Capture");if let Some(types)=r.sources{ui.label(format!("Desktop portal: {}{}",if types&1!=0{"screens "}else{""},if types&2!=0{"windows"}else{""}));}else{ui.label("Desktop screen-sharing portal unavailable.");}
  if let Some(modes)=r.cursors{ui.label(format!("Pointer modes: {}{}",if modes&1!=0{"hidden "}else{""},if modes&2!=0{"embedded"}else{""}));}
- #[cfg(windows)] ui.label("Windows DXGI monitor capture, WASAPI audio, native file dialogs and Credential Manager. Window/game capture is not yet available.");
+ #[cfg(windows)] ui.label("Windows DXGI monitor capture, window and automatic game capture (Windows Graphics Capture), WASAPI audio, native file dialogs and Credential Manager.");
  if !r.portal_error.is_empty(){ui.small(&r.portal_error);}#[cfg(not(windows))]
  if r.session==crate::desktop::Session::X11{ui.label("X11 fallback: screens directly; window selection through xwininfo. Requires the GStreamer ximagesrc plugin.");}else{ui.label("Wayland screen/window capture needs a portal backend for this desktop. A backend that offers screens only cannot provide individual windows.");}
- ui.label("Automatic game capture uses renderer hooks independently of desktop sharing. Game/runtime compatibility still applies.");ui.separator();
+ #[cfg(not(windows))] ui.label("Automatic game capture uses renderer hooks independently of desktop sharing. Game/runtime compatibility still applies.");ui.separator();
  ui.label(if r.file_chooser{"File dialogs: desktop portal available"}else{"File dialogs: portal unavailable; desktop dialog fallback will be tried"});ui.label(if r.wallet{"Account storage: Secret Service is available or activatable"}else{"Account storage: no Secret Service found; sign-in may be session-only until a wallet is enabled"});
  ui.label("Music discovery: desktop MPRIS interface. Automation shortcuts: Rosorah must have focus.");ui.separator();ui.strong("Local tools");for(name,present)in &r.commands{ui.label(format!("{name}: {}",if *present{"installed"}else{"not found"}));}ui.small("PipeWire audio tools are required for microphone, desktop and game-audio routing. FFmpeg and your GPU drivers determine available encoding; this check does not change either.");
  if ui.add_enabled(!r.checking,egui::Button::new("Refresh checks")).clicked(){crate::desktop::refresh();}

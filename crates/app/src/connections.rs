@@ -49,6 +49,11 @@ impl Studio {
             save |= self.tiktok_card(ui, live);
         });
         ui.add_space(10.);
+        card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            self.bot_accounts(ui);
+        });
+        ui.add_space(10.);
         let others: Vec<usize> = self
             .stream_config
             .services
@@ -168,6 +173,62 @@ impl Studio {
             }
         });
         save
+    }
+    /// A second account per platform that automations and timers can post chat as.
+    fn bot_accounts(&mut self, ui: &mut egui::Ui) {
+        ui.label(RichText::new("Bot accounts").heading());
+        note(ui, "Sign in a separate account (for example YourNameBot) and choose \"Send as: My bot\" in Send chat steps. Works on Twitch and Kick; YouTube and TikTok don't allow it.");
+        for (index, platform) in [Platform::Twitch, Platform::Kick].into_iter().enumerate() {
+            let config = if platform == Platform::Twitch { self.account_config.twitch.clone() } else { self.account_config.kick.clone() };
+            let streamer = if platform == Platform::Twitch { &self.accounts[0] } else { &self.kick_account };
+            let (streamer_connected, streamer_id) = (streamer.connected, streamer.user_id.clone());
+            let bot = &mut self.bots[index];
+            ui.add_space(6.);
+            ui.push_id(("bot", platform.name()), |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(format!("{} bot", platform.name())).strong().color(platform_color(platform)));
+                    let (badge, color) = if bot.connected {
+                        (format!("● Connected as {}", bot.name), Color32::from_rgb(110, 210, 140))
+                    } else if bot.busy {
+                        ("● Waiting for the bot to sign in…".into(), Color32::from_rgb(230, 190, 90))
+                    } else {
+                        ("● Not connected".into(), Color32::GRAY)
+                    };
+                    ui.label(RichText::new(badge).small().color(color));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if bot.can_disconnect() {
+                            if ui.button(if bot.busy { "Cancel" } else { "Sign out" }).clicked() {
+                                bot.disconnect();
+                            }
+                        } else if ui.add_enabled(!config.id.trim().is_empty(), egui::Button::new("Connect bot")).clicked() {
+                            bot.connect(config.clone());
+                        }
+                    });
+                });
+                if bot.connected && bot.user_id == streamer_id {
+                    ui.colored_label(Color32::from_rgb(230, 120, 110), "This is your own account, not a bot. Sign out, then sign in again as the bot in a private window.");
+                } else if bot.connected && !streamer_connected {
+                    ui.small(format!("Connect your own {} account above too, so the bot knows which chat to post in.", platform.name()));
+                }
+                if !bot.auth_url.is_empty() {
+                    ui.small("Your browser is signed in as you, so open this link in a private window and sign in there as the bot:");
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Copy sign-in link").clicked() {
+                            ui.ctx().copy_text(bot.auth_url.clone());
+                        }
+                        ui.label(RichText::new(&bot.status).small());
+                    });
+                    if platform == Platform::Twitch {
+                        ui.small("Twitch asks for the code shown here after you sign in as the bot.");
+                    }
+                } else if !bot.connected && !bot.status.is_empty() && !["Disconnected", "Reconnecting saved account…", "Opening account sign-in…"].contains(&bot.status.as_str()) {
+                    ui.small(&bot.status);
+                }
+                if platform == Platform::Twitch && bot.connected {
+                    ui.small("Tip: make the bot a moderator (/mod botname) so slow mode and follower-only chat don't block it.");
+                }
+            });
+        }
     }
     /// Platform name, sign-in state and Connect / Sign out for one account.
     fn account_row(&mut self, ui: &mut egui::Ui, platform: Platform) {

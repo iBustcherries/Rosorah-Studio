@@ -177,12 +177,6 @@ impl Default for TestEvent {
         Self { platform: Platform::Twitch, author: "TestViewer".into(), amount: 5., count: 10, message: "Hello!".into() }
     }
 }
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub enum Tab {
-    #[default]
-    Alerts,
-    Automations,
-}
 /// Events viewers cause that usually show something on stream; everything else is an automation.
 pub fn is_alert(e: EventKind) -> bool {
     matches!(
@@ -200,9 +194,17 @@ pub fn is_alert(e: EventKind) -> bool {
             | EventKind::HypeTrain
     )
 }
-fn in_tab(tab: Tab, e: EventKind) -> bool {
-    is_alert(e) == (tab == Tab::Alerts)
-}
+/// The list groups alerts and automations by what starts them.
+const GROUPS: [(&str, &[EventKind]); 8] = [
+    ("Follows", &[EventKind::Follow, EventKind::Subscriber]),
+    ("Subs & memberships", &[EventKind::Subscription, EventKind::Gift, EventKind::Membership]),
+    ("Bits, donations & Super Chats", &[EventKind::Bits, EventKind::Donation, EventKind::SuperChat, EventKind::SuperSticker]),
+    ("Raids & Hype Trains", &[EventKind::Raid, EventKind::HypeTrain]),
+    ("Channel points", &[EventKind::Redemption]),
+    ("Chat", &[EventKind::ChatCommand, EventKind::ChatMessage, EventKind::FirstMessage, EventKind::FirstTimeChatter]),
+    ("Polls & predictions", &[EventKind::Poll, EventKind::Prediction]),
+    ("Timers", &[EventKind::Timer]),
+];
 #[derive(Default)]
 pub struct Editor {
     pub selected: usize,
@@ -214,7 +216,10 @@ pub struct Editor {
     picker: Option<(Id, mpsc::Receiver<Option<PathBuf>>)>,
     pub preview_open: bool,
     pub preview_vertical: bool,
-    tab: Tab,
+    /// Platforms with a bot account connected, for Send chat steps.
+    pub bots: Vec<Platform>,
+    /// The selected rule's event, for the variables its steps can use.
+    event: EventKind,
     live_preview: bool,
     live_seen: Vec<u8>,
     live_due: Option<Instant>,
@@ -227,7 +232,6 @@ fn rule_menu(ui: &mut egui::Ui, enabled: bool) -> Option<&'static str> {
     for label in [
         if enabled { "Turn off" } else { "Turn on" },
         "Test",
-        "Run now",
         "Duplicate",
         "Move up",
         "Move down",
@@ -241,10 +245,28 @@ fn rule_menu(ui: &mut egui::Ui, enabled: bool) -> Option<&'static str> {
     }
     result
 }
-fn variables(ui: &mut egui::Ui, text: &mut String) {
+/// The variables an event fills in; others would stay empty.
+fn variables_for(e: EventKind) -> &'static [&'static str] {
+    match e {
+        EventKind::Follow | EventKind::Subscriber | EventKind::FirstMessage | EventKind::FirstTimeChatter => &["{user}", "{platform}"],
+        EventKind::Subscription | EventKind::Membership => &["{user}", "{message}", "{count}", "{platform}"],
+        EventKind::Gift => &["{user}", "{count}", "{platform}"],
+        EventKind::Bits => &["{user}", "{bits}", "{message}", "{platform}"],
+        EventKind::Donation | EventKind::SuperChat | EventKind::SuperSticker => &["{user}", "{amount}", "{currency}", "{message}", "{platform}"],
+        EventKind::Raid => &["{user}", "{viewers}", "{platform}"],
+        EventKind::Redemption => &["{user}", "{reward}", "{message}", "{platform}"],
+        EventKind::ChatCommand | EventKind::ChatMessage => &["{user}", "{message}", "{platform}"],
+        EventKind::HypeTrain | EventKind::Poll | EventKind::Prediction => &["{count}", "{platform}"],
+        EventKind::Timer => &[],
+    }
+}
+fn variables(ui: &mut egui::Ui, text: &mut String, event: EventKind) {
+    if variables_for(event).is_empty() {
+        return;
+    }
     ui.horizontal_wrapped(|ui| {
         ui.small("Insert:");
-        for v in ["{user}", "{message}", "{amount}", "{currency}", "{count}", "{bits}", "{viewers}", "{platform}", "{reward}"] {
+        for &v in variables_for(event) {
             if ui.small_button(v).clicked() {
                 text.push_str(v);
             }
@@ -272,6 +294,7 @@ fn when_text(e: EventKind) -> &'static str {
         EventKind::Redemption => "someone redeems a reward",
         EventKind::Poll => "a poll updates",
         EventKind::Prediction => "a prediction updates",
+        EventKind::Timer => "a timer goes off",
     }
 }
 fn action_label(a: &Action) -> &'static str {
@@ -308,7 +331,7 @@ fn then_text(actions: &[Action], sources: &[auroracast_core::Source], scenes: &[
             Action::ShowAlert { template, seconds } => format!("show \u{201c}{}\u{201d} for {seconds} s", short(template)),
             Action::PlaySound { source } => format!("play {}{}", name(*source), volume(*source)),
             Action::PlayMedia { source } => format!("play {}{}", name(*source), volume(*source)),
-            Action::SendChat { .. } => "send a chat message".into(),
+            Action::SendChat { text, .. } => format!("say \u{201c}{}\u{201d} in chat", short(text)),
             Action::Wait { milliseconds } => format!("pause {:.1} s", *milliseconds as f64 / 1000.),
             Action::UpdateWidget { source, .. } => format!("update {}", name(*source)),
             Action::SwitchScene { scene, .. } => format!(
@@ -318,6 +341,10 @@ fn then_text(actions: &[Action], sources: &[auroracast_core::Source], scenes: &[
         })
         .collect();
     if parts.is_empty() { "do nothing yet".into() } else { parts.join(", then ") }
+}
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
 fn ago(ms: u64) -> String {
     match ms / 1000 {
@@ -332,6 +359,21 @@ fn mode_label(m: Mode) -> &'static str {
         Mode::Overlap => "Play together",
         Mode::Interrupt => "Newest replaces current",
     }
+}
+/// The Alerts page keeps the queue controls in one small menu that shows what's playing.
+pub fn queue_menu(ui: &mut egui::Ui, q: &mut Scheduler, cmds: &mut Vec<Command>) {
+    let label = match (q.paused, q.len()) {
+        (true, _) => "Alert queue · paused".to_owned(),
+        (false, 0) => "Alert queue · idle".to_owned(),
+        (false, 1) => "Alert queue · 1 playing".to_owned(),
+        (false, n) => format!("Alert queue · {} waiting", n - 1),
+    };
+    ui.menu_button(label, |ui| {
+        ui.set_min_width(420.);
+        queue_bar(ui, q, cmds);
+    })
+    .response
+    .on_hover_text("Pause, skip or stop alerts, and choose whether they wait for each other");
 }
 /// Compact queue controls, shared by the Alerts page and the Broadcast panel.
 pub fn queue_bar(ui: &mut egui::Ui, q: &mut Scheduler, cmds: &mut Vec<Command>) {
@@ -378,8 +420,9 @@ const ALERT_TEMPLATES: [(&str, EventKind, &str); 8] = [
     ("Super Chat", EventKind::SuperChat, "{user} sent {amount} {currency}: {message}"),
     ("New member", EventKind::Membership, "Welcome to the club, {user}!"),
 ];
-const AUTOMATION_TEMPLATES: [(&str, EventKind, &str); 4] = [
+const AUTOMATION_TEMPLATES: [(&str, EventKind, &str); 5] = [
     ("Chat command", EventKind::ChatCommand, "Hello, {user}!"),
+    ("Chat timer", EventKind::Timer, "Enjoying the stream? Follow so you don't miss the next one!"),
     ("Welcome first-time chatters", EventKind::FirstMessage, "Welcome, {user}!"),
     ("Channel points reward", EventKind::Redemption, "{user} redeemed a reward!"),
     ("Death counter", EventKind::ChatCommand, "Death counter"),
@@ -398,7 +441,7 @@ fn template_rule(p: &mut Project, label: &str, event: EventKind, text: &str) -> 
             Some(source) => vec![Action::UpdateWidget { source, text: String::new(), increment: 1, start_timer: false }],
             None => vec![Action::ShowAlert { template: text.into(), seconds: 5 }],
         },
-        (_, EventKind::ChatCommand | EventKind::FirstMessage) => vec![Action::SendChat { text: text.into(), platforms: vec![] }],
+        (_, EventKind::ChatCommand | EventKind::FirstMessage | EventKind::Timer) => vec![Action::SendChat { text: text.into(), platforms: vec![], sender: Default::default() }],
         _ => match alert_box {
             Some(source) if is_alert(event) => vec![Action::DisplayAlert { source, template: text.into(), media: None, seconds: 6 }],
             _ => vec![Action::ShowAlert { template: text.into(), seconds: 5 }],
@@ -413,7 +456,7 @@ fn template_rule(p: &mut Project, label: &str, event: EventKind, text: &str) -> 
         command: if label == "Death counter" { "!death" } else { "!hello" }.into(),
         cooldown_ms: 3000,
         conditions: Default::default(),
-        options: Options::default(),
+        options: Options { timer_minutes: 15, timer_messages: 5, ..Default::default() },
         actions,
     }
 }
@@ -590,11 +633,8 @@ impl Editor {
             }
             self.picker = None;
         }
-        // Keep the selection inside the visible tab.
-        if !p.rules.get(self.selected).is_some_and(|r| in_tab(self.tab, r.event))
-            && let Some(i) = p.rules.iter().position(|r| in_tab(self.tab, r.event))
-        {
-            self.selected = i;
+        if self.selected >= p.rules.len() {
+            self.selected = p.rules.len().saturating_sub(1);
         }
         egui::SidePanel::left("automation_list")
             .resizable(true)
@@ -608,9 +648,7 @@ impl Editor {
         egui::CentralPanel::default().show(ctx, |ui| {
             crate::appearance::glass(ui, egui::CornerRadius::ZERO);
             egui::ScrollArea::vertical().show(ui, |ui| {
-                queue_bar(ui, q, &mut cmds);
-                ui.separator();
-                changed |= self.editor(ui, p, &mut cmds);
+                changed |= self.editor(ui, p, q, &mut cmds);
                 ui.add_space(10.);
                 ui.collapsing("Recent activity", |ui| {
                     for line in q.history.iter().rev().take(25) {
@@ -707,7 +745,7 @@ impl Editor {
             self.request_samples();
             self.guide.samples = self.samples.clone();
         }
-        if let Some((id,test))=self.guide.ui(ctx,p,connected){changed=true;self.selected=p.rules.iter().position(|r|r.id==id).unwrap_or(0);self.tab=if p.rules.get(self.selected).is_some_and(|r|is_alert(r.event)){Tab::Alerts}else{Tab::Automations};if test{cmds.push(Command::Test(id));}}
+        if let Some((id,test))=self.guide.ui(ctx,p,connected){changed=true;self.selected=p.rules.iter().position(|r|r.id==id).unwrap_or(0);if test{cmds.push(Command::Test(id));}}
         (changed, cmds)
     }
     /// Starts generating the built-in samples once, in the background.
@@ -741,18 +779,20 @@ impl Editor {
     fn sidebar(&mut self, ui: &mut egui::Ui, p: &mut Project, engine: &auroracast_core::AlertEngine, cmds: &mut Vec<Command>) -> bool {
         let mut changed = false;
         ui.heading("Alerts & automations");
-        let counts = [Tab::Alerts, Tab::Automations].map(|t| p.rules.iter().filter(|r| in_tab(t, r.event)).count());
-        ui.horizontal(|ui| {
-            for (i, (tab, label)) in [(Tab::Alerts, "Alerts"), (Tab::Automations, "Automations")].into_iter().enumerate() {
-                if ui.selectable_label(self.tab == tab, format!("{label} ({})", counts[i])).clicked() {
-                    self.tab = tab;
-                }
-            }
-        });
         ui.horizontal(|ui| {
             ui.menu_button("+ New", |ui| {
-                let list: &[(&str, EventKind, &str)] = if self.tab == Tab::Alerts { &ALERT_TEMPLATES } else { &AUTOMATION_TEMPLATES };
-                for &(label, event, text) in list {
+                ui.label(RichText::new("Alerts").small().weak());
+                for &(label, event, text) in ALERT_TEMPLATES.iter() {
+                    if ui.button(label).clicked() {
+                        let rule = template_rule(p, label, event, text);
+                        p.rules.push(rule);
+                        self.selected = p.rules.len() - 1;
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                ui.label(RichText::new("Chat, rewards & timers").small().weak());
+                for &(label, event, text) in AUTOMATION_TEMPLATES.iter() {
                     if ui.button(label).clicked() {
                         let rule = template_rule(p, label, event, text);
                         p.rules.push(rule);
@@ -783,45 +823,61 @@ impl Editor {
         ui.add_space(6.);
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64;
         let mut op = None;
-        let tab = self.tab;
         egui::ScrollArea::vertical().auto_shrink([false, true]).show(ui, |ui| {
-            for (i, r) in p.rules.iter_mut().enumerate().filter(|(_, r)| in_tab(tab, r.event)) {
-                let selected = self.selected == i;
-                let fill = if selected { ui.visuals().selection.bg_fill.gamma_multiply(0.22) } else { ui.visuals().faint_bg_color };
-                egui::Frame::new().fill(fill).corner_radius(10).inner_margin(8).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut r.enabled, "").on_hover_text(if r.enabled { "On" } else { "Off" });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.menu_button("...", |ui| {
-                                if let Some(a) = rule_menu(ui, r.enabled) {
-                                    op = Some((i, a));
-                                }
-                            });
-                            if ui.small_button("Test").clicked() {
-                                cmds.push(Command::Test(r.id));
-                            }
-                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                                let name = ui.add(egui::Button::new(RichText::new(&r.name).strong()).frame(false).truncate()).on_hover_text(&r.name);
-                                if name.clicked() {
-                                    self.selected = i;
-                                }
-                                name.context_menu(|ui| {
+            for (group, events) in GROUPS {
+                if !p.rules.iter().any(|r| events.contains(&r.event)) {
+                    continue;
+                }
+                ui.add_space(4.);
+                ui.label(RichText::new(group).small().strong().color(ui.visuals().weak_text_color()));
+                for i in 0..p.rules.len() {
+                    if !events.contains(&p.rules[i].event) {
+                        continue;
+                    }
+                    let summary = then_text(&p.rules[i].actions, &p.sources, &p.scenes);
+                    let r = &mut p.rules[i];
+                    let selected = self.selected == i;
+                    let fill = if selected { ui.visuals().selection.bg_fill.gamma_multiply(0.22) } else { ui.visuals().faint_bg_color };
+                    let frame = egui::Frame::new().fill(fill).corner_radius(10).inner_margin(8).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut r.enabled, "").on_hover_text(if r.enabled { "On" } else { "Off" });
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                                ui.menu_button("...", |ui| {
                                     if let Some(a) = rule_menu(ui, r.enabled) {
                                         op = Some((i, a));
                                     }
                                 });
+                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                                    let name = ui.add(egui::Label::new(RichText::new(&r.name).strong()).wrap().sense(egui::Sense::click()));
+                                    if name.clicked() {
+                                        self.selected = i;
+                                    }
+                                    name.context_menu(|ui| {
+                                        if let Some(a) = rule_menu(ui, r.enabled) {
+                                            op = Some((i, a));
+                                        }
+                                    });
+                                });
                             });
                         });
+                        ui.add(egui::Label::new(RichText::new(format!("{}.", capitalized(&summary))).small()).wrap());
+                        let platform = if r.event == EventKind::Timer {
+                            format!("Every {} min", r.options.timer_minutes.max(1))
+                        } else {
+                            r.platform.map(|p| p.name()).unwrap_or("All platforms").to_owned()
+                        };
+                        let last = engine.last_fired(r.id).map(|t| ago(now.saturating_sub(t))).unwrap_or_else(|| "not played yet".into());
+                        ui.add(egui::Label::new(RichText::new(format!("{platform} · {last}")).small().weak()).truncate());
                     });
-                    let platform = r.platform.map(|p| p.name()).unwrap_or("All platforms");
-                    let last = engine.last_fired(r.id).map(|t| ago(now.saturating_sub(t))).unwrap_or_else(|| "not played yet".into());
-                    ui.add(egui::Label::new(RichText::new(format!("{platform} · {last}")).small()).truncate());
-                });
-                ui.add_space(4.);
+                    if frame.response.interact(egui::Sense::click()).clicked() {
+                        self.selected = i;
+                    }
+                    ui.add_space(4.);
+                }
             }
-            if counts[if tab == Tab::Alerts { 0 } else { 1 }] == 0 {
-                ui.small(if tab == Tab::Alerts { "No alerts yet. Use + New to add one." } else { "No automations yet. Use + New to add one." });
+            if p.rules.is_empty() {
+                ui.small("Nothing yet. Use + New to add an alert, a chat command or a timer.");
             }
         });
         if let Some((i, action)) = op {
@@ -850,7 +906,6 @@ impl Editor {
                     self.selected += 1;
                 }
                 "Test" => cmds.push(Command::Test(p.rules[i].id)),
-                "Run now" => cmds.push(Command::Run(p.rules[i].id)),
                 "Export" => self.transfer = Some((false, export(p, &p.rules[i]))),
                 _ => (),
             }
@@ -864,15 +919,19 @@ impl Editor {
         changed
     }
     /// The selected rule: summary sentence, simple conditions, then action cards.
-    fn editor(&mut self, ui: &mut egui::Ui, p: &mut Project, cmds: &mut Vec<Command>) -> bool {
+    fn editor(&mut self, ui: &mut egui::Ui, p: &mut Project, q: &mut Scheduler, cmds: &mut Vec<Command>) -> bool {
         let mut changed = false;
-        let Some(index) = Some(self.selected).filter(|i| p.rules.get(*i).is_some_and(|r| in_tab(self.tab, r.event))) else {
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| queue_menu(ui, q, cmds));
+        });
+        let Some(index) = Some(self.selected).filter(|i| p.rules.get(*i).is_some()) else {
             ui.add_space(20.);
-            ui.label(if self.tab == Tab::Alerts { "Add an alert with + New to get started." } else { "Add an automation with + New to get started." });
+            ui.label("Add an alert, a chat command or a timer with + New to get started.");
             return false;
         };
+        self.event = p.rules[index].event;
         let rule = &p.rules[index];
-        let conflicts = p.rules.iter().filter(|a| a.id != rule.id && a.enabled && a.event == rule.event && (a.platform.is_none() || rule.platform.is_none() || a.platform == rule.platform)).count();
+        let conflicts = if rule.event == EventKind::Timer { 0 } else { p.rules.iter().filter(|a| a.id != rule.id && a.enabled && a.event == rule.event && (a.platform.is_none() || rule.platform.is_none() || a.platform == rule.platform)).count() };
         let mut sample_choice: Option<(usize, crate::alert_samples::Sample)> = None;
         {
             let r = &mut p.rules[index];
@@ -882,22 +941,25 @@ impl Editor {
                 if ui.button("Test").on_hover_text("Plays a preview. Doesn't change goals, switch scenes or post chat.").clicked() {
                     cmds.push(Command::Test(r.id));
                 }
-                if ui.button("Test with details…").clicked() {
-                    let message = if r.event == EventKind::ChatCommand { format!("{} test", r.command) } else { "Hello!".into() };
-                    self.tester = Some((r.id, TestEvent { platform: r.platform.unwrap_or(Platform::Twitch), message, ..Default::default() }));
-                }
-                if ui.button("Run now").on_hover_text("Runs every action for real, including scene switches and chat").clicked() {
+                if ui.button("Run for real").on_hover_text("Runs every step for real, including scene switches and chat messages").clicked() {
                     cmds.push(Command::Run(r.id));
                 }
-                let mut live = self.live_preview;
-                if ui.checkbox(&mut live, "Live preview").on_hover_text("Replays the preview a moment after each change").changed() {
-                    self.live_preview = live;
-                    if live {
-                        self.preview_open = true;
-                        self.live_seen = serde_json::to_vec(&*r).unwrap_or_default();
-                        cmds.push(Command::Test(r.id));
+                ui.menu_button("More tests", |ui| {
+                    if ui.button("Test as a specific viewer or amount…").on_hover_text("Checks this alert's conditions with details you choose, and says why it wouldn't play").clicked() {
+                        let message = if r.event == EventKind::ChatCommand { format!("{} test", r.command) } else { "Hello!".into() };
+                        self.tester = Some((r.id, TestEvent { platform: r.platform.unwrap_or(Platform::Twitch), message, ..Default::default() }));
+                        ui.close();
                     }
-                }
+                    let mut live = self.live_preview;
+                    if ui.checkbox(&mut live, "Replay the preview after each change").changed() {
+                        self.live_preview = live;
+                        if live {
+                            self.preview_open = true;
+                            self.live_seen = serde_json::to_vec(&*r).unwrap_or_default();
+                            cmds.push(Command::Test(r.id));
+                        }
+                    }
+                });
             });
             if conflicts > 0 {
                 ui.colored_label(egui::Color32::from_rgb(230, 190, 90), format!("{conflicts} other alert(s) also react to this. Add a condition to avoid double alerts."));
@@ -907,19 +969,23 @@ impl Editor {
                 ui.set_width(ui.available_width());
                 ui.horizontal_wrapped(|ui| {
                     ui.label("When");
-                    let tab = self.tab;
                     egui::ComboBox::from_id_salt("event").selected_text(when_text(r.event)).show_ui(ui, |ui| {
-                        for e in EventKind::ALL.into_iter().filter(|e| in_tab(tab, *e)) {
-                            ui.selectable_value(&mut r.event, e, when_text(e));
+                        for (group, events) in GROUPS {
+                            ui.label(RichText::new(group).small().weak());
+                            for &e in events {
+                                ui.selectable_value(&mut r.event, e, when_text(e));
+                            }
                         }
                     });
-                    ui.label("on");
-                    egui::ComboBox::from_id_salt("platform").selected_text(r.platform.map(|p| p.name()).unwrap_or("any platform")).show_ui(ui, |ui| {
-                        ui.selectable_value(&mut r.platform, None, "any platform");
-                        for p in Platform::ALL {
-                            ui.selectable_value(&mut r.platform, Some(p), p.name());
-                        }
-                    });
+                    if r.event != EventKind::Timer {
+                        ui.label("on");
+                        egui::ComboBox::from_id_salt("platform").selected_text(r.platform.map(|p| p.name()).unwrap_or("any platform")).show_ui(ui, |ui| {
+                            ui.selectable_value(&mut r.platform, None, "any platform");
+                            for p in Platform::ALL {
+                                ui.selectable_value(&mut r.platform, Some(p), p.name());
+                            }
+                        });
+                    }
                 });
                 ui.label(RichText::new(format!("then {}.", then_text(&r.actions, &p.sources, &p.scenes))).strong());
             });
@@ -954,10 +1020,23 @@ impl Editor {
                     ui.add(egui::TextEdit::singleline(&mut r.conditions.reward_id).desired_width(200.).hint_text("any reward"));
                     ui.small("Tip: ... > Twitch channel point rewards links a reward without copying its ID.");
                 }
+                EventKind::Timer => {
+                    if r.options.timer_minutes == 0 {
+                        r.options.timer_minutes = 15;
+                    }
+                    ui.label("Every");
+                    ui.add(egui::DragValue::new(&mut r.options.timer_minutes).range(1..=240).suffix(" min"));
+                    ui.label("if at least");
+                    ui.add(egui::DragValue::new(&mut r.options.timer_messages).range(0..=500));
+                    ui.label("chat messages came in since last time");
+                    ui.checkbox(&mut r.options.timer_offline, "Also while I'm not streaming");
+                }
                 _ => {}
             });
-            ui.collapsing("More conditions & cooldowns", |ui| {
+            let timer = r.event == EventKind::Timer;
+            ui.collapsing("Options: conditions, cooldowns, scene and shortcut", |ui| {
                 egui::Grid::new("conditions").num_columns(2).spacing([10., 8.]).show(ui, |ui| {
+                    if !timer {
                     ui.label("Only for this viewer");
                     ui.add(egui::TextEdit::singleline(&mut r.conditions.author).hint_text("anyone"));
                     ui.end_row();
@@ -1001,6 +1080,10 @@ impl Editor {
                         ui.text_edit_singleline(&mut r.options.users);
                         ui.end_row();
                     }
+                    ui.label("Events from while Rosorah was closed");
+                    ui.checkbox(&mut r.options.missed_alerts, "Play these too");
+                    ui.end_row();
+                    }
                     ui.label("Only while this scene is live");
                     egui::ComboBox::from_id_salt("scope")
                         .selected_text(r.options.scene.and_then(|id| p.scenes.iter().find(|s| s.id == id)).map(|s| s.name.as_str()).unwrap_or(if r.options.scene.is_some() { "Missing scene" } else { "Any scene" }))
@@ -1022,9 +1105,10 @@ impl Editor {
                         });
                     ui.end_row();
                 });
-                ui.small("Amounts use the original currency. Role conditions need role data from the platform; browser-read chat may not include it.");
+                if !timer {
+                    ui.small("Amounts use the original currency. Role conditions need role data from the platform; browser-read chat may not include it.");
+                }
             });
-            ui.checkbox(&mut r.options.missed_alerts, "Also play for events that happened while Rosorah was closed");
             ui.add_space(8.);
             ui.strong("Then");
             let mut remove = None;
@@ -1087,7 +1171,8 @@ impl Editor {
                     r.actions.push(Action::PlayMedia { source: media });
                 }
                 if ui.button("Send chat").clicked() {
-                    r.actions.push(Action::SendChat { text: "Thanks, {user}!".into(), platforms: vec![] });
+                    let text = if r.event == EventKind::Timer { "Thanks for hanging out!" } else { "Thanks, {user}!" };
+                    r.actions.push(Action::SendChat { text: text.into(), platforms: vec![], sender: Default::default() });
                 }
                 if ui.button("Pause").clicked() {
                     r.actions.push(Action::Wait { milliseconds: 1000 });
@@ -1145,7 +1230,7 @@ impl Editor {
                 }
                 ui.label("Message");
                 ui.add(egui::TextEdit::multiline(template).desired_rows(2).desired_width(f32::INFINITY));
-                variables(ui, template);
+                variables(ui, template, self.event);
                 ui.add(egui::Slider::new(seconds, 1..=60).text("seconds on screen"));
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Picture / video");
@@ -1201,9 +1286,9 @@ impl Editor {
                     ui.small("Media plays where its layer sits in the live scene; move it in the canvas or its Properties.");
                 }
             }
-            Action::SendChat { text, platforms } => {
+            Action::SendChat { text, platforms, sender } => {
                 ui.add(egui::TextEdit::multiline(text).desired_rows(2).desired_width(f32::INFINITY));
-                variables(ui, text);
+                variables(ui, text, self.event);
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Send to");
                     // TikTok has no chat-sending API, so automations can't post there.
@@ -1217,7 +1302,19 @@ impl Editor {
                         }
                     }
                 });
-                ui.small("Nothing ticked replies on the platform that triggered it.");
+                ui.small(if self.event == EventKind::Timer { "Nothing ticked sends to every connected platform." } else { "Nothing ticked replies on the platform that triggered it." });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Send as");
+                    ui.selectable_value(sender, auroracast_core::ChatSender::Bot, "My bot");
+                    ui.selectable_value(sender, auroracast_core::ChatSender::Streamer, "Me");
+                });
+                if *sender == auroracast_core::ChatSender::Bot {
+                    ui.small(if self.bots.is_empty() {
+                        "No bot account is connected (Settings > Accounts > Bot accounts), so this sends as you.".to_owned()
+                    } else {
+                        format!("Your bot is connected on {}; other platforms send as you.", self.bots.iter().map(|p| p.name()).collect::<Vec<_>>().join(" and "))
+                    });
+                }
             }
             Action::Wait { milliseconds } => {
                 let mut seconds = *milliseconds as f64 / 1000.;
@@ -1231,7 +1328,7 @@ impl Editor {
             }
             Action::ShowAlert { template, seconds } => {
                 ui.add(egui::TextEdit::multiline(template).desired_rows(2).desired_width(f32::INFINITY));
-                variables(ui, template);
+                variables(ui, template, self.event);
                 ui.add(egui::Slider::new(seconds, 1..=60).text("seconds on screen"));
             }
             Action::UpdateWidget { source, text, increment, start_timer } => {
@@ -1246,7 +1343,7 @@ impl Editor {
                     ui.label("New text");
                     ui.add(egui::TextEdit::singleline(text).hint_text("unchanged"));
                 });
-                variables(ui, text);
+                variables(ui, text, self.event);
                 ui.horizontal(|ui| {
                     ui.label("Add to counter");
                     ui.add(egui::DragValue::new(increment).range(-100000..=100000));
@@ -1509,6 +1606,22 @@ mod friendly_tests {
         ];
         assert_eq!(then_text(&actions, &p.sources, &p.scenes), "show \u{201c}Thanks for the follow, {user}!\u{201d} for 6 s, then pause 1.5 s");
         assert_eq!(then_text(&[], &p.sources, &p.scenes), "do nothing yet");
+    }
+    #[test]
+    fn every_event_has_one_group_and_its_own_variables() {
+        for e in EventKind::ALL {
+            assert_eq!(GROUPS.iter().filter(|(_, events)| events.contains(&e)).count(), 1, "{e:?}");
+            assert!(!when_text(e).is_empty());
+        }
+        assert!(!variables_for(EventKind::Follow).contains(&"{amount}"));
+        assert!(variables_for(EventKind::Donation).contains(&"{amount}"));
+        assert!(variables_for(EventKind::Redemption).contains(&"{reward}"));
+        assert!(variables_for(EventKind::Timer).is_empty());
+        let mut p = Project::default();
+        let timer = template_rule(&mut p, "Chat timer", EventKind::Timer, "Follow!");
+        assert_eq!(timer.options.timer_minutes, 15);
+        assert!(matches!(&timer.actions[0], Action::SendChat { sender: auroracast_core::ChatSender::Bot, platforms, .. } if platforms.is_empty()));
+        assert_eq!(capitalized("say hi"), "Say hi");
     }
     #[test]
     fn test_with_details_explains_why_a_rule_would_not_play() {

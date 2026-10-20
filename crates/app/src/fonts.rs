@@ -80,11 +80,29 @@ pub fn display_name(path: &Path) -> String {
     if let Some(first) = name.get(0..1) {
         name.replace_range(0..1, &first.to_uppercase());
     }
+    // Free look-alikes of Microsoft fonts Rosorah can't ship, findable by the familiar name.
+    for (prefix, like) in LOOK_ALIKES {
+        if name.starts_with(prefix) {
+            name.push_str(&format!(" (like {like})"));
+        }
+    }
     name
 }
+/// Bundled open fonts standing in for Microsoft ones: (family, the font it matches).
+const LOOK_ALIKES: [(&str, &str); 2] = [("Comic Neue", "Comic Sans"), ("Carlito", "Calibri")];
 
 /// The font file best matching a family name such as "Arial bold italic", or `None`.
+/// Comic Sans and Calibri fall back to their bundled look-alikes when not installed.
 pub fn find(face: &str) -> Option<String> {
+    find_exact(face).or_else(|| {
+        let lower = face.to_lowercase();
+        let (alike, _) = LOOK_ALIKES.iter().find(|(_, like)| lower.starts_with(&like.to_lowercase()))?;
+        // Keep only the style ("Comic Sans MS Bold" → "Comic Neue bold").
+        let style: String = ["bold", "italic"].iter().filter(|w| lower.contains(*w)).map(|w| format!(" {w}")).collect();
+        find_exact(&format!("{alike}{style}"))
+    })
+}
+fn find_exact(face: &str) -> Option<String> {
     let lower = face.to_lowercase();
     let bold = lower.ends_with(" bold") || lower.contains(" bold ");
     let italic = lower.ends_with(" italic");
@@ -132,5 +150,13 @@ mod tests {
         assert!(find("").is_none());
         let roboto = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/fonts/Roboto.ttf");
         assert!(load(roboto).is_some());
+    }
+    #[test]
+    fn comic_sans_and_calibri_have_bundled_look_alikes() {
+        assert_eq!(display_name(Path::new("/f/ComicNeue-Bold.ttf")), "Comic Neue Bold (like Comic Sans)");
+        assert_eq!(display_name(Path::new("/f/Carlito-Italic.ttf")), "Carlito Italic (like Calibri)");
+        // Debug builds also scan the repository's fonts folder, so the look-alikes are always found.
+        assert!(find("Comic Sans MS").is_some());
+        assert!(find("Calibri bold").is_some_and(|p| p.to_lowercase().contains("bold")));
     }
 }

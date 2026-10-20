@@ -529,8 +529,17 @@ pub struct Studio {
     event_history: crate::activity::History,
     accounts: [crate::accounts::Account; 2],
     kick_account: crate::accounts::Account,
+    /// Bot accounts: Twitch, then Kick.
+    bots: [crate::accounts::Account; 2],
+    /// Timers: when each last ran, and the chat message count then.
+    timer_runs: std::collections::HashMap<Id, (Instant, u64)>,
+    /// Chat messages seen (for timers that wait for chat activity).
+    chat_messages_seen: u64,
     account_config: crate::accounts::Config,
     browser_chat: crate::browser_chat::BrowserChat,
+    emote_picker: crate::emote_picker::Picker,
+    /// Rosorah draws the title bar itself (GNOME); the window frame is off.
+    custom_title_bar: bool,
     event_relayed: std::collections::VecDeque<String>,
     event_ids: std::collections::HashSet<String>,
     event_revision: u64,
@@ -755,6 +764,9 @@ impl Studio {
         accounts[1].restore(account_config.youtube.clone());
         let mut kick_account = crate::accounts::Account::new(Platform::Kick);
         kick_account.restore(account_config.kick.clone());
+        let mut bots = [crate::accounts::Account::new_bot(Platform::Twitch), crate::accounts::Account::new_bot(Platform::Kick)];
+        bots[0].restore(account_config.twitch.clone());
+        bots[1].restore(account_config.kick.clone());
         let first_run = !project_path.exists();
         let tools=crate::utilities::Tools{guide:first_run.then_some(0),..Default::default()};
         // Recordings cut short by a crash are repaired in the background; the original files are kept.
@@ -838,6 +850,7 @@ impl Studio {
             audio,
             workspace,
             toggle_panel: None,
+            custom_title_bar: crate::title_bar::wanted(project.preferences.workspace.appearance.title_bar),
             project,
             project_path,
             page: match page.as_str() {
@@ -929,8 +942,12 @@ impl Studio {
             ),
             accounts,
             kick_account,
+            bots,
+            timer_runs: Default::default(),
+            chat_messages_seen: 0,
             account_config,
             browser_chat: crate::browser_chat::BrowserChat::default(),
+            emote_picker: Default::default(),
             event_relayed: Default::default(),
             event_ids: Default::default(),
             event_revision: 0,
@@ -1323,7 +1340,16 @@ impl Studio {
             .exact_height(56.)
             .show(ctx, |ui| {
                 crate::appearance::glass(ui, egui::CornerRadius::ZERO);
+                // On GNOME the header is also the title bar: drag it to move the window.
+                let custom = self.custom_title_bar;
+                if custom {
+                    crate::title_bar::drag_area(ui);
+                }
                 ui.horizontal_centered(|ui| {
+                    if custom && !crate::title_bar::buttons().left.is_empty() {
+                        crate::title_bar::show_buttons(ui, &crate::title_bar::buttons().left);
+                        ui.add_space(8.);
+                    }
                     ui.label(RichText::new("Rosorah Studio").size(22.).strong());
                     ui.add_space(24.);
                     for (p, label) in [
@@ -1402,7 +1428,15 @@ impl Studio {
                         });
                     }
                     ui.menu_button("Help", |ui| self.help_menu(ui));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.live_controls(ui));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if custom && !crate::title_bar::buttons().right.is_empty() {
+                            let mut right = crate::title_bar::buttons().right.clone();
+                            right.reverse();
+                            crate::title_bar::show_buttons(ui, &right);
+                            ui.add_space(8.);
+                        }
+                        self.live_controls(ui)
+                    });
                 });
             });
     }
@@ -2930,8 +2964,8 @@ impl Studio {
                 | widgets::Kind::AlertBox
                 | widgets::Kind::CommunityGoal
         ) {
-            ui.label("Include these platforms (select both for a combined widget)");
-            for p in [Platform::Twitch, Platform::YouTube, Platform::Donations] {
+            ui.label("Include these platforms (select several for a combined widget)");
+            for p in [Platform::Twitch, Platform::YouTube, Platform::Kick, Platform::TikTok, Platform::Donations] {
                 let mut on = next.platforms.contains(&p);
                 if ui.checkbox(&mut on, p.name()).changed() {
                     next.platforms.retain(|v| *v != p);
@@ -3001,7 +3035,7 @@ impl Studio {
         if next.kind == widgets::Kind::Chat {
             note(
                 ui,
-                "Shows up to four new messages as text. Inline emote images are not yet rendered in this canvas widget.",
+                "Shows the newest messages, with emoji and Twitch, YouTube and Kick emotes as pictures.",
             );
         }
         if next.kind == widgets::Kind::Shoutout {
@@ -4467,25 +4501,53 @@ impl Studio {
                         )),
                 );
             });
-            ui.menu_button("😀", |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for emoji in ["😀", "😂", "❤️", "🔥", "👋", "🎉", "👍", "🙏", "💜", "👀"] {
-                        if ui.button(emoji).clicked() {
-                            self.browser_chat.draft.push_str(emoji);
-                            ui.close();
+            let sources: Vec<crate::emote_picker::Source> = connected_names
+                .iter()
+                .filter(|name| ["Twitch", "YouTube", "Kick"].contains(name))
+                .map(|name| {
+                    let account = match *name {
+                        "Twitch" => &self.accounts[0],
+                        "YouTube" => &self.accounts[1],
+                        _ => &self.kick_account,
+                    };
+                    let mut emotes = if *name == "YouTube" { self.browser_chat.youtube_emotes.clone() } else { account.emotes.clone() };
+                    for (emote, src) in self.browser_chat.rich.recent(name) {
+                        if !emotes.iter().any(|e| e.src == src || e.name == emote) {
+                            emotes.push(crate::emote_picker::seen_emote(name, &emote, &src));
                         }
                     }
-                });
-                let connected = connected_names.clone();
-                for platform in &connected {
-                    for (name, _) in self.browser_chat.rich.recent(platform) {
-                        if ui.button(&name).clicked() {
-                            self.browser_chat.draft.push_str(&format!(" {name} "));
-                            ui.close();
-                        }
-                    }
+                    let note = if !account.emote_note.is_empty() {
+                        account.emote_note.clone()
+                    } else if *name == "YouTube" && self.browser_chat.youtube_emotes.is_empty() {
+                        "YouTube's emotes appear once your chat page has loaded while you're signed in to YouTube in Rosorah's chat window. Emoji are on the Emoji tab.".into()
+                    } else {
+                        String::new()
+                    };
+                    crate::emote_picker::Source { label: name, emotes, note }
+                })
+                .collect();
+            let button = match crate::twemoji::texture(ui.ctx(), "😀") {
+                Some(t) => egui::Button::image(egui::Image::new((t.id(), egui::vec2(18., 18.)))),
+                None => egui::Button::new("😀"),
+            };
+            let mut wanted = Vec::new();
+            let mut picked = None;
+            egui::containers::menu::MenuButton::from_button(button)
+                .config(egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
+                .ui(ui, |ui| {
+                    picked = self.emote_picker.show(ui, &self.browser_chat.rich, &sources, &mut wanted);
+                })
+                .0
+                .on_hover_text("Emoji & emotes");
+            if let Some(text) = picked {
+                // Emotes need spaces around them, but not at the start of a message.
+                if self.browser_chat.draft.is_empty() || self.browser_chat.draft.ends_with(' ') {
+                    self.browser_chat.draft.push_str(text.trim_start());
+                } else {
+                    self.browser_chat.draft.push_str(&text);
                 }
-            }).response.on_hover_text("Emoji & emotes");
+            }
+            self.browser_chat.want_images(wanted);
         });
         let label = match destinations.as_slice() {
             [] => "Choose a platform".into(),
@@ -5856,7 +5918,10 @@ if changed{self.changed();}
         }
     }
     fn dispatch_automations(&mut self, event: &Event, missed: bool, replay: bool) {
-        if matches!(event.kind,EventKind::ChatMessage|EventKind::ChatCommand)&&self.accounts.iter().any(|a|a.platform==event.platform&&a.connected&&a.name.eq_ignore_ascii_case(&event.author)){return;}
+        // The streamer's and the bot's own messages never trigger chat automations (no reply loops).
+        if matches!(event.kind,EventKind::ChatMessage|EventKind::ChatCommand)&&self.accounts.iter().chain(std::iter::once(&self.kick_account)).chain(self.bots.iter()).any(|a|a.platform==event.platform&&a.connected&&a.name.eq_ignore_ascii_case(&event.author)){return;}
+        // Timers only run on their schedule (timers_tick).
+        if event.kind == EventKind::Timer {return;}
 
         let rules: Vec<_> = self
             .project
@@ -5918,16 +5983,89 @@ if changed{self.changed();}
             self.automation_queue.log("Visual alert skipped: add Alerts from In this scene > + Add".into());
         }
     }
+    /// Runs timers that are due: every N minutes (while live, unless set otherwise), once enough chat came in.
+    fn timers_tick(&mut self, live: bool) {
+        let now = Instant::now();
+        let seen = self.chat_messages_seen;
+        let mut due = Vec::new();
+        for r in self.project.rules.iter().filter(|r| r.event == EventKind::Timer) {
+            let last = self.timer_runs.entry(r.id).or_insert((now, seen));
+            // Off, or waiting for the stream: the first run comes a full interval after it starts.
+            if !r.enabled || (!live && !r.options.timer_offline) {
+                *last = (now, seen);
+                continue;
+            }
+            let interval = Duration::from_secs(u64::from(r.options.timer_minutes.max(1)) * 60);
+            if now.duration_since(last.0) >= interval && seen.saturating_sub(last.1) >= u64::from(r.options.timer_messages) {
+                *last = (now, seen);
+                due.push(r.clone());
+            }
+        }
+        let rules: std::collections::HashSet<Id> = self.project.rules.iter().map(|r| r.id).collect();
+        self.timer_runs.retain(|id, _| rules.contains(id));
+        for rule in due {
+            self.run_timer(&rule);
+        }
+    }
+    fn run_timer(&mut self, rule: &auroracast_core::Rule) {
+        // Timer chat with no platform ticked goes to every connected chat.
+        let connected: Vec<Platform> = [(Platform::Twitch, self.accounts[0].connected), (Platform::YouTube, self.accounts[1].connected), (Platform::Kick, self.kick_account.connected)]
+            .into_iter()
+            .filter(|(_, on)| *on)
+            .map(|(p, _)| p)
+            .collect();
+        let event = Event {
+            facts: Default::default(),
+            reward_id: String::new(),
+            id: format!("timer-{}", rule.id),
+            platform: connected.first().copied().unwrap_or(Platform::Twitch),
+            kind: EventKind::Timer,
+            author: String::new(),
+            text: String::new(),
+            at_ms: now_ms(),
+        };
+        let actions: Vec<Action> = rule
+            .actions
+            .iter()
+            .cloned()
+            .map(|a| match a {
+                Action::SendChat { text, platforms, sender } if platforms.is_empty() => Action::SendChat { text, platforms: connected.clone(), sender },
+                a => a,
+            })
+            .collect();
+        let actions = auroracast_core::automation::actions(&actions, &event);
+        self.automation_queue.enqueue(format!("TIMER · {}", rule.name), actions);
+    }
     fn run_actions(&mut self, actions: Vec<Action>) {
         for action in actions {
             match &action {
                 Action::DisplayAlert{source,template,media,seconds}=>{self.captures.widgets.target_alert(*source,template,*seconds,*media);},
                 Action::PlaySound{source}=>{self.captures.videos.trigger(*source);},
-                Action::SendChat{text,platforms}=>{
-                    for platform in platforms { if let Some(a)=self.accounts.iter_mut().find(|a|a.platform==*platform){
+                Action::SendChat{text,platforms,sender}=>{
+                    for platform in platforms {
                         let request=format!("automation-{}-{}",now_ms(),platform.name());
-                        if !a.post(request,text.clone()){self.automation_queue.log(format!("{} chat not sent: account unavailable",platform.name()));}
-                    }}
+                        // The bot posts into the streamer's channel; without a bot, the streamer posts.
+                        let channel = match platform {
+                            Platform::Twitch => self.accounts[0].user_id.clone(),
+                            Platform::YouTube => self.accounts[1].user_id.clone(),
+                            Platform::Kick => self.kick_account.user_id.clone(),
+                            _ => continue,
+                        };
+                        let bot = match platform {
+                            Platform::Twitch => Some(&mut self.bots[0]),
+                            Platform::Kick => Some(&mut self.bots[1]),
+                            _ => None,
+                        }.filter(|b| *sender == auroracast_core::ChatSender::Bot && b.connected && !channel.is_empty() && b.user_id != channel);
+                        let sent = match bot {
+                            Some(bot) => bot.post_to(request, text.clone(), &channel),
+                            None => match platform {
+                                Platform::Twitch => self.accounts[0].post(request, text.clone()),
+                                Platform::YouTube => self.accounts[1].post(request, text.clone()),
+                                _ => self.kick_account.post(request, text.clone()),
+                            },
+                        };
+                        if !sent {self.automation_queue.log(format!("{} chat not sent: account unavailable",platform.name()));}
+                    }
                 },
                 Action::Wait { .. } => (),
                 Action::UpdateWidget {
@@ -6212,6 +6350,12 @@ impl eframe::App for Studio {
         }
         self.kick_account.tick(&mut self.chat);
         self.kick_account.set_live(live);
+        for bot in &mut self.bots {
+            bot.tick(&mut self.chat);
+            bot.forgotten = false;
+        }
+        self.automation_editor.bots = self.bots.iter().filter(|b| b.connected).map(|b| b.platform).collect();
+        self.timers_tick(live);
         let mut kick_updated = false;
         if std::mem::take(&mut self.kick_account.forgotten) {
             for service in &mut self.stream_config.services {
@@ -6355,13 +6499,13 @@ impl eframe::App for Studio {
                 self.browser_chat.finish_post(serde_json::json!({"type":"post_result","platform":request["platform"],"request":id,"ok":false,"text":"Connect this account in Settings > Accounts. Your draft was kept."}));
             }
         }
-        for account in self.accounts.iter_mut().chain(std::iter::once(&mut self.kick_account)) {
+        for account in self.accounts.iter_mut().chain(std::iter::once(&mut self.kick_account)).chain(self.bots.iter_mut()) {
             if let Some(result) = account.moderation_results.drain(..).next_back() {
                 self.browser_chat.post_status = result;
             }
             for result in account.post_results.drain(..) {
                 if result["request"].as_str().is_some_and(|s|s.starts_with("automation-")){
-                    self.automation_queue.log(format!("{} automation chat: {}",account.platform.name(),if result["ok"].as_bool()==Some(true){"sent"}else{result["text"].as_str().unwrap_or("failed")}));
+                    self.automation_queue.log(format!("{}{} automation chat: {}",account.platform.name(),if account.bot{" bot"}else{""},if result["ok"].as_bool()==Some(true){"sent"}else{result["text"].as_str().unwrap_or("failed")}));
                 }else{self.browser_chat.finish_post(result);}
             }
         }
@@ -6420,6 +6564,10 @@ impl eframe::App for Studio {
         self.was_streaming = streaming;
         if self.chat_alert_revision != self.chat.revision() {
             self.chat_alert_revision = self.chat.revision();
+            // Twitch account ids let the chat widget find chatters' profile pictures.
+            for m in self.chat.messages().filter(|m| !m.metadata.user_id.is_empty()) {
+                crate::avatars::note(m.platform.name(), &m.author, &m.metadata.user_id);
+            }
             let events: Vec<_> = self
                 .chat
                 .messages()
@@ -6427,9 +6575,14 @@ impl eframe::App for Studio {
                 .collect();
             for event in events {
                 if event.kind == EventKind::ChatMessage {
-                    self.captures
-                        .widgets
-                        .chat(event.platform, &event.author, &event.text);
+                    self.chat_messages_seen += 1;
+                    // Emotes from the browser chat reach chat widgets as pictures, not just names.
+                    let key = format!("{}:{}", event.platform.name(), event.id);
+                    let text = match self.browser_chat.rich.parts(&key) {
+                        Some(parts) if parts.iter().any(|p| p.src.is_some()) => crate::chat_render::marked(parts, 240),
+                        _ => event.text.clone(),
+                    };
+                    self.captures.widgets.chat(event.platform, &event.author, &text);
                 }
                 self.dispatch_automations(&event, false, false);
             }
@@ -6629,6 +6782,11 @@ impl eframe::App for Studio {
             self.active_alert = None;
         }
         self.broadcast_windows(ctx);
+        let custom = crate::title_bar::wanted(self.project.preferences.workspace.appearance.title_bar);
+        if custom != self.custom_title_bar && self.screenshot.is_none() {
+            self.custom_title_bar = custom;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(!custom));
+        }
         self.header(ctx);
         self.footer(ctx);
         match self.page {
@@ -6657,6 +6815,9 @@ impl eframe::App for Studio {
         self.go_live_window(ctx);
         self.report_window(ctx);
         self.toast_ui(ctx);
+        if self.custom_title_bar {
+            crate::title_bar::resize_edges(ctx);
+        }
         if self.screenshot.is_some() && !self.screenshot_requested && self.ui_frames >= 20 && self.started.elapsed() > Duration::from_secs(4) && !self.appearance.busy() {
             self.screenshot_requested = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));

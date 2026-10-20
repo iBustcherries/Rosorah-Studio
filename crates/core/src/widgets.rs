@@ -118,6 +118,10 @@ pub struct Settings {
     /// Outline thickness in pixels; 0 turns it off.
     pub outline_width: u32,
     pub shadow: bool,
+    /// Chat: seconds each message stays on screen; 0 keeps it until newer ones push it out.
+    pub chat_hide_after: u32,
+    /// Chat: show exactly this many of the newest messages, sized to fit; 0 fits as many as the size allows.
+    pub chat_rows: u32,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -129,7 +133,7 @@ impl Default for Settings {
             target: 100,
             initial: 0,
             seconds: 300,
-            platforms: vec![Platform::Twitch, Platform::YouTube],
+            platforms: vec![Platform::Twitch, Platform::YouTube, Platform::Kick, Platform::TikTok],
             currency: "USD".into(),
             foreground: [255, 255, 255, 255],
             background: [20, 26, 40, 210],
@@ -159,6 +163,8 @@ impl Default for Settings {
             outline: [0, 0, 0, 255],
             outline_width: 0,
             shadow: false,
+            chat_hide_after: 0,
+            chat_rows: 0,
         }
     }
 }
@@ -174,7 +180,7 @@ macro_rules! choices {
         }
     }
 }
-choices!(Theme, Material, Material=>"Material", Unified=>"Unified chat", Windows98=>"Windows 98", WindowsXP=>"Windows XP", Bubbles=>"Phone bubbles", Transparent=>"Minimal transparent", Cards=>"Stream cards", Terminal=>"Retro terminal", Pixel=>"Pixel RPG", Broadcast=>"Broadcast sports", Team=>"Team colors", Led=>"Retro LED");
+choices!(Theme, Material, Material=>"Material", Unified=>"Unified chat", Windows98=>"Windows 98", WindowsXP=>"Windows XP", Bubbles=>"Phone bubbles", Transparent=>"Minimal transparent", Cards=>"Stream cards", Terminal=>"Retro terminal", Pixel=>"Pixel RPG", Broadcast=>"Broadcast sports", Team=>"Team colors", Led=>"Retro LED", CozyCafe=>"Cozy café", Kawaii=>"Pastel kawaii", Cottagecore=>"Cottagecore", Cyberpunk=>"Cyberpunk neon", Synthwave=>"Synthwave", SciFiHud=>"Sci-fi HUD", Arcade=>"Arcade", Fantasy=>"Fantasy parchment", Neubrutalism=>"Neubrutalism", CleanLight=>"Clean light", GameBoy=>"Game Boy", Vaporwave=>"Vaporwave", Spooky=>"Spooky", Winter=>"Winter holiday");
 choices!(FontFace, Sans, Sans=>"Roboto", Mono=>"Monospace");
 choices!(TextAlign, Left, Left=>"Left", Center=>"Center", Right=>"Right");
 choices!(Layout, Cards, Cards=>"Cards", Lines=>"Compact lines", Bubbles=>"Bubbles");
@@ -274,6 +280,20 @@ impl Settings {
                 12,
                 FontFace::Sans,
             ),
+            Theme::CozyCafe => ([74, 52, 40, 255], [247, 238, 224, 255], [196, 120, 72, 255], 18, FontFace::Sans),
+            Theme::Kawaii => ([96, 62, 112, 255], [255, 238, 247, 255], [255, 128, 182, 255], 26, FontFace::Sans),
+            Theme::Cottagecore => ([46, 62, 40, 255], [239, 236, 220, 255], [112, 142, 88, 255], 12, FontFace::Sans),
+            Theme::Cyberpunk => ([236, 242, 255, 255], [12, 8, 26, 238], [255, 42, 190, 255], 0, FontFace::Sans),
+            Theme::Synthwave => ([255, 232, 250, 255], [30, 10, 54, 242], [255, 94, 170, 255], 10, FontFace::Sans),
+            Theme::SciFiHud => ([200, 246, 255, 255], [6, 20, 32, 190], [0, 220, 255, 255], 0, FontFace::Sans),
+            Theme::Arcade => ([255, 255, 255, 255], [12, 12, 22, 245], [255, 214, 0, 255], 6, FontFace::Sans),
+            Theme::Fantasy => ([62, 40, 22, 255], [236, 220, 178, 255], [150, 32, 32, 255], 4, FontFace::Sans),
+            Theme::Neubrutalism => ([12, 12, 12, 255], [255, 236, 110, 255], [255, 96, 96, 255], 10, FontFace::Sans),
+            Theme::CleanLight => ([22, 26, 34, 255], [255, 255, 255, 248], [79, 70, 229, 255], 16, FontFace::Sans),
+            Theme::GameBoy => ([15, 56, 15, 255], [139, 172, 15, 255], [48, 98, 48, 255], 0, FontFace::Sans),
+            Theme::Vaporwave => ([40, 24, 70, 255], [255, 236, 250, 255], [255, 113, 206, 255], 0, FontFace::Sans),
+            Theme::Spooky => ([244, 232, 220, 255], [22, 12, 26, 242], [255, 122, 24, 255], 14, FontFace::Sans),
+            Theme::Winter => ([255, 255, 255, 255], [14, 32, 62, 238], [222, 44, 64, 255], 16, FontFace::Sans),
             _ => (
                 [255, 255, 255, 255],
                 [20, 26, 40, 210],

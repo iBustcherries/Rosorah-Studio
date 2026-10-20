@@ -117,6 +117,10 @@ class Window(QMainWindow):
         elif typ=='diagnose':self.diagnose(str(msg.get('platform','')))
         elif typ=='open_platform':self.open_platform(msg.get('platform',''),bool(msg.get('picker',False)))
         elif typ=='event':self.deliver(msg['event'],forward=False)
+        elif typ=='images':
+            # Pictures for the emote picker; asking again reloads one that Rosorah let go of.
+            for src in msg.get('urls',[])[:64] if isinstance(msg.get('urls'),list) else []:
+                if isinstance(src,str) and safe_url(src):self.images.seen.pop(src,None);self.images.request(src)
         elif typ=='sources':
             for platform,ident in [('Twitch',msg.get('twitch','')),('YouTube',msg.get('youtube','')),('Kick',msg.get('kick','')),('TikTok',msg.get('tiktok',''))]:
                 pattern={'Twitch':r'[A-Za-z0-9_]{1,25}','YouTube':r'[A-Za-z0-9_-]{11}','Kick':r'[A-Za-z0-9_-]{1,50}','TikTok':r'[A-Za-z0-9_.]{2,24}'}[platform]
@@ -229,6 +233,9 @@ class Window(QMainWindow):
         if isinstance(items,list):
             for item in items[:500]:self.deliver(item)
     def deliver(self,item,forward=True):
+        if forward and isinstance(item,dict) and item.get('type')=='emote_list' and item.get('platform')=='YouTube':
+            items=[{'name':str(e.get('name',''))[:100],'src':e['src']} for e in item.get('items',[])[:300] if isinstance(e,dict) and isinstance(e.get('src'),str) and safe_url(e['src']) and e.get('name')]
+            emit({'type':'emote_list','platform':'YouTube','items':items});return
         if not isinstance(item,dict) or item.get('type') not in ('message','delete'):return
         if forward:
             item["source"]=self.last.get(item.get("platform"), "")
@@ -239,6 +246,7 @@ class Window(QMainWindow):
                 if safe_url(part.get('src','')):entry['src']=part['src'];self.images.request(part['src'])
                 clean.append(entry)
             item['parts']=clean
+            photo=item.get('author_photo');item['author_photo']=photo[:2048] if isinstance(photo,str) and photo.startswith('https://') else ''
         self.events.append(item);self.events=self.events[-500:]
         if self.ready:self.combined.page().runJavaScript('window.ingest('+json.dumps(item)+')')
         if forward:emit(item)

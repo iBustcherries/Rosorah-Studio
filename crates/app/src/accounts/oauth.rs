@@ -5,12 +5,14 @@ use std::{
     io::{Read, Write},
     net::TcpListener,
 };
-pub(super) const TWITCH_SCOPES: &str = "user:write:chat channel:read:stream_key channel:manage:broadcast moderator:read:followers channel:read:subscriptions bits:read channel:read:redemptions channel:manage:redemptions channel:read:hype_train channel:read:polls channel:read:predictions moderator:manage:banned_users moderator:manage:chat_messages";
+pub(super) const TWITCH_SCOPES: &str = "user:write:chat channel:read:stream_key channel:manage:broadcast moderator:read:followers channel:read:subscriptions bits:read channel:read:redemptions channel:manage:redemptions channel:read:hype_train channel:read:polls channel:read:predictions moderator:manage:banned_users moderator:manage:chat_messages user:read:emotes";
 pub(super) fn random() -> Result<String> {
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes).map_err(|e| anyhow::anyhow!("System random generator unavailable: {e}"))?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
+/// A bot only needs to send chat.
+const TWITCH_BOT_SCOPES: &str = "user:write:chat";
 pub(super) fn token(value: &Value, old_refresh: &str) -> Result<Token> {
     Ok(Token {
         access: field(value, "access_token")?.into(),
@@ -74,7 +76,7 @@ fn twitch(
     let value = json(
         client
             .post("https://id.twitch.tv/oauth2/device")
-            .form(&[("client_id", config.id.as_str()), ("scopes", TWITCH_SCOPES)]),
+            .form(&[("client_id", config.id.as_str()), ("scopes", if config.bot { TWITCH_BOT_SCOPES } else { TWITCH_SCOPES })]),
     )?;
     let code = field(&value, "device_code")?;
     let uri = field(&value, "verification_uri")?;
@@ -100,7 +102,7 @@ fn twitch(
             .form(&[
                 ("client_id", config.id.as_str()),
                 ("device_code", code),
-                ("scopes", TWITCH_SCOPES),
+                ("scopes", if config.bot { TWITCH_BOT_SCOPES } else { TWITCH_SCOPES }),
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
             ])
             .send()?;
@@ -161,7 +163,7 @@ fn loopback(
         ("client_id", config.id.as_str()),
         ("redirect_uri", &redirect),
         ("response_type", "code"),
-        ("scope", if is_kick {"user:read channel:read streamkey:read chat:write channel:write moderation:ban moderation:chat_message:manage events:subscribe"} else {"https://www.googleapis.com/auth/youtube.force-ssl"}),
+        ("scope", if is_kick && config.bot {"user:read chat:write"} else if is_kick {"user:read channel:read streamkey:read chat:write channel:write moderation:ban moderation:chat_message:manage events:subscribe"} else {"https://www.googleapis.com/auth/youtube.force-ssl"}),
         ("state", &state),
         ("code_challenge", &challenge),
         ("code_challenge_method", "S256"),

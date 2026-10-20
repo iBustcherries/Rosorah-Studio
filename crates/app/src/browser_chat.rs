@@ -48,6 +48,10 @@ pub struct BrowserChat {
     last_sources: Option<(String, String, String, String)>,
     retry: Retry,
     started: Option<Instant>,
+    /// Emotes listed on the signed-in YouTube chat page, for the emote picker.
+    pub youtube_emotes: Vec<crate::chat_render::Emote>,
+    /// Picker pictures asked of the chat browser, and when.
+    image_requests: std::collections::HashMap<String, Instant>,
 }
 #[derive(Default)]
 struct Retry {
@@ -97,6 +101,25 @@ pub(crate) fn system_python() -> PathBuf {
 }
 
 impl BrowserChat {
+    /// Loads emote pictures for the picker (through the chat browser, like chat's own emotes).
+    pub fn want_images(&mut self, urls: Vec<String>) {
+        let now = Instant::now();
+        let urls: Vec<_> = urls
+            .into_iter()
+            .filter(|u| !self.rich.loaded(u) && self.image_requests.get(u).is_none_or(|t| now.duration_since(*t) > Duration::from_secs(60)))
+            .take(64)
+            .collect();
+        if urls.is_empty() || self.tx.is_none() {
+            return;
+        }
+        if self.image_requests.len() > 4000 {
+            self.image_requests.clear();
+        }
+        for u in &urls {
+            self.image_requests.insert(u.clone(), now);
+        }
+        self.send(json!({"type": "images", "urls": urls}));
+    }
     pub fn set_context(&mut self, ctx: &eframe::egui::Context) {
         self.context = Some(ctx.clone());
     }
@@ -492,6 +515,24 @@ impl BrowserChat {
                         }
                     }
                     Some("open_accounts") => self.open_accounts = true,
+                    Some("emote_list") if v["platform"] == "YouTube" => {
+                        self.youtube_emotes = v["items"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .take(300)
+                            .filter_map(|e| {
+                                let name = e["name"].as_str()?.chars().take(100).collect::<String>();
+                                let src = e["src"].as_str()?.to_string();
+                                (!name.is_empty() && crate::chat_render::safe_image(&src)).then(|| crate::chat_render::Emote {
+                                    group: "YouTube".into(),
+                                    insert: name.clone(),
+                                    name,
+                                    src,
+                                })
+                            })
+                            .collect();
+                    }
                     Some("status") => {
                         self.status = v["text"]
                             .as_str()
@@ -533,6 +574,7 @@ impl BrowserChat {
                                 .chars()
                                 .take(100)
                                 .collect();
+                            crate::avatars::note(platform.name(), &author, v["author_photo"].as_str().unwrap_or(""));
                             let mut text = v["text"]
                                 .as_str()
                                 .unwrap_or("")

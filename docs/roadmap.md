@@ -1,6 +1,6 @@
 # Rosorah Studio roadmap
 
-Updated for 0.34.0 (October 2026). Rosorah Studio is original code built on
+Updated for 0.38.0 (October 2026). Rosorah Studio is original code built on
 independent libraries (Rust, egui/wgpu, GStreamer, Qt WebEngine). It aims to be an easier
 all-in-one alternative to running OBS, a chat bot and an alert service side by side,
 not a feature-for-feature copy of OBS.
@@ -9,23 +9,23 @@ not a feature-for-feature copy of OBS.
 
 | Area | Status | What's there |
 | --- | --- | --- |
-| Studio and layout | Shipped | Simple and Advanced modes, first-run guide, docking with tab groups, floating panels and separate native windows, saved layouts, web page panels, themes and backgrounds, undo/redo |
+| Studio and layout | Shipped | GNOME-style title bar on GNOME (other desktops keep their own), Simple and Advanced modes, first-run guide, docking with tab groups, floating panels and separate native windows, saved layouts, web page panels, themes and backgrounds, undo/redo |
 | Scenes and layers | Shipped | Scenes named in place, drag to reorder with sliding rows (also the mixer and automation steps), square/rounded/circle layer frames with faded edges, a green-screen key (experimental), main and vertical videos with linked scenes, crop/align/group tools, text layers with 68 bundled font families, widgets (chat, music, goals, utilities), scenes inside scenes, image slideshows and video playlists, copy and paste layers between scenes and videos, right-click menus on the canvas |
 | Layer effects | Shipped | Rotate and flip, blend modes, colour correction, LUTs, sharpen, scrolling, image masks, luma key, per-layer delay, show/hide animations |
 | Studio Mode and projectors | Shipped | Prepare a scene before sending it live, per-scene transitions (slide, swipe, pattern wipe, fade to colour), projector windows for the program, a scene or Multiview |
 | Capture (Linux) | Shipped | Automatic game capture (Vulkan/OpenGL hooks) with game audio, PipeWire desktop/window capture, cameras and DroidCam, browser sources |
-| Capture (Windows) | Preview | Windows Graphics Capture, application audio and cursor; renderer hooks are not included; needs more testing on real Windows PCs |
+| Capture (Windows) | Shipped | Automatic game capture (finds the game's window and captures it with Windows Graphics Capture), monitor and window capture, application audio and cursor |
 | Sound | Shipped | Music strip that follows music apps automatically (never browser video), per-app sound strips that survive app restarts, right-click rename/hide/delete, mixer with per-scene volumes, Sound settings window (device, live level, noise suppression, gate, compressor, limiter, expander, EQ, mono, balance), monitoring, delay, six recording tracks |
 | Recording and streaming | Shipped | Hardware encoders (AMD/NVIDIA, software fallback), multistreaming to Twitch, YouTube, YouTube vertical, Kick, TikTok and custom RTMP, per-destination bitrate, reconnect, Go live checklist, replay buffer (saves the last seconds as an MP4) |
 | Virtual camera | Linux shipped, Windows preview | Rosorah's video as a webcam for Discord, Zoom and browsers (Linux: v4l2loopback; Windows 11: Rosorah's own camera component, untested on real PCs yet) |
 | Hotkeys, remote control and scripts | Shipped | System-wide hotkeys for scenes, mute, push-to-talk and outputs; remote control for Stream Deck, Touch Portal and phone apps (Rosorah's protocol, plus OBS's for tools made for OBS); sandboxed Lua scripts |
 | Accounts | Shipped | Twitch, YouTube and Kick sign-in with renewable tokens in the system keyring, titles/categories, automatic stream keys |
-| Chat and activity | Shipped | Unified Twitch/YouTube/Kick/TikTok chat with moderation, Activity history for every connected account |
-| Alerts and automations | Shipped | Guided alert setup, built-in sounds and animations, triggers from follows, subs, gifts, bits/Kicks, raids, redemptions, donations and chat; Twitch rewards editor |
+| Chat and activity | Shipped | Unified Twitch/YouTube/Kick/TikTok chat with moderation, colour emoji (Twemoji), an emoji and emote picker with your own Twitch, YouTube and Kick emotes, emotes and emoji as pictures in the on-canvas chat widget, Activity history for every connected account |
+| Alerts and automations | Shipped | One list grouped by event (follows, subs, bits & donations, raids, channel points, chat, timers), chat timers, bot accounts on Twitch and Kick that send automation chat, guided alert setup, built-in sounds and animations, triggers from follows, subs, gifts, bits/Kicks, raids, redemptions, donations and chat; Twitch rewards editor |
 | Donations | Shipped | StreamElements, Streamlabs and Ko-fi (Settings → Accounts → Donations), donation goals |
 | Transitions | Shipped | Cut, fade, wipe, Move (shared layers glide to their new place), stinger videos and transition screens |
 | Projects | Shipped | Profiles, hourly and on-close backups, recording recovery, OBS and Firebot import |
-| Announcements | Shipped | "I'm live" posts to Discord (webhook) and Bluesky (app password), once per stream, with a message template and per-stream skip |
+| Announcements | Shipped | "I'm live" posts to Discord (webhook), Bluesky (app password) and Threads, once per stream, with a message template and per-stream skip |
 | Distribution | Shipped | Windows installer, Fedora .rpm and Ubuntu/Debian .deb on GitHub Releases; in-app update check |
 
 ## Next
@@ -35,7 +35,6 @@ not a feature-for-feature copy of OBS.
 
 ## Later
 
-- A GNOME-style (Adwaita) title bar when Rosorah runs on GNOME.
 - X (Twitter) announcements (on hold): X's API is pay-per-use only, at $0.20 per post with a link (October 2026).
 - Signed installers (Windows code signing, signed package repositories).
 

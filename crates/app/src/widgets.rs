@@ -16,6 +16,8 @@ pub struct State {
     pub value: u64,
     pub text: String,
     messages: VecDeque<String>,
+    /// When each chat message arrived, for messages that disappear after a while.
+    arrived: VecDeque<Instant>,
     until: Option<Instant>,
     revision: u64,
     pub period_key: String,
@@ -36,6 +38,7 @@ impl State {
             settings,
             text: String::new(),
             messages: VecDeque::new(),
+            arrived: VecDeque::new(),
             until: None,
             revision: 1,
         }
@@ -46,10 +49,27 @@ impl State {
             Kind::QrCode => format!("{label}\n{}", self.settings.content),
             Kind::Text => self.settings.content.clone(),
             Kind::AlertBox => self.alert.as_ref().map(|a| a.0.clone()).unwrap_or_default(),
-            Kind::Chat => format!(
-                "{label}\n{}",
-                self.messages.iter().cloned().collect::<Vec<_>>().join("\n")
-            ),
+            Kind::Chat => {
+                let keep = Duration::from_secs(u64::from(self.settings.chat_hide_after));
+                // A new message waits (half a second at most) for its chatter's picture, so the
+                // two appear together; later messages wait behind it to keep the order.
+                let pictures = chat_pictures(&self.settings);
+                let ready = |m: &str| {
+                    let (platform, rest) = m.split_once(" · ").unwrap_or(("", m));
+                    crate::avatars::ready(platform, rest.split_once(": ").map_or("", |(a, _)| a))
+                };
+                format!(
+                    "{label}\n{}",
+                    self.messages
+                        .iter()
+                        .zip(&self.arrived)
+                        .take_while(|(m, at)| !pictures || at.elapsed() >= crate::avatars::WAIT || ready(m))
+                        .filter(|(_, at)| keep.is_zero() || at.elapsed() < keep)
+                        .map(|(m, _)| m.clone())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            }
             Kind::SubGoal | Kind::CommunityGoal => {
                 format!("{label}\n{} / {}", self.value, self.settings.target)
             }
@@ -379,10 +399,19 @@ impl Hub {
                     "{} · {}: {}",
                     platform.name(),
                     author,
-                    text.chars().take(240).collect::<String>()
+                    // Marked emotes are already limited by chat_render::marked.
+                    if text.contains(crate::chat_render::EMOTE[0]) { text.to_string() } else { text.chars().take(240).collect::<String>() }
                 ));
-                while s.messages.len() > 6 {
+                s.arrived.push_back(Instant::now());
+                if chat_pictures(&s.settings) {
+                    // Start loading the picture now, so it's ready when the message shows.
+                    crate::avatars::get(platform.name(), author);
+                }
+                while s.messages.len() > 7 {
                     s.messages.pop_front();
+                }
+                while s.arrived.len() > s.messages.len() {
+                    s.arrived.pop_front();
                 }
                 s.revision = s.revision.wrapping_add(1);
             }
@@ -518,8 +547,12 @@ impl Backend for Renderer {
                 || settings.kind == Kind::Credits
                 || media.is_some()
                 || (settings.kind == Kind::Sports && settings.sports.layout == ScoreLayout::Ticker);
+            let chat = settings.kind == Kind::Chat;
+            let animate = animate || (chat && chat_animated(&lines));
             let tick = if animate {
                 epoch.elapsed().as_millis() / 50
+            } else if chat {
+                crate::chat_render::canvas_revision() as u128
             } else if settings.kind == Kind::NowPlaying
                 && track.as_ref().is_some_and(|t| t.playing && t.length > 0.)
             {
@@ -694,6 +727,53 @@ impl Paint {
         }
     }
 }
+/// A piece of chat text on the canvas: plain text, a Twemoji emoji or a marked platform emote.
+enum ChatPiece<'a> {
+    Text(&'a str),
+    Emoji(String),
+    Emote(&'a str, &'a str),
+}
+fn chat_pieces(text: &str) -> Vec<ChatPiece<'_>> {
+    use crate::chat_render::EMOTE;
+    let mut out = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let (before, after) = match rest.find(EMOTE[0]) {
+            Some(i) => (&rest[..i], Some(&rest[i + EMOTE[0].len_utf8()..])),
+            None => (rest, None),
+        };
+        for piece in crate::twemoji::split(before) {
+            out.push(match piece {
+                crate::twemoji::Piece::Text(t) => ChatPiece::Text(t),
+                crate::twemoji::Piece::Emoji(_, key) => ChatPiece::Emoji(key),
+            });
+        }
+        let Some(after) = after else { break };
+        let Some(end) = after.find(EMOTE[2]) else { break };
+        let inner = &after[..end];
+        let (url, name) = inner.split_once(EMOTE[1]).unwrap_or((inner, ""));
+        out.push(ChatPiece::Emote(url, name));
+        rest = &after[end + EMOTE[2].len_utf8()..];
+    }
+    out
+}
+/// Pictures sit on the text line, a little taller than the letters.
+/// Word wrap that measures emoji and emotes as the pictures they become.
+/// Plain chat text without emote markers, for places that only show text.
+impl Paint {
+    fn picture(&mut self, img: &image::RgbaImage, x: f32, y: f32, w: f32, h: f32) {
+        let (w, h) = (w.round().max(1.) as u32, h.round().max(1.) as u32);
+        let scaled = image::imageops::resize(img, w, h, image::imageops::FilterType::Triangle);
+        for (px, py, c) in scaled.enumerate_pixels() {
+            self.blend(x.round() as i32 + px as i32, y.round() as i32 + py as i32, c.0, 1.);
+        }
+    }
+
+}
+/// Whether chat text shows an animated emote, so the widget keeps redrawing.
+fn chat_animated(text: &str) -> bool {
+    chat_pieces(text).iter().any(|p| matches!(p, ChatPiece::Emote(url, _) if crate::chat_render::canvas_animated(url)))
+}
 pub fn render(settings: &Settings, text: &str) -> anyhow::Result<Frame> {
     render_value(settings, text, settings.initial)
 }
@@ -702,13 +782,14 @@ fn render_value(s: &Settings, text: &str, value: u64) -> anyhow::Result<Frame> {
 }
 include!("widget_paint.rs");
 include!("responsive_widgets.rs");
+include!("widget_design.rs");
 fn render_frame(s: &Settings, text: &str, value: u64, elapsed: f32) -> anyhow::Result<Frame> {
     if s.kind == Kind::Text {
         return Ok(text_card(s, text));
     }
     if s.kind==Kind::Sports{return Ok(responsive_sports(s,text,elapsed))}
     if s.kind == Kind::Chat {
-        return Ok(polished_chat(s, text));
+        return Ok(polished_chat(s, text, (elapsed * 1000.) as u64));
     }
     if s.is_goal() {
         return Ok(polished_goal(s, value));
@@ -727,8 +808,11 @@ fn render_frame(s: &Settings, text: &str, value: u64, elapsed: f32) -> anyhow::R
         track.length = 0.;
         return Ok(polished_music(s, Some(&track)));
     }
-    if !matches!(s.kind, Kind::QrCode | Kind::Sports | Kind::Credits) {
-        return Ok(polished_info(s, text));
+    if matches!(s.kind, Kind::Timer | Kind::Counter) {
+        return Ok(polished_number(s, text));
+    }
+    if !(s.kind == Kind::AlertBox && text.is_empty()) {
+        return Ok(polished_info(s, text, elapsed));
     }
     // An alert box without text is a clear picture at the box's own size, so media fits its shape.
     let (width, height) = if s.kind == Kind::AlertBox { (s.layout_width.clamp(96, 960), s.layout_height.clamp(96, 960)) } else { (960, 400) };
@@ -1018,6 +1102,93 @@ fn render_frame(s: &Settings, text: &str, value: u64, elapsed: f32) -> anyhow::R
 mod tests {
     use super::*;
     #[test]
+    fn see_through_backgrounds_fade_the_frame_but_not_the_text() {
+        for &theme in Theme::ALL {
+            let alpha_at = |bg_alpha: u8| {
+                let mut s = Settings { kind: Kind::Counter, label: "Deaths".into(), ..Default::default() };
+                s.apply_theme(theme);
+                s.background[3] = bg_alpha;
+                let f = preview(&s, true).unwrap();
+                // A spot inside the frame, away from the number and the label.
+                let (x, y) = (f.width - 40, f.height - 34);
+                (f.rgba[((y * f.width + x) * 4 + 3) as usize], f.rgba.chunks_exact(4).filter(|p| p[3] > 200).count())
+            };
+            let (solid, _) = alpha_at(255);
+            let (half, _) = alpha_at(128);
+            let (clear, text) = alpha_at(0);
+            assert_eq!(clear, 0, "{theme:?}: a transparent background leaves no frame");
+            assert!(text > 50, "{theme:?}: the text stays when the background is transparent");
+            assert!(solid == 0 || half < solid, "{theme:?}: half transparency fades the frame ({half} vs {solid})");
+        }
+    }
+    #[test]
+    fn chat_messages_can_disappear_after_a_while() {
+        let settings = Settings { kind: Kind::Chat, label: "Chat".into(), chat_hide_after: 30, ..Default::default() };
+        let hub = Hub::default();
+        hub.0.lock().unwrap().insert(1, Arc::new(Mutex::new(State::new(settings))));
+        hub.chat(Platform::Twitch, "old", "first");
+        hub.chat(Platform::Twitch, "new", "second");
+        let state = hub.0.lock().unwrap()[&1].clone();
+        let mut s = state.lock().unwrap();
+        s.arrived[0] = Instant::now() - Duration::from_secs(31);
+        // "new" waits for its picture (which can't load in tests) for half a second at most.
+        assert_eq!(s.lines(), "Chat\n");
+        s.arrived[1] = Instant::now() - crate::avatars::WAIT;
+        assert_eq!(s.lines(), "Chat\nTwitch · new: second");
+        s.settings.chat_hide_after = 0;
+        assert_eq!(s.lines(), "Chat\nTwitch · old: first\nTwitch · new: second");
+    }
+    #[test]
+    fn chat_widget_draws_emote_pictures() {
+        use base64::Engine;
+        let url = "https://static-cdn.jtvnw.net/emoticons/v2/test-widget/default/dark/1.0";
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(28, 28, image::Rgba([0, 255, 0, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let mut rich = crate::chat_render::RichChat::default();
+        rich.image(
+            &eframe::egui::Context::default(),
+            &serde_json::json!({"url": url, "index": 0, "delay": 100, "png": base64::engine::general_purpose::STANDARD.encode(&png)}),
+        );
+        let parts = [
+            crate::chat_render::Part { text: "nice ".into(), src: None },
+            crate::chat_render::Part { text: "Kappa".into(), src: Some(url.into()) },
+        ];
+        let body = crate::chat_render::marked(&parts, 240);
+        assert!(!chat_animated(&body));
+        let s = Settings { kind: Kind::Chat, layout_width: 600, layout_height: 400, ..Default::default() };
+        let frame = polished_chat(&s, &format!("Chat\nTwitch · viewer: {body}"), 0);
+        assert!(frame.rgba.chunks_exact(4).any(|p| p == [0, 255, 0, 255]));
+        // Without the picture the name is drawn instead, and nothing green appears.
+        let frame = polished_chat(&s, "Chat\nTwitch · viewer: nice \u{e000}https://static-cdn.jtvnw.net/missing\u{e001}Kappa\u{e002}", 0);
+        assert!(!frame.rgba.chunks_exact(4).any(|p| p == [0, 255, 0, 255]));
+    }
+    #[test]
+    fn chat_widget_shows_profile_pictures_and_windows_per_message() {
+        crate::avatars::insert("Twitch", "picture_tester", image::RgbaImage::from_pixel(64, 64, image::Rgba([255, 0, 255, 255])));
+        let text = "Chat\nTwitch · picture_tester: hi\nTwitch · other: hello\nTwitch · third: hey";
+        let magenta = |f: &Frame| f.rgba.chunks_exact(4).filter(|p| p[0] > 240 && p[1] < 15 && p[2] > 240).count();
+        for theme in [Theme::Material, Theme::Cards, Theme::Transparent, Theme::Bubbles, Theme::Windows98, Theme::WindowsXP] {
+            let mut s = Settings { kind: Kind::Chat, layout_width: 600, layout_height: 700, ..Default::default() };
+            s.apply_theme(theme);
+            assert!(magenta(&polished_chat(&s, text, 0)) > 200, "{theme:?} shows the picture");
+        }
+        // Text-only themes keep to text.
+        let mut s = Settings { kind: Kind::Chat, layout_width: 600, layout_height: 400, ..Default::default() };
+        s.apply_theme(Theme::Terminal);
+        assert_eq!(magenta(&polished_chat(&s, text, 0)), 0);
+        // Windows 98: one title bar per message, with gaps between the windows.
+        s.apply_theme(Theme::Windows98);
+        let f = polished_chat(&s, text, 0);
+        let navy = |y: u32| {
+            let o = ((y * f.width + 9) * 4) as usize;
+            f.rgba[o + 2] > 100 && f.rgba[o] < 40 && f.rgba[o + 1] < 60
+        };
+        let bars = (1..f.height).filter(|&y| navy(y) && !navy(y - 1)).count();
+        assert_eq!(bars, 3);
+    }
+    #[test]
     fn widget_output_has_text_and_valid_rgba() {
         let settings = Settings {
             background: [0, 0, 0, 0],
@@ -1234,6 +1405,21 @@ pub fn controls(ui: &mut eframe::egui::Ui, s: &mut Settings) {
         choice!(layout, Layout, "Layout");
         ui.add(egui::Slider::new(&mut s.spacing, 0..=30).text("Message spacing"));
         ui.checkbox(&mut s.reverse, "Newest message first");
+        ui.horizontal(|ui| {
+            ui.label("Messages shown");
+            for (rows, label) in [(0, "Fit"), (3, "3"), (5, "5"), (7, "7")] {
+                ui.selectable_value(&mut s.chat_rows, rows, label).on_hover_text(if rows == 0 { "As many as fit at the text size" } else { "Always this many, with the text sized to fit" });
+            }
+        });
+        ui.horizontal(|ui| {
+            let mut hide = s.chat_hide_after > 0;
+            if ui.checkbox(&mut hide, "Hide each message after").changed() {
+                s.chat_hide_after = if hide { 30 } else { 0 };
+            }
+            if hide {
+                ui.add(egui::DragValue::new(&mut s.chat_hide_after).range(5..=600).suffix(" s"));
+            }
+        });
     }
     if s.kind == Kind::CommunityGoal {
         egui::ComboBox::from_id_salt("goal_event")
@@ -1584,5 +1770,59 @@ mod music_text_tests {
         let mut missing = base.clone();
         missing.music.artist_font = "/no/such/font.ttf".into();
         assert_eq!(draw(&missing), plain, "an unreadable font falls back to the widget font");
+    }
+}
+#[cfg(test)]
+mod gallery {
+    use super::*;
+    /// Renders every widget in every theme for design review:
+    /// ROSORAH_WIDGET_GALLERY=<dir> cargo test widget_gallery -- --ignored
+    #[test]
+    #[ignore]
+    fn widget_gallery() {
+        let Ok(dir) = std::env::var("ROSORAH_WIDGET_GALLERY") else { return };
+        std::fs::create_dir_all(&dir).unwrap();
+        // Stand-in profile pictures for the sample chatters.
+        for (platform, author, c) in [("Twitch", "juniper", [120, 90, 220]), ("YouTube", "Alex", [230, 120, 60]), ("Twitch", "mia", [40, 170, 150])] {
+            let picture = image::RgbaImage::from_fn(64, 64, |x, y| {
+                let (dx, dy) = (x as f32 - 32., y as f32 - 26.);
+                let head = dx * dx + dy * dy < 140.;
+                let body = (x as f32 - 32.).powi(2) / 500. + (y as f32 - 66.).powi(2) / 420. < 1.;
+                let shade = 1. - y as f32 / 200.;
+                if head || body {
+                    image::Rgba([245, 235, 225, 255])
+                } else {
+                    image::Rgba([(c[0] as f32 * shade) as u8, (c[1] as f32 * shade) as u8, (c[2] as f32 * shade) as u8, 255])
+                }
+            });
+            crate::avatars::insert(platform, author, picture);
+        }
+        for kind in Kind::ALL {
+            for &theme in Theme::ALL {
+                let mut s = Settings { kind, label: kind.label().into(), ..Default::default() };
+                s.music.automatic = false;
+                s.content = match kind {
+                    Kind::Poll => "Next game?\nElden Ring\nHollow Knight\nCeleste".into(),
+                    Kind::Checklist => "Beat the boss\nFind the key\nSave the cat".into(),
+                    Kind::Schedule => "Mon · 7 PM · Ranked\nWed · 8 PM · Co-op night\nSat · 2 PM · Speedruns".into(),
+                    Kind::Announcements => "Follow for more!\nJoin the Discord".into(),
+                    Kind::Shoutout => "Go follow Juniper!".into(),
+                    Kind::StreamLabels => "Latest follower: Juniper".into(),
+                    Kind::Text => "Be right back".into(),
+                    Kind::QrCode => "https://rosorah.example/discord".into(),
+                    _ => s.content,
+                };
+                s.apply_theme(theme);
+                let frame = preview(&s, true).unwrap();
+                image::save_buffer(
+                    std::path::Path::new(&dir).join(format!("{kind:?}-{theme:?}.png")),
+                    &frame.rgba,
+                    frame.width,
+                    frame.height,
+                    image::ColorType::Rgba8,
+                )
+                .unwrap();
+            }
+        }
     }
 }

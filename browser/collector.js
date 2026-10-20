@@ -31,6 +31,12 @@
     return result.slice(0,128).map(p => { const text=p.text.slice(0,left);left-=text.length;return p.src ? {text,src:p.src.slice(0,2048)} : {text}; });
   }
   const text = el => parts(el).map(p=>p.text).join('');
+  // The chatter's profile picture, where the chat page shows one (YouTube and TikTok).
+  const photo = el => {
+    const img = platform==='YouTube' ? el.querySelector('#author-photo img') : platform==='TikTok' ? [...el.querySelectorAll('img')].find(i=>/tiktokcdn/.test(i.currentSrc||i.src)) : null;
+    const src = img ? (img.currentSrc||img.src||'') : '';
+    return src.startsWith('https://') ? src.slice(0,2048) : '';
+  };
   const emit = item => { if (sink) sink(item); else {queue.push(item);if(queue.length>500)queue.shift();} };
   const hashId=(prefix,key)=>{let h=0;for(const c of key)h=(Math.imul(h,31)+c.codePointAt(0))|0;return prefix+(h>>>0).toString(36)+'-'+key.length;};
   // TikTok hashes its class names per release, so only data-e2e hooks and visible text are used.
@@ -57,7 +63,7 @@
     const first=!seen.has(id);
     remember(id,value);
     if(!first&&activity_kind)return;
-    emit({type:'message',platform,id,author:author||'Viewer',author_id:'',text:body,parts:fragments,kind:activity_kind?'activity':'chat',activity_kind,historical:initial || Date.now()-opened<5000});
+    emit({type:'message',platform,id,author:author||'Viewer',author_id:'',author_photo:photo(el),text:body,parts:fragments,kind:activity_kind?'activity':'chat',activity_kind,historical:initial || Date.now()-opened<5000});
   }
   function inspect(el) {
     if(platform==='TikTok'){inspectTikTok(el);return;}
@@ -99,7 +105,7 @@
     const activity_kind = ({'YT-LIVE-CHAT-PAID-MESSAGE-RENDERER':'super_chat','YT-LIVE-CHAT-PAID-STICKER-RENDERER':'super_sticker','YT-LIVE-CHAT-MEMBERSHIP-ITEM-RENDERER':'membership','YT-LIVE-CHAT-SPONSORSHIPS-GIFT-PURCHASE-ANNOUNCEMENT-RENDERER':'gift','YT-LIVE-CHAT-SPONSORSHIPS-GIFT-REDEMPTION-ANNOUNCEMENT-RENDERER':'gift'})[el.tagName] || '';
     // Twitch exposes the sender's login, which moderation actions need; display names can differ.
     const author_id=platform==='Twitch'?(el.getAttribute('data-a-user')||el.querySelector('[data-a-user]')?.getAttribute('data-a-user')||'').slice(0,25):'';
-    emit({type:'message',platform,id:id.slice(0,200),author:author||'Viewer',author_id,text:body||text(el).trim().slice(0,2000),parts:fragments,kind,activity_kind,historical:initial || Date.now()-opened<5000});
+    emit({type:'message',platform,id:id.slice(0,200),author:author||'Viewer',author_id,author_photo:photo(el),text:body||text(el).trim().slice(0,2000),parts:fragments,kind,activity_kind,historical:initial || Date.now()-opened<5000});
   }
   function remember(id,value){seen.set(id,value);while(seen.size>3000)seen.delete(seen.keys().next().value);}
   function scan(root=document) {
@@ -118,7 +124,30 @@
     }
     roots.forEach(scan);
   }).observe(document.documentElement,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['is-deleted','src','srcset']});
+  // YouTube puts the emotes the signed-in viewer can use (YouTube's own and the channel's) into the
+  // page data; the streamer's emote picker in Rosorah lists them.
+  function youtubeEmotes(){
+    if(platform!=='YouTube')return;
+    const items=[],ids=new Set();
+    const visit=v=>{
+      if(!v||typeof v!=='object'||items.length>=200)return;
+      if(Array.isArray(v)){v.forEach(visit);return;}
+      if(v.emojiId&&v.isCustomEmoji&&Array.isArray(v.shortcuts)&&v.image){
+        const thumbs=v.image.thumbnails||[],src=safeImage(thumbs.length?thumbs[thumbs.length-1].url:''),name=String(v.shortcuts[0]||'').slice(0,100);
+        if(src&&name&&!ids.has(v.emojiId)){ids.add(v.emojiId);items.push({name,src:src.slice(0,2048)});}
+        return;
+      }
+      for(const k in v)visit(v[k]);
+    };
+    for(const s of document.scripts){
+      const t=s.textContent||'',i=t.indexOf('ytInitialData');if(i<0)continue;
+      const start=t.indexOf('{',i),end=t.lastIndexOf('}');if(start<0||end<start)continue;
+      try{visit(JSON.parse(t.slice(start,end+1)));}catch(e){}
+    }
+    if(items.length)emit({type:'emote_list',platform,items});
+  }
   window.__rosorah={drain:()=>{scan();return queue.splice(0);},setSink:fn=>{sink=fn;queue.splice(0).forEach(emit);},scan};
   scan();
+  youtubeEmotes();
   initial = false;
 })();

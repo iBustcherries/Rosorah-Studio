@@ -8,6 +8,68 @@ use std::collections::HashMap;
 const YT: &str = "https://www.googleapis.com/youtube/v3/";
 const TW: &str = "https://api.twitch.tv/helix/";
 
+/// Every emote the signed-in Twitch user can send (needs user:read:emotes): their own channel's
+/// first, then Twitch's global set, then other channels'.
+pub(super) fn twitch_emotes(client: &Client, config: &ClientConfig, token: &Token, user: &str) -> Result<Vec<crate::chat_render::Emote>> {
+    let mut list = Vec::new();
+    let mut after = String::new();
+    for _ in 0..20 {
+        let mut query = vec![("user_id", user)];
+        if !after.is_empty() {
+            query.push(("after", after.as_str()));
+        }
+        let page = json(client.get(format!("{TW}chat/emotes/user")).header("Client-Id", &config.id).bearer_auth(&token.access).query(&query))?;
+        for e in page["data"].as_array().into_iter().flatten() {
+            let (Some(id), Some(name)) = (e["id"].as_str(), e["name"].as_str()) else { continue };
+            if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || name.len() > 100 {
+                continue;
+            }
+            let group = if e["owner_id"].as_str() == Some(user) {
+                "Your channel"
+            } else if matches!(e["emote_type"].as_str(), Some("globals" | "smilies")) || e["owner_id"].as_str() == Some("0") {
+                "Twitch"
+            } else {
+                "Other channels"
+            };
+            list.push(crate::chat_render::Emote {
+                group: group.into(),
+                name: name.into(),
+                insert: name.into(),
+                src: format!("https://static-cdn.jtvnw.net/emoticons/v2/{id}/static/dark/2.0"),
+            });
+        }
+        match page["pagination"]["cursor"].as_str() {
+            Some(cursor) if !cursor.is_empty() && list.len() < 3000 => after = cursor.into(),
+            _ => break,
+        }
+    }
+    let rank = |g: &str| ["Your channel", "Twitch", "Other channels"].iter().position(|x| *x == g).unwrap_or(3);
+    list.sort_by_key(|e| rank(&e.group));
+    Ok(list)
+}
+
+/// Looks up the profile pictures of Twitch chatters waiting for one (see `avatars`).
+pub(super) fn twitch_avatars(client: &Client, config: &ClientConfig, token: &Token) {
+    let waiting = crate::avatars::take_twitch();
+    for batch in waiting.chunks(100) {
+        let query: Vec<_> = batch
+            .iter()
+            .map(|(_, lookup)| if lookup.chars().all(|c| c.is_ascii_digit()) { ("id", lookup.as_str()) } else { ("login", lookup.as_str()) })
+            .collect();
+        let users = json(client.get(format!("{TW}users")).header("Client-Id", &config.id).bearer_auth(&token.access).query(&query)).unwrap_or_default();
+        let users = users["data"].as_array().cloned().unwrap_or_default();
+        for (key, lookup) in batch {
+            let url = users
+                .iter()
+                .find(|u| u["id"].as_str() == Some(lookup) || u["login"].as_str().is_some_and(|l| l.eq_ignore_ascii_case(lookup)))
+                .and_then(|u| u["profile_image_url"].as_str())
+                .filter(|u| !u.is_empty())
+                .map(Into::into);
+            crate::avatars::found(key.clone(), url);
+        }
+    }
+}
+
 // Broadcast metadata discovery is separate from browser-based chat delivery.
 // Follow the only live broadcast; keep an explicit choice when several are live.
 fn choose_broadcast(response: &Value, current: &str) -> String {
@@ -90,7 +152,8 @@ pub(super) fn validate_twitch(
     ensure!(
         oauth::TWITCH_SCOPES
             .split_whitespace()
-            .filter(|s|*s!="channel:manage:redemptions" && !s.starts_with("moderator:manage:"))
+            // Optional permissions: their features explain how to add them (reconnecting).
+            .filter(|s|*s!="channel:manage:redemptions" && *s!="user:read:emotes" && !s.starts_with("moderator:manage:"))
             .all(|s| scopes.iter().any(|v| v.as_str() == Some(s))),
         "Twitch permissions incomplete; reconnect and approve chat and broadcast access"
     );
@@ -530,6 +593,7 @@ impl Session {
             Command::Rewards(_)=>anyhow::bail!("Reward request must use the account worker"),
             Command::Moderate(_) => anyhow::bail!("Moderation must use the account worker"),
             Command::Live(_) => anyhow::bail!("Going live is handled by the account worker"),
+            Command::Emotes(_) => anyhow::bail!("Emotes are listed by the account worker"),
             Command::Discover => {
                 self.discovery_burst = 6;
                 self.next_discovery = Instant::now();

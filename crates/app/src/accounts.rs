@@ -1,4 +1,5 @@
 //! One renewable account session powers broadcast controls, activity and outgoing chat.
+mod bot;
 mod events;
 pub mod rewards;
 mod oauth;
@@ -30,6 +31,15 @@ pub struct ClientConfig {
     pub id: String,
     pub secret: String,
     pub broker_url: String,
+    /// A bot account's sign-in: fewer permissions, and stored apart from the streamer's.
+    #[serde(skip)]
+    pub bot: bool,
+}
+impl ClientConfig {
+    /// What the sign-in is stored under in the desktop wallet.
+    fn vault_id(&self) -> String {
+        if self.bot { format!("{}#bot", self.id) } else { self.id.clone() }
+    }
 }
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -69,6 +79,7 @@ impl Config {
                 id: "01M4YA7GYFWH7BWR999CPG5YH4".into(),
                 broker_url: "https://rosorah-kick-auth.justmoeislive.workers.dev".into(),
                 secret: String::new(),
+                bot: false,
             };
         }
         config
@@ -146,6 +157,8 @@ pub enum Command {
     },
     /// Rosorah started (true) or stopped (false) streaming: viewers are only checked while live.
     Live(bool),
+    /// List the emotes this account can use in chat (Kick needs the channel name).
+    Emotes(String),
 }
 pub enum Event {
     Moderated(String),
@@ -166,6 +179,7 @@ pub enum Event {
     Chat(ChatMessage),
     /// People watching now; None while the channel isn't live.
     Viewers(Option<u64>),
+    Emotes(std::result::Result<Vec<crate::chat_render::Emote>, String>),
     #[cfg(test)]
     Delete(String),
     #[cfg(test)]
@@ -173,6 +187,8 @@ pub enum Event {
     Failed(String),
 }
 pub struct Account {
+    /// A bot account, which only sends chat into the streamer's channel.
+    pub bot: bool,
     pub reward_result: Option<std::result::Result<Value,String>>,
     pub reward_busy: bool,
     pub platform: Platform,
@@ -199,6 +215,10 @@ pub struct Account {
     pub moderation_results: Vec<String>,
     /// People watching now (None when offline or unknown).
     pub viewers: Option<u64>,
+    /// Emotes this account can send, for the chat emote picker.
+    pub emotes: Vec<crate::chat_render::Emote>,
+    /// Why the emote list is missing, if it is.
+    pub emote_note: String,
     /// Whether this account's worker was last told Rosorah is streaming.
     live_sent: Option<bool>,
     worker: Option<std::thread::JoinHandle<()>>,
@@ -210,6 +230,7 @@ pub struct Account {
 impl Account {
     pub fn new(platform: Platform) -> Self {
         Self {
+            bot: false,
             reward_result:None,reward_busy:false,
             platform,
             status: "Disconnected".into(),
@@ -234,6 +255,8 @@ impl Account {
             post_results: Vec::new(),
             moderation_results: Vec::new(),
             viewers: None,
+            emotes: Vec::new(),
+            emote_note: String::new(),
             live_sent: None,
             worker: None,
             saved_config: None,
@@ -242,15 +265,28 @@ impl Account {
             cancel: Arc::new(AtomicBool::new(false)),
         }
     }
+    pub fn new_bot(platform: Platform) -> Self {
+        let mut account = Self::new(platform);
+        account.bot = true;
+        account
+    }
+    /// Sends chat as the bot into `channel`, the streamer's user id.
+    pub fn post_to(&mut self, request: String, text: String, channel: &str) -> bool {
+        self.connected
+            && self.tx.as_ref().is_some_and(|tx| {
+                tx.try_send(Command::Post { request, text, broadcast: channel.into() }).is_ok()
+            })
+    }
     pub fn connect(&mut self, config: ClientConfig) {
         self.begin(config, true);
     }
     pub fn restore(&mut self, config: ClientConfig) {
-        if !config.id.is_empty() && vault::remembered(self.platform, &config.id) {
+        if !config.id.is_empty() && vault::remembered(self.platform, &ClientConfig { bot: self.bot, ..config.clone() }.vault_id()) {
             self.begin(config, false);
         }
     }
-    fn begin(&mut self, config: ClientConfig, interactive: bool) {
+    fn begin(&mut self, mut config: ClientConfig, interactive: bool) {
+        config.bot = self.bot;
         self.stop(false);
         let prior = self.worker.take();
         self.saved_config = Some(config.clone());
@@ -312,6 +348,8 @@ impl Account {
         self.rx = None;
         self.connected = false;
         self.viewers = None;
+        self.emotes.clear();
+        self.emote_note.clear();
         self.live_sent = None;
         self.busy = false;
         self.auth_url.clear();
@@ -403,6 +441,9 @@ impl Account {
                 Event::Streams(v) => self.streams = v,
                 Event::Activity(item) => self.activity.push(item),
                 Event::Connected(name, id) => {
+                    if !self.bot && self.platform != Platform::YouTube && (!self.connected || self.name != name) {
+                        self.send(Command::Emotes(name.clone()));
+                    }
                     self.user_id = id;
                     self.connected = true;
                     self.busy = false;
@@ -411,7 +452,8 @@ impl Account {
                     self.status = format!("Connected as {name}");
                 }
                 Event::Authorize(url, s) => {
-                    if let Ok(mut child)=crate::desktop::open(&url){std::thread::spawn(move||{let _=child.wait();});}
+                    // A bot signs in from a private window (see Settings), not the streamer's browser.
+                    if !self.bot && let Ok(mut child)=crate::desktop::open(&url){std::thread::spawn(move||{let _=child.wait();});}
                     self.auth_url = url;
                     self.status = s;
                 }
@@ -425,6 +467,11 @@ impl Account {
                     feed.push(m);
                 }
                 Event::Viewers(n) => self.viewers = n,
+                Event::Emotes(Ok(list)) => {
+                    self.emotes = list;
+                    self.emote_note.clear();
+                }
+                Event::Emotes(Err(note)) => self.emote_note = note,
                 #[cfg(test)]
                 Event::Delete(id) => feed.remove(self.platform, &id),
                 #[cfg(test)]
@@ -608,7 +655,7 @@ fn run(
         .connect_timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let remembered = vault::remembered(platform, &config.id);
+    let remembered = vault::remembered(platform, &config.vault_id());
     let saved = if remembered && !interactive {
         match vault::load(platform, &config, cancel) {
             Ok(v) => v,
@@ -638,6 +685,7 @@ fn run(
     };
     if had_saved
         && interactive
+        && !config.bot
         && platform == Platform::Twitch
         && services::validate_twitch(&client, &config, &token).is_err()
     {
@@ -654,6 +702,9 @@ fn run(
     ));
     if cancel.load(Ordering::Relaxed) {
         return Ok(());
+    }
+    if config.bot {
+        return bot::session(platform, &client, &config, token, tx, commands, cancel);
     }
     if platform == Platform::Kick {
         return kick::session(&client, &config, token, tx, commands, cancel);
@@ -688,6 +739,9 @@ fn run(
             }
             validate = Instant::now();
         }
+        if platform == Platform::Twitch {
+            services::twitch_avatars(&client, &config, &token);
+        }
         match commands.recv_timeout(Duration::from_millis(50)) {
             Ok(Command::Moderate(action)) => {
                 let text = match session.moderate(&action, &client, &config, &token) {
@@ -697,6 +751,16 @@ fn run(
                 let _ = tx.send(Event::Moderated(text));
             }
             Ok(Command::Live(live)) => session.watch(live, tx),
+            Ok(Command::Emotes(_)) if platform == Platform::Twitch => {
+                let list = services::twitch_emotes(&client, &config, &token, session.user_id()).map_err(|e| {
+                    if e.to_string().contains("HTTP 401") || e.to_string().contains("HTTP 403") {
+                        "Reconnect Twitch in Settings > Accounts once to show your emotes here.".to_string()
+                    } else {
+                        format!("Couldn't load your Twitch emotes: {e}")
+                    }
+                });
+                let _ = tx.send(Event::Emotes(list));
+            }
             Ok(Command::Rewards(op))=>{
                 let result=if platform==Platform::Twitch{rewards::run(op,&client,&config,&token,session.user_id()).map_err(|e|format!("{e}. If permission is missing, reconnect Twitch in Settings > Accounts."))}else{Err("Rewards require Twitch".into())};
                 let _=tx.send(Event::Rewards(result));

@@ -85,6 +85,17 @@ pub struct Appearance {
     pub clarity: f32,
     /// A stronger tint so text stays readable over busy pictures.
     pub contrast_boost: bool,
+    /// Linux only: whether Rosorah draws a GNOME-style title bar itself.
+    pub title_bar: TitleBar,
+}
+/// Who draws the window's title bar on Linux.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TitleBar {
+    /// Rosorah's GNOME-style one on GNOME; the desktop's own everywhere else.
+    #[default]
+    Automatic,
+    Always,
+    Never,
 }
 impl Default for Appearance {
     fn default() -> Self {
@@ -98,6 +109,7 @@ impl Default for Appearance {
             transparency: 0.4,
             clarity: 0.5,
             contrast_boost: false,
+            title_bar: TitleBar::Automatic,
         }
     }
 }
