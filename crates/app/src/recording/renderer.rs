@@ -159,6 +159,10 @@ pub fn update_project(project: &Project) {
 
 /// One canvas drawn this tick, and who gets which of its pictures.
 struct Job {
+    /// The tick this drawing is for. Pictures carry it rather than when drawing began: under a
+    /// busy graphics card a late tick otherwise landed in the next frame slot, so the recording
+    /// repeated one frame and dropped the next.
+    due: Instant,
     canvas: Canvas,
     formats: Vec<Format>,
     deliveries: Vec<(Inbox, usize)>,
@@ -201,6 +205,7 @@ fn run() {
                 if s.next > now + Duration::from_millis(1) {
                     continue;
                 }
+                let due = s.next;
                 s.next += s.period;
                 if s.next < now {
                     s.next = now + s.period;
@@ -208,10 +213,11 @@ fn run() {
                 let job = match jobs.iter_mut().position(|j| j.canvas.id == s.canvas.id && (j.canvas.width, j.canvas.height) == (s.canvas.width, s.canvas.height)) {
                     Some(i) => &mut jobs[i],
                     None => {
-                        jobs.push(Job { canvas: s.canvas.clone(), formats: Vec::new(), deliveries: Vec::new() });
+                        jobs.push(Job { due, canvas: s.canvas.clone(), formats: Vec::new(), deliveries: Vec::new() });
                         jobs.last_mut().unwrap()
                     }
                 };
+                job.due = job.due.min(due);
                 let index = job.formats.iter().position(|f| *f == s.format).unwrap_or_else(|| {
                     job.formats.push(s.format);
                     job.formats.len() - 1
@@ -316,15 +322,18 @@ fn prepare(g: &mut Compositor, scene: &mut Scene, revision: u64, project: &Proje
 }
 fn draw(g: &mut Compositor, current: &Project, active: &Canvas, job: &Job, tag: &mut u64, pending: &mut HashMap<u64, Pending>) -> Result<()> {
     let (width, height) = (job.canvas.width, job.canvas.height);
-    let at = Instant::now();
+    let (at, started) = (job.due, Instant::now());
+    let mut waited = Duration::ZERO;
     let pictures: Vec<Nv12> = job.formats.iter().filter_map(|f| if let Format::Nv12(n) = f { Some(*n) } else { None }).collect();
     if !pictures.is_empty() {
         // Two frames out at once at most; beyond that the graphics card is behind, so wait.
+        let wait = Instant::now();
         while g.nv12_in_flight() >= 2 {
             for (done_tag, done) in g.finished_nv12(true)? {
                 hand_over(pending, done_tag, done);
             }
         }
+        waited = wait.elapsed();
         *tag += 1;
         g.begin_nv12(current, active, width, height, &pictures, *tag)?;
         // Which picture each output gets, by its place among the NV12 ones.
@@ -336,17 +345,38 @@ fn draw(g: &mut Compositor, current: &Project, active: &Canvas, job: &Job, tag: 
                 Some((inbox.clone(), pictures.iter().position(|p| *p == n)?))
             })
             .collect();
-        pending.insert(*tag, Pending { at, render: at.elapsed(), deliveries });
+        pending.insert(*tag, Pending { at, render: started.elapsed(), deliveries });
+        trace_draw(started.saturating_duration_since(at), waited, started.elapsed());
     }
     if let Some(rgba) = job.formats.iter().position(|f| *f == Format::Rgba) {
         let data = Arc::new(g.render(current, active, width, height)?);
         for (inbox, index) in &job.deliveries {
             if *index == rgba {
-                deliver(inbox, Picture { at, data: data.clone(), render: at.elapsed() });
+                deliver(inbox, Picture { at, data: data.clone(), render: started.elapsed() });
             }
         }
     }
     Ok(())
+}
+/// `ROSORAH_CAPTURE_TRACE=1`: once a second, how late drawing started after its tick, how long it
+/// waited for the graphics card, and how long the whole draw took (the worst of each).
+fn trace_draw(late: Duration, waited: Duration, took: Duration) {
+    static TRACE: Mutex<Option<(Instant, Duration, Duration, Duration, u32)>> = Mutex::new(None);
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("ROSORAH_CAPTURE_TRACE").is_some()) {
+        return;
+    }
+    let mut trace = TRACE.lock().unwrap();
+    let (since, worst_late, worst_wait, worst_draw, late_half) = trace.get_or_insert((Instant::now(), Duration::ZERO, Duration::ZERO, Duration::ZERO, 0));
+    *worst_late = (*worst_late).max(late);
+    *worst_wait = (*worst_wait).max(waited);
+    *worst_draw = (*worst_draw).max(took);
+    *late_half += u32::from(late > Duration::from_millis(8));
+    if since.elapsed() >= Duration::from_secs(1) {
+        let ms = |d: Duration| d.as_secs_f64() * 1000.;
+        eprintln!("draw trace: worst start {:.1} ms late, {late_half} ticks over 8 ms late, worst GPU wait {:.1} ms, worst draw {:.1} ms", ms(*worst_late), ms(*worst_wait), ms(*worst_draw));
+        *trace = None;
+    }
 }
 fn hand_over(pending: &mut HashMap<u64, Pending>, tag: u64, pictures: Vec<Vec<u8>>) {
     let Some(frame) = pending.remove(&tag) else { return };

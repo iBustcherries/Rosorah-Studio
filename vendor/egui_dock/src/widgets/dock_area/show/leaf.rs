@@ -324,6 +324,10 @@ impl<Tab> DockArea<'_, Tab> {
             let show_close_button = self.show_close_buttons && closeable;
 
             let (response, title_id) = if is_being_dragged {
+                // Keep the gap the tab leaves so the rest of the tab bar stays put during the drag.
+                if tab_index.0 != 0 {
+                    tabs_ui.allocate_space(vec2(tab_style.spacing, 0.0));
+                }
                 let layer_id = LayerId::new(Order::Tooltip, id);
                 let response = tabs_ui
                     .scope_builder(UiBuilder::new().layer_id(layer_id), |ui| {
@@ -350,9 +354,19 @@ impl<Tab> DockArea<'_, Tab> {
                     let start = *state.drag_start.get_or_insert(pointer_pos);
                     let delta = pointer_pos - start;
                     if delta.x.abs() > 30.0 || delta.y.abs() > 6.0 {
-                        tabs_ui
-                            .ctx()
-                            .transform_layer_shapes(layer_id, TSTransform::new(delta, 1.0));
+                        let scale = self.tab_ghost(
+                            tabs_ui.ctx(),
+                            layer_id,
+                            (surface_index, node_index),
+                            tab_index,
+                            response.rect,
+                            tab_viewer,
+                        );
+                        // Carry the title and the panel under it so the grabbed point stays under the pointer.
+                        tabs_ui.ctx().transform_layer_shapes(
+                            layer_id,
+                            TSTransform::new(pointer_pos.to_vec2() - start.to_vec2() * scale, scale),
+                        );
 
                         tabs_ui.memory_mut(|mem| {
                             mem.data.insert_temp(
@@ -1185,6 +1199,70 @@ impl<Tab> DockArea<'_, Tab> {
         leaf.scroll = leaf.scroll.clamp(-overflow, 0.0);
     }
 
+    /// Draws the panel of a tab being dragged under its title on the drag layer, so the whole
+    /// panel follows the pointer while its old place holds a placeholder. Returns how much the
+    /// carried panel is shrunk so a big panel doesn't hide the drop targets.
+    fn tab_ghost(
+        &mut self,
+        ctx: &egui::Context,
+        layer_id: LayerId,
+        (surface_index, node_index): (SurfaceIndex, NodeIndex),
+        tab_index: TabIndex,
+        title_rect: Rect,
+        tab_viewer: &mut impl TabViewer<Tab = Tab>,
+    ) -> f32 {
+        const MOST: Vec2 = vec2(480.0, 360.0);
+        let leaf = self.dock_state[surface_index][node_index]
+            .get_leaf_mut()
+            .expect("This node must be a leaf");
+        let open = leaf.active == tab_index;
+        let size = if open && leaf.viewport.is_positive() {
+            leaf.viewport.size()
+        } else {
+            vec2(leaf.rect.width(), (leaf.rect.bottom() - title_rect.bottom()).max(60.0))
+        };
+        let body_rect = Rect::from_min_size(pos2(leaf.rect.left(), title_rect.bottom()), size);
+        let style = self.style.as_ref().unwrap();
+        let tab = &mut leaf.tabs[tab_index.0];
+        let tabs_style = tab_viewer
+            .tab_style_override(tab, &style.tab)
+            .unwrap_or_else(|| style.tab.clone());
+        // The same id as the panel in place, so it keeps its scroll position while carried.
+        let id = self.id.with(tab_viewer.id(tab));
+        let ui = &mut Ui::new(
+            ctx.clone(),
+            id,
+            UiBuilder::new().layer_id(layer_id).max_rect(body_rect),
+        );
+        ui.set_clip_rect(body_rect);
+        ui.multiply_opacity(0.9);
+        ui.spacing_mut().item_spacing = ctx.style().spacing.item_spacing;
+        ui.painter().rect_filled(
+            body_rect,
+            tabs_style.tab_body.corner_radius,
+            tabs_style.tab_body.bg_fill,
+        );
+        ScrollArea::new(tab_viewer.scroll_bars(tab)).show(ui, |ui| {
+            Frame::new()
+                .inner_margin(tabs_style.tab_body.inner_margin)
+                .show(ui, |ui| {
+                    let available_rect = ui.available_rect_before_wrap();
+                    ui.expand_to_include_rect(available_rect);
+                    tab_viewer.ui(ui, tab);
+                });
+        });
+        ctx.layer_painter(layer_id).rect_stroke(
+            body_rect.union(title_rect),
+            tabs_style.tab_body.corner_radius,
+            Stroke::new(2.0, ctx.style().visuals.selection.stroke.color),
+            StrokeKind::Outside,
+        );
+        if open {
+            self.ghosted_leaf = Some((surface_index, node_index));
+        }
+        (MOST.x / size.x).min(MOST.y / size.y).clamp(0.35, 1.0)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn tab_body(
         &mut self,
@@ -1199,6 +1277,7 @@ impl<Tab> DockArea<'_, Tab> {
     ) {
         let (body_rect, _body_response) =
             ui.allocate_exact_size(ui.available_size_before_wrap(), Sense::hover());
+        let carried = self.ghosted_leaf.take() == Some((surface_index, node_index));
 
         let leaf = self.dock_state[surface_index][node_index]
             .get_leaf_mut()
@@ -1273,6 +1352,25 @@ impl<Tab> DockArea<'_, Tab> {
                     StrokeKind::Inside,
                 );
 
+                if carried {
+                    // The panel is following the pointer; keep its place reserved until the drop.
+                    let visuals = ui.visuals();
+                    let hold = body_rect.shrink(6.0);
+                    ui.painter().rect_filled(hold, 6.0, visuals.extreme_bg_color);
+                    ui.painter().rect_stroke(
+                        hold,
+                        6.0,
+                        Stroke::new(1.0, visuals.selection.stroke.color.gamma_multiply(0.6)),
+                        StrokeKind::Inside,
+                    );
+                    ui.painter().text(
+                        hold.center(),
+                        Align2::CENTER_CENTER,
+                        format!("Moving {}", tab_viewer.title(tab).text()),
+                        egui::FontId::proportional(14.0),
+                        visuals.weak_text_color(),
+                    );
+                } else {
                 ScrollArea::new(tab_viewer.scroll_bars(tab)).show(ui, |ui| {
                     Frame::new()
                         .inner_margin(tabs_style.tab_body.inner_margin)
@@ -1285,6 +1383,7 @@ impl<Tab> DockArea<'_, Tab> {
                             tab_viewer.ui(ui, tab);
                         });
                 });
+                }
             }
         }
 

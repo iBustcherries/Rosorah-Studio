@@ -313,9 +313,11 @@ void capture(Key key,void* display) {
         if(quality!=c.quality){c.quality=quality;c.configure(c.width,c.height,c.color);c.due=0;}}
     if(c.fbo)c.drain();
     uint32_t fps=c.delivery?c.delivery->fps.load(std::memory_order_acquire):0;
-    if(!fps || now<c.due)return;
+    // Twice the studio's rate, with early presents on time, as in the Vulkan layer.
+    const uint64_t interval=fps?1000000000ull/(fps*2):0;
+    if(!fps || !rosorah::capture_due(now,c.due,interval))return;
     if(!c.fbo && !c.prepare()){c.valid=false;c.delivery.reset();return;}
-    if(c.enqueue()){const uint64_t interval=1000000000ull/fps;c.due=(now-c.due>interval)?now+interval:c.due+interval;}
+    if(c.enqueue())c.due=rosorah::following_capture(now,c.due,interval);
 }
 void remove_surface(uintptr_t surface,bool egl,uintptr_t current) {
     std::lock_guard<std::recursive_mutex> lock(gate());

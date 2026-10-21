@@ -348,7 +348,9 @@ impl Hub {
             s.revision = s.revision.wrapping_add(1);
         }
     }
-    pub fn tick_alerts(&self, project: &auroracast_core::Project) -> Vec<Id> {
+    /// Starts queued alerts and ends finished ones; an alert showing media that `playing` still
+    /// reports stays up until the clip ends, so a long clip isn't cut off at the alert's time.
+    pub fn tick_alerts(&self, project: &auroracast_core::Project, playing: impl Fn(Id) -> bool) -> Vec<Id> {
         let mut start = Vec::new();
         for (id, state) in self.0.lock().unwrap().iter() {
             let mut s = state.lock().unwrap();
@@ -365,7 +367,7 @@ impl Hub {
                 s.alert = None;
                 continue;
             }
-            if s.alert.as_ref().is_some_and(|a| Instant::now() >= a.2) {
+            if s.alert.as_ref().is_some_and(|a| Instant::now() >= a.2 && !a.1.is_some_and(&playing)) {
                 s.alert = None;
                 s.revision = s.revision.wrapping_add(1);
             }
@@ -1894,6 +1896,25 @@ mod widget_regressions {
 }
 #[cfg(test)]mod alert_layout_tests{use super::*;use auroracast_core::widgets::AlertLayout;
  #[test]fn below_text_region_is_never_covered_by_media(){let mut f=Frame{width:10,height:10,rgba:vec![0;400]};let video=Frame{width:1,height:1,rgba:vec![255,0,0,255]};compose_media_layout(&mut f,&video,false,AlertLayout::Below);assert_eq!(f.rgba[3],255);assert_eq!(f.rgba[(9*10)*4+3],0);}
+    #[test]
+    fn alert_with_playing_media_waits_for_the_clip() {
+        let hub = Hub::default();
+        hub.0.lock().unwrap().insert(1, Arc::new(Mutex::new(State::new(Settings { kind: Kind::AlertBox, ..Default::default() }))));
+        let mut p = auroracast_core::Project::default();
+        let scene = p.canvases[0].scene;
+        p.scenes.iter_mut().find(|s| s.id == scene).unwrap().layers.push(auroracast_core::Layer {
+            crop: [0.; 4], group: 0, frame: Default::default(), look: Default::default(),
+            source: 1, rect: [0., 0., 1., 1.], visible: true, locked: false, opacity: 1.,
+        });
+        hub.target_alert(1, "", 1, Some(9), &Default::default());
+        assert_eq!(hub.tick_alerts(&p, |_| false), vec![9]);
+        let expire = || hub.0.lock().unwrap()[&1].lock().unwrap().alert.as_mut().unwrap().2 = Instant::now() - Duration::from_secs(1);
+        expire();
+        hub.tick_alerts(&p, |id| id == 9);
+        assert!(hub.0.lock().unwrap()[&1].lock().unwrap().alert.is_some(), "the clip is still playing");
+        hub.tick_alerts(&p, |_| false);
+        assert!(hub.0.lock().unwrap()[&1].lock().unwrap().alert.is_none(), "ends once the clip does");
+    }
  #[test]fn targeted_alerts_do_not_broadcast_to_other_boxes(){let hub=Hub::default();for id in [1,2]{hub.0.lock().unwrap().insert(id,Arc::new(Mutex::new(State::new(Settings{kind:Kind::AlertBox,..Default::default()}))));}hub.target_alert(1,"Hello",5,None,&Default::default());assert_eq!(hub.0.lock().unwrap()[&1].lock().unwrap().queue.len(),1);assert!(hub.0.lock().unwrap()[&2].lock().unwrap().queue.is_empty());}
 }
 #[cfg(test)]

@@ -219,7 +219,8 @@ pub struct Editor {
     transfer: Option<(bool, String)>,
     file_job: Option<mpsc::Receiver<Result<Option<String>, String>>>,
     pub notice: String,
-    picker: Option<(Id, mpsc::Receiver<Option<PathBuf>>)>,
+    /// A file being chosen for a Play sound / Play media step: (rule, step).
+    picker: Option<((Id, usize), mpsc::Receiver<Option<PathBuf>>)>,
     pub preview_open: bool,
     pub preview_vertical: bool,
     /// Platforms with a bot account connected, for Send chat steps.
@@ -323,7 +324,19 @@ fn short(text: &str) -> String {
 }
 /// The "... then" half of the summary, e.g. `show "Thanks, {user}!" for 6 s, then play Chime at 80%`.
 fn then_text(actions: &[Action], sources: &[auroracast_core::Source], scenes: &[auroracast_core::Scene]) -> String {
-    let name = |id: Id| sources.iter().find(|s| s.id == id).map(|s| s.name.clone()).unwrap_or_else(|| "missing media".into());
+    // Media steps name the file they play (a source's name can be left over from an earlier file).
+    let name = |id: Id| {
+        sources
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| match &s.kind {
+                SourceKind::VideoFile(v) if !s.name.ends_with("(built-in)") => std::path::Path::new(&v.path)
+                    .file_name()
+                    .map_or_else(|| s.name.clone(), |n| n.to_string_lossy().into_owned()),
+                _ => s.name.clone(),
+            })
+            .unwrap_or_else(|| if id == 0 { "no file chosen".into() } else { "missing media".into() })
+    };
     let volume = |id: Id| match sources.iter().find(|s| s.id == id).map(|s| &s.kind) {
         Some(SourceKind::VideoFile(v)) => format!(" at {}%", (v.gain * 100.).round()),
         _ => String::new(),
@@ -507,31 +520,48 @@ fn add_sample_source(p: &mut Project, sample: &crate::alert_samples::Sample, lay
     if let Some(existing) = p.sources.iter().find(|s| matches!(&s.kind, SourceKind::VideoFile(v) if v.path == sample.path.to_string_lossy())) {
         return existing.id;
     }
+    let id = new_media_source(p, &sample.path.to_string_lossy(), format!("{} (built-in)", sample.name));
+    add_layers(p, id, sample.sound, layer);
+    id
+}
+/// Media for a file chosen in a Play sound / Play media step: automation-only, reusing one
+/// already added for the same file.
+fn add_media_file(p: &mut Project, path: &str, name: String, sound: bool) -> Id {
+    if let Some(existing) = p.sources.iter().find(|s| matches!(&s.kind, SourceKind::VideoFile(v) if v.automation_only && v.path == path)) {
+        return existing.id;
+    }
+    let id = new_media_source(p, path, name);
+    add_layers(p, id, sound, false);
+    id
+}
+fn new_media_source(p: &mut Project, path: &str, name: String) -> Id {
     let id = p.id();
     p.sources.push(auroracast_core::Source {
         id,
-        name: format!("{} (built-in)", sample.name),
+        name: name.clone(),
         kind: SourceKind::VideoFile(auroracast_core::VideoSettings {
-            path: sample.path.to_string_lossy().into(),
+            path: path.into(),
             audio: true,
             looped: false,
             automation_only: true,
             ..Default::default()
         }),
     });
-    p.add_media_audio(id, format!("{} (built-in)", sample.name)).monitor = true;
+    p.add_media_audio(id, name).monitor = true;
     if p.preferences.monitor_device.is_empty() {
         p.preferences.monitor_device = crate::audio::DEFAULT_MONITOR.into();
     }
+    id
+}
+fn add_layers(p: &mut Project, id: Id, sound: bool, layer: bool) {
     // Sounds need a hidden layer to play; animations shown by Play media need a visible one.
-    let rect = if sample.sound { [0., 0., 0.001, 0.001] } else { [0.3, 0.2, 0.4, 0.6] };
-    if sample.sound || layer {
+    let rect = if sound { [0., 0., 0.001, 0.001] } else { [0.3, 0.2, 0.4, 0.6] };
+    if sound || layer {
         let scenes: Vec<Id> = p.canvases.iter().map(|c| c.scene).collect();
         for scene in p.scenes.iter_mut().filter(|s| scenes.contains(&s.id)) {
-            scene.layers.push(auroracast_core::Layer { frame: Default::default(), look: Default::default(), source: id, rect, visible: true, locked: sample.sound, opacity: if sample.sound { 0. } else { 1. }, crop: [0.; 4], group: 0 });
+            scene.layers.push(auroracast_core::Layer { frame: Default::default(), look: Default::default(), source: id, rect, visible: true, locked: sound, opacity: if sound { 0. } else { 1. }, crop: [0.; 4], group: 0 });
         }
     }
-    id
 }
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Bundle {
@@ -663,17 +693,23 @@ impl Editor {
         let before = serde_json::to_vec(&p.rules).unwrap_or_default();
         let mut changed = false;
         let mut cmds = Vec::new();
-        if let Some((id, rx)) = &self.picker
+        if let Some(((rule_id, step), rx)) = &self.picker
             && let Ok(path) = rx.try_recv()
         {
-            if let Some(path) = path
-                && let Some(s) = p.sources.iter_mut().find(|s| s.id == *id)
-                && let SourceKind::VideoFile(v) = &mut s.kind
-            {
-                v.path = path.to_string_lossy().into();
-                changed = true;
-            }
+            let (rule_id, step) = (*rule_id, *step);
             self.picker = None;
+            if let Some(path) = path
+                && let Some(r) = p.rules.iter().position(|r| r.id == rule_id)
+            {
+                // The step gets its own media for the chosen file, so scene layers using other media stay as they are.
+                let sound = matches!(p.rules[r].actions.get(step), Some(Action::PlaySound { .. }));
+                let name = path.file_name().map_or_else(|| "Media".into(), |n| n.to_string_lossy().into_owned());
+                let id = add_media_file(p, &path.to_string_lossy(), name, sound);
+                if let Some(Action::PlaySound { source } | Action::PlayMedia { source }) = p.rules[r].actions.get_mut(step) {
+                    *source = id;
+                    changed = true;
+                }
+            }
         }
         if self.selected >= p.rules.len() {
             self.selected = p.rules.len().saturating_sub(1);
@@ -1201,7 +1237,6 @@ impl Editor {
                     return;
                 }
                 ui.label("Add a step:");
-                let media = p.sources.iter().find(|s| matches!(s.kind, SourceKind::VideoFile(_))).map(|s| s.id).unwrap_or(0);
                 if let Some(alert_box) = p.sources.iter().find(|s| matches!(&s.kind, SourceKind::Widget(w) if w.kind == auroracast_core::widgets::Kind::AlertBox)).map(|s| s.id)
                     && ui.button("Show alert").clicked()
                 {
@@ -1211,10 +1246,10 @@ impl Editor {
                     r.actions.push(Action::ShowAlert { template: "Thanks, {user}!".into(), seconds: 5 });
                 }
                 if ui.button("Play sound").clicked() {
-                    r.actions.push(Action::PlaySound { source: media });
+                    r.actions.push(Action::PlaySound { source: 0 });
                 }
                 if ui.button("Play media").clicked() {
-                    r.actions.push(Action::PlayMedia { source: media });
+                    r.actions.push(Action::PlayMedia { source: 0 });
                 }
                 if ui.button("Send chat").clicked() {
                     let text = if r.event == EventKind::Timer { "Thanks for hanging out!" } else { "Thanks, {user}!" };
@@ -1318,28 +1353,36 @@ impl Editor {
             }
             Action::PlaySound { source } | Action::PlayMedia { source } => {
                 ui.horizontal_wrapped(|ui| {
-                    egui::ComboBox::from_id_salt(("media", i))
-                        .selected_text(media_name(sources, *source).unwrap_or_else(|| "Choose a file".into()))
-                        .show_ui(ui, |ui| {
-                            for s in sources.iter().filter(|s| matches!(s.kind, SourceKind::VideoFile(_))) {
-                                ui.selectable_value(source, s.id, &s.name);
-                            }
+                    // Just the file this step plays; choosing another gives the step its own media.
+                    let path = sources.iter().find(|s| s.id == *source).and_then(|s| match &s.kind {
+                        SourceKind::VideoFile(v) => Some(v.path.clone()),
+                        _ => None,
+                    });
+                    match &path {
+                        Some(path) => {
+                            let file = std::path::Path::new(path).file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
+                            ui.strong(file).on_hover_text(path);
+                        }
+                        None => {
+                            ui.weak("No file chosen");
+                        }
+                    }
+                    let choosing = self.picker.as_ref().is_some_and(|(key, _)| *key == (rule_id, i));
+                    if ui.add_enabled(!choosing, egui::Button::new(if path.is_some() { "Change file…" } else { "Choose file…" })).clicked() {
+                        let (tx, rx) = mpsc::channel();
+                        self.picker = Some(((rule_id, i), rx));
+                        std::thread::spawn(move || {
+                            let path = crate::desktop::pick(crate::desktop::Pick::Open, if sound { "Choose a sound" } else { "Choose a picture or video" }, "").unwrap_or_else(|e| {
+                                crate::capture_log::event(e.to_string());
+                                None
+                            });
+                            let _ = tx.send(path);
                         });
+                    }
                     if let Some(sample) = self.sample_menu(ui, sound) {
                         *sample_choice = Some((i, sample));
                     }
-                    if sources.iter().any(|s| s.id == *source) {
-                        if ui.button("Locate file…").clicked() {
-                            let (tx, rx) = mpsc::channel();
-                            self.picker = Some((*source, rx));
-                            std::thread::spawn(move || {
-                                let path = crate::desktop::pick(crate::desktop::Pick::Open, "Locate automation media", "").unwrap_or_else(|e| {
-                                    crate::capture_log::event(e.to_string());
-                                    None
-                                });
-                                let _ = tx.send(path);
-                            });
-                        }
+                    if path.is_some() {
                         if ui.button("Preview").clicked() {
                             cmds.push(Command::Preview(*source));
                         }
@@ -1445,7 +1488,7 @@ fn media_settings(ui: &mut egui::Ui, sources: &mut [auroracast_core::Source], id
     let Some(s) = sources.iter_mut().find(|s| s.id == id) else { return false };
     let SourceKind::VideoFile(v) = &mut s.kind else { return false };
     if !std::path::Path::new(&v.path).is_file() {
-        ui.colored_label(egui::Color32::LIGHT_RED, "Media file missing; use Locate file…");
+        ui.colored_label(egui::Color32::LIGHT_RED, "Media file missing; use Change file…");
     }
     ui.horizontal_wrapped(|ui| {
         changed |= ui.checkbox(&mut v.audio, "Play its sound").changed();

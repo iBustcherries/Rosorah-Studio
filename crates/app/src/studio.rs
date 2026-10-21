@@ -708,6 +708,8 @@ pub struct Studio {
     pop_out_panel: Option<Panel>,
     /// The tab being dragged, so a drop outside the main window can give it its own window.
     dragging_panel: Option<Panel>,
+    /// A floating panel window being dragged, with where it sat when the drag began.
+    dragging_window: Option<(Vec<Panel>, egui::Rect)>,
     last_recording: Option<PathBuf>,
     recording_error: String,
     recording_details: String,
@@ -727,6 +729,9 @@ pub struct Studio {
     demo: Option<Id>,
     /// `--page demo-add`: opens the Add dialog for a new scene.
     demo_add: bool,
+    /// `--page demo-drag`: drags the Sources tab partway across the window for screenshots,
+    /// with where its tab sits once drawn.
+    demo_drag: Option<Option<egui::Rect>>,
 }
 impl Studio {
     pub fn new(
@@ -742,6 +747,7 @@ impl Studio {
             None => (false, page),
         };
         let demo_add = demo && page == "add";
+        let demo_drag = (demo && page == "drag").then_some(None);
         let demo = demo.then(|| crate::demo::project(&mut project));
         project.prepare_workspace();
         if project.preferences.accent == [141, 101, 255] {
@@ -1132,6 +1138,7 @@ impl Studio {
             backup_status: String::new(),
             pop_out_panel: None,
             dragging_panel: None,
+            dragging_window: None,
             last_recording: None,
             recording_error: String::new(),
             recording_details: String::new(),
@@ -1147,6 +1154,7 @@ impl Studio {
             ui_frames: 0,
             demo,
             demo_add,
+            demo_drag,
         }
     }
     fn remember_capture_mode(&mut self, id: Id) {
@@ -5192,6 +5200,7 @@ impl Studio {
                 Some((_, i)) => {
                     let source = self.project.scenes[si].layers[i].source;
                     let name = self.project.source(source).map(|s| s.name.clone()).unwrap_or_default();
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
                     ui.label(RichText::new(&name).small().strong());
                     self.layer_menu(ui, si, i, &name, &mut dropped);
                 }
@@ -5261,6 +5270,9 @@ impl Studio {
         // The page itself stays clear so the backdrop shows in the gaps between docked panels.
         egui::CentralPanel::default().frame(egui::Frame::central_panel(&ctx.style()).fill(bg())).show(ctx, |ui| {
             self.workspace.remember_homes();
+            if let Some(origin) = ctx.input(|i| i.pointer.primary_pressed().then(|| i.pointer.press_origin()).flatten()) {
+                self.dragging_window = self.workspace.floating_at(origin);
+            }
             let mut dock =
                 std::mem::replace(&mut self.workspace.dock, egui_dock::DockState::new(vec![]));
             let mut style = egui_dock::Style::from_egui(ui.style());
@@ -5327,9 +5339,20 @@ impl Studio {
             });
             if released && let Some(panel) = self.dragging_panel.take() && outside {
                 self.workspace.pop_out(panel);
+            } else if released && let Some((panels, start)) = self.dragging_window.take() && outside {
+                // A floating panel stops at the window edge, so a drag that ends outside with the
+                // window moved (not resized) takes its panels out into their own windows.
+                let moved = panels.first().and_then(|p| self.workspace.floating_rect(*p))
+                    .is_some_and(|rect| rect.min != start.min && (rect.size() - start.size()).length() < 1.);
+                if moved {
+                    for panel in panels {
+                        self.workspace.pop_out(panel);
+                    }
+                }
             }
             if !ctx.input(|i| i.pointer.any_down()) {
                 self.dragging_panel = None;
+                self.dragging_window = None;
             }
             if let Some(panel) = self.toggle_panel.take() {
                 self.workspace.toggle_floating(panel, ui.max_rect());
@@ -6554,6 +6577,22 @@ mod local_chat_time_tests {
 }
 
 impl eframe::App for Studio {
+    fn raw_input_hook(&mut self, _: &egui::Context, input: &mut egui::RawInput) {
+        // `--page demo-drag`: press on the Sources tab, then carry it most of the way to the middle and hold.
+        let Some(Some(tab)) = self.demo_drag else { return };
+        let start = tab.center();
+        let toward = input.screen_rect.map_or(egui::vec2(-300., 150.), |r| (r.center() - start) * 0.8);
+        let pos = match self.ui_frames {
+            10 => start,
+            11 => {
+                input.events.push(egui::Event::PointerButton { pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+                return;
+            }
+            f @ 12..=24 => start + toward * ((f - 11) as f32 / 13.),
+            _ => return,
+        };
+        input.events.push(egui::Event::PointerMoved(pos));
+    }
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.ui_frames += 1;
         if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S))) {
@@ -7430,14 +7469,18 @@ impl egui_dock::TabViewer for StudioTabs<'_> {
         [false, false]
     }
     fn on_tab_button(&mut self, tab: &mut Panel, response: &egui::Response) {
-        if response.dragged() && *tab != Panel::Preview {
+        if *tab == Panel::Sources && let Some(rect @ None) = &mut self.0.demo_drag {
+            *rect = Some(response.rect);
+        }
+        // Noted on press: once the drag gets going, the dock hands us a stand-in that never reports dragging.
+        if (response.dragged() || response.is_pointer_button_down_on()) && *tab != Panel::Preview {
             self.0.dragging_panel = Some(*tab);
         }
         if response.double_clicked() {
             self.0.toggle_panel = Some(*tab);
         }
         response.clone().on_hover_cursor(grab_cursor()).on_hover_text(
-            "Drag toward an edge to snap. Drop in the center to group tabs. Drag past the window edge for its own window. Double-click to float or dock.",
+            "Drag toward an edge to snap. Drop in the center to group tabs. Drag past the window edge for its own window, or drag a floating panel there. Double-click to float or dock.",
         );
     }
     fn context_menu(

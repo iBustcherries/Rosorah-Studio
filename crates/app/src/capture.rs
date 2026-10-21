@@ -267,7 +267,13 @@ impl Captures {
         }
     }
     pub fn sync_videos(&mut self, project: &Project) {
-        for id in self.widgets.tick_alerts(project) {
+        // Only clips that end by themselves hold an alert; a looping scene video would hold it forever.
+        let engine = &self.engine;
+        let playing = |id| {
+            engine.running(id)
+                && project.source(id).is_some_and(|s| matches!(&s.kind, SourceKind::VideoFile(v) if v.automation_only || v.trigger.is_some()))
+        };
+        for id in self.widgets.tick_alerts(project, playing) {
             if self.videos.queued.get(&id).copied().unwrap_or(0) == 0 {
                 self.videos.trigger(id);
             }
@@ -519,6 +525,7 @@ impl Captures {
     fn launch(&mut self, id: Id, options: Options) {
         self.attempts.insert(id, std::time::Instant::now());
         let backend: Box<dyn Backend> = if options.target == Target::AutoFullscreen {
+            crate::recording::TRACED.store(id, std::sync::atomic::Ordering::Relaxed);
             Box::new(crate::renderer_capture::RendererBackend)
         } else {
             self.desktop_backend(id)
@@ -672,12 +679,14 @@ async fn run(
                 .property("do-timestamp", true)
                 .build()?;
             let (pipeline, sink) = pipeline(source)?;
+            let ready = frame_ready(&sink);
             let _playing = Playing(pipeline.clone());
             pipeline.set_state(gst::State::Playing)?;
             output.connecting();
             let bus = pipeline.bus().context("Missing capture message bus")?;
             let started = std::time::Instant::now();
             let mut received = false;
+            let mut trace = std::env::var_os("ROSORAH_CAPTURE_TRACE").map(|_| Trace::default());
             loop {
                 while let Some(msg) = bus.pop() {
                     match msg.view() {
@@ -689,14 +698,20 @@ async fn run(
                     }
                 }
                 if let Some(sample) = sink.try_pull_sample(gst::ClockTime::ZERO) {
+                    let work = std::time::Instant::now();
                     let frame = decode(&sample)?;
                     output.publish(frame)?;
                     received = true;
+                    if let Some(trace) = &mut trace {
+                        trace.frame(sample.buffer().and_then(|b| b.pts()), work.elapsed(), None);
+                    }
                 }
                 if !received && started.elapsed() > Duration::from_secs(15) {
                     bail!("No frames received from PipeWire; stop and choose the source again");
                 }
-                tokio::time::sleep(Duration::from_millis(1000 / u64::from(options.fps))).await;
+                // Wait for the next frame instead of sleeping a frame's length: the sleep plus the
+                // copy made each pass slower than the game, and the sink then dropped frames.
+                let _ = tokio::time::timeout(Duration::from_millis(100), ready.notified()).await;
             }
         };
         tokio::select! {
@@ -730,6 +745,62 @@ pub(crate) fn pipeline(source: gst::Element) -> Result<(gst::Pipeline, gst_app::
     pipeline.add_many([&source, &convert, &scale, sink.upcast_ref()])?;
     gst::Element::link_many([&source, &convert, &scale, sink.upcast_ref()])?;
     Ok((pipeline, sink))
+}
+/// `ROSORAH_CAPTURE_TRACE=1`: once a second, prints how many frames PipeWire delivered and any
+/// gap over 100 ms, with the gap in PipeWire's own arrival stamps, to tell its stalls from ours.
+#[derive(Default)]
+pub(crate) struct Trace {
+    second: Option<std::time::Instant>,
+    frames: u32,
+    /// Frames identical to the one before (sampled), i.e. the source itself repeated a picture.
+    repeats: u32,
+    sample: u64,
+    slowest: Duration,
+    longest_gap: Duration,
+    last: Option<(std::time::Instant, Option<gst::ClockTime>)>,
+}
+impl Trace {
+    pub(crate) fn frame(&mut self, pts: Option<gst::ClockTime>, work: Duration, sample: Option<u64>) {
+        let now = std::time::Instant::now();
+        if let Some((at, last_pts)) = self.last {
+            let gap = now - at;
+            self.longest_gap = self.longest_gap.max(gap);
+            if gap > Duration::from_millis(100) {
+                let stamped = pts.zip(last_pts).map(|(a, b)| a.saturating_sub(b).mseconds());
+                eprintln!("capture trace: no frame for {} ms (PipeWire stamps {} ms apart)", gap.as_millis(), stamped.map_or("?".into(), |m| m.to_string()));
+            }
+        }
+        self.last = Some((now, pts));
+        self.frames += 1;
+        if let Some(sample) = sample {
+            self.repeats += u32::from(sample == self.sample);
+            self.sample = sample;
+        }
+        self.slowest = self.slowest.max(work);
+        let second = *self.second.get_or_insert(now);
+        if now - second >= Duration::from_secs(1) {
+            eprintln!("capture trace: {} frames/s ({} repeated the previous picture), slowest copy {:.1} ms, longest wait {:.1} ms", self.frames, self.repeats, self.slowest.as_secs_f64() * 1000., self.longest_gap.as_secs_f64() * 1000.);
+            *self = Self { last: self.last, sample: self.sample, ..Self::default() };
+        }
+    }
+}
+/// A cheap fingerprint of a picture for the trace: every 4099th byte.
+pub(crate) fn fingerprint(rgba: &[u8]) -> u64 {
+    rgba.iter().step_by(4099).fold(0xcbf29ce484222325, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x100000001b3))
+}
+/// Wakes the capture loop as soon as the sink has a new frame.
+fn frame_ready(sink: &gst_app::AppSink) -> std::sync::Arc<tokio::sync::Notify> {
+    let ready = std::sync::Arc::new(tokio::sync::Notify::new());
+    let notify = ready.clone();
+    sink.set_callbacks(
+        gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |_| {
+                notify.notify_one();
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build(),
+    );
+    ready
 }
 pub(crate) fn decode(sample: &gst::Sample) -> Result<Frame> {
     let info = gst_video::VideoInfo::from_caps(sample.caps().context("Frame has no caps")?)?;
@@ -884,6 +955,39 @@ mod widget_tests {
     }
 }
 
+#[cfg(all(test, not(windows)))]
+mod frame_pacing_tests {
+    use super::*;
+    /// A 60 fps source must reach the studio at 60 fps; the old sleep-then-poll loop lost about
+    /// one frame in six because the sink keeps only the newest frame.
+    #[test]
+    fn capture_loop_keeps_every_frame_of_a_60_fps_source() -> Result<()> {
+        gst::init()?;
+        let source = gst::parse::bin_from_description(
+            "videotestsrc is-live=true pattern=ball ! capsfilter caps=video/x-raw,width=1920,height=1080,framerate=60/1",
+            true,
+        )?;
+        let (pipeline, sink) = pipeline(source.upcast())?;
+        let ready = frame_ready(&sink);
+        let _playing = Playing(pipeline.clone());
+        pipeline.set_state(gst::State::Playing)?;
+        let frames = tokio::runtime::Builder::new_current_thread().enable_all().build()?.block_on(async {
+            let mut frames = 0;
+            let mut first = None;
+            while first.is_none_or(|t: std::time::Instant| t.elapsed() < Duration::from_secs(2)) {
+                if let Some(sample) = sink.try_pull_sample(gst::ClockTime::ZERO) {
+                    decode(&sample)?;
+                    first.get_or_insert_with(std::time::Instant::now);
+                    frames += 1;
+                }
+                let _ = tokio::time::timeout(Duration::from_millis(100), ready.notified()).await;
+            }
+            anyhow::Ok(frames)
+        })?;
+        assert!(frames >= 114, "{frames} frames in 2 s from a 60 fps source");
+        Ok(())
+    }
+}
 #[cfg(not(windows))]
 fn parse_xid(text:&str)->Result<u64>{let line=text.lines().find(|l|l.contains("Window id:")).context("No X11 window selected")?;let value=line.split("Window id:").nth(1).unwrap_or("").split_whitespace().next().context("Missing X11 window ID")?;let id=value.strip_prefix("0x").map_or_else(||value.parse(),|v|u64::from_str_radix(v,16))?;anyhow::ensure!(id!=0,"Invalid X11 window ID");Ok(id)}
 #[cfg(not(windows))]
@@ -901,9 +1005,9 @@ async fn run_x11(output:&Producer,cancel:&mut watch::Receiver<bool>,options:Opti
   if options.target==Target::Window{let root=x11_info(&["-root","-int"],cancel,5).await?;if *cancel.borrow(){return Ok(())}anyhow::ensure!(id!=parse_xid(&root)?,"The desktop was selected. Choose Screen capture to share the entire desktop, or select a window.");}id
  };
  let source=gst::ElementFactory::make("ximagesrc").property("xid",xid).property("show-pointer",options.cursor).property("use-damage",false).property("do-timestamp",true).build()?;
- let (pipeline,sink)=pipeline(source)?;sink.set_caps(Some(&gst::Caps::builder("video/x-raw").field("format","RGBA").field("width",gst::IntRange::<i32>::new(1,4096)).field("height",gst::IntRange::<i32>::new(1,4096)).field("framerate",gst::Fraction::new(options.fps.clamp(1,240)as i32,1)).build()));let _playing=Playing(pipeline.clone());pipeline.set_state(gst::State::Playing)?;output.connecting();crate::capture_log::event("Using explicit X11 capture fallback");let bus=pipeline.bus().context("Missing X11 capture message bus")?;let started=std::time::Instant::now();let mut received=false;
+ let (pipeline,sink)=pipeline(source)?;let ready=frame_ready(&sink);sink.set_caps(Some(&gst::Caps::builder("video/x-raw").field("format","RGBA").field("width",gst::IntRange::<i32>::new(1,4096)).field("height",gst::IntRange::<i32>::new(1,4096)).field("framerate",gst::Fraction::new(options.fps.clamp(1,240)as i32,1)).build()));let _playing=Playing(pipeline.clone());pipeline.set_state(gst::State::Playing)?;output.connecting();crate::capture_log::event("Using explicit X11 capture fallback");let bus=pipeline.bus().context("Missing X11 capture message bus")?;let started=std::time::Instant::now();let mut received=false;
  loop{if *cancel.borrow(){break}while let Some(msg)=bus.pop(){match msg.view(){gst::MessageView::Error(e)=>bail!("X11 capture: {}",e.error()),gst::MessageView::Eos(_)=>bail!("Selected X11 window closed"),_=>()}}
- if let Some(sample)=sink.try_pull_sample(gst::ClockTime::ZERO){output.publish(decode(&sample)?)?;received=true;}anyhow::ensure!(received||started.elapsed()<Duration::from_secs(15),"No frames received from the selected X11 source");tokio::time::sleep(Duration::from_millis(1000/u64::from(options.fps.max(1)))).await;}Ok(())
+ if let Some(sample)=sink.try_pull_sample(gst::ClockTime::ZERO){output.publish(decode(&sample)?)?;received=true;}anyhow::ensure!(received||started.elapsed()<Duration::from_secs(15),"No frames received from the selected X11 source");let _=tokio::time::timeout(Duration::from_millis(100),ready.notified()).await;}Ok(())
 }
 #[cfg(all(test, not(windows)))]mod x11_tests{use super::*;#[test]fn accepts_decimal_and_hex_window_ids(){assert_eq!(parse_xid("xwininfo: Window id: 12345 title").unwrap(),12345);assert_eq!(parse_xid("xwininfo: Window id: 0x20 title").unwrap(),32);assert!(parse_xid("bad output").is_err());assert!(parse_xid("Window id: 0").is_err());}}
 

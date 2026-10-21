@@ -28,6 +28,9 @@ impl Studio {
     }
     /// The one layer menu, shared by right-click and the row's "..." button.
     fn layer_menu(&mut self, ui: &mut egui::Ui, si: usize, i: usize, name: &str, dropped: &mut Option<(usize, usize)>) {
+        // A menu keeps the width it first opened with (on the canvas that can be the small Paste
+        // menu); unwrapped labels make it grow to fit instead of wrapping every word.
+        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
         let active = self.project.scenes[si].id;
         let count = self.project.scenes[si].layers.len();
         let source_id = self.project.scenes[si].layers[i].source;
@@ -548,6 +551,15 @@ impl Studio {
         ui.collapsing("Capture details", |ui| {
             ui.label(crate::renderer_capture::installation_status());
             ui.label(crate::launch_hook::status());
+            #[cfg(not(windows))]
+            if !crate::launch_hook::active()
+                && ui
+                    .button("Turn on OpenGL launch activation (experimental)")
+                    .on_hover_text("Only for OpenGL games. It attaches to games as Steam starts them, which can stop some from launching.")
+                    .clicked()
+            {
+                crate::launch_hook::enable();
+            }
             if crate::launch_hook::needs_permission()
                 && ui.button("Allow OpenGL activation without restarting Steam").clicked()
             {
@@ -612,5 +624,55 @@ impl Studio {
         self.selections.insert(self.project.scenes[si].id, vec![index]);
         self.changed();
         id
+    }
+}
+#[cfg(test)]
+mod tests {
+    use eframe::egui;
+    /// The canvas menu first opened as the small Paste menu used to keep that width, wrapping the
+    /// layer menu one word per line.
+    fn menu_width(extend: bool) -> f32 {
+        let ctx = egui::Context::default();
+        let pos = egui::pos2(100., 100.);
+        let mut width = 0f32;
+        let mut frame = |events: Vec<egui::Event>, long: bool, width: &mut f32| {
+            let input = egui::RawInput { events, screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800., 600.))), ..Default::default() };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let response = ui.allocate_rect(egui::Rect::from_min_size(egui::pos2(50., 50.), egui::vec2(200., 200.)), egui::Sense::click());
+                    response.context_menu(|ui| {
+                        if long {
+                            if extend {
+                                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+                            }
+                            let _ = ui.button("Restore source proportions");
+                            *width = width.max(ui.min_rect().width());
+                        } else {
+                            let _ = ui.button("Paste");
+                        }
+                    });
+                });
+            });
+        };
+        let click = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() };
+        let escape = egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() };
+        for long in [false, true] {
+            frame(vec![egui::Event::PointerMoved(pos)], long, &mut width);
+            frame(vec![click(true)], long, &mut width);
+            frame(vec![click(false)], long, &mut width);
+            for _ in 0..4 {
+                frame(vec![], long, &mut width);
+            }
+            if !long {
+                frame(vec![escape.clone()], long, &mut width);
+                frame(vec![], long, &mut width);
+            }
+        }
+        width
+    }
+    #[test]
+    fn layer_menu_grows_past_an_earlier_narrow_menu() {
+        assert!(menu_width(false) < 120., "the wrapping this guards against still happens without the fix");
+        assert!(menu_width(true) > 150., "the menu fits its longest item");
     }
 }

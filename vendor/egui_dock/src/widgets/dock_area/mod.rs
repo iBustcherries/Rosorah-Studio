@@ -41,6 +41,8 @@ pub struct DockArea<'tree, Tab> {
     to_detach: Vec<(SurfaceIndex, NodeIndex, TabIndex)>,
     new_focused: Option<(SurfaceIndex, NodeIndex)>,
     tab_hover_rect: Option<(Rect, TabIndex)>,
+    /// The leaf whose open tab is being carried this frame; its body shows a placeholder.
+    ghosted_leaf: Option<(SurfaceIndex, NodeIndex)>,
 }
 
 // Builder
@@ -63,6 +65,7 @@ impl<'tree, Tab> DockArea<'tree, Tab> {
             to_detach: Vec::new(),
             new_focused: None,
             tab_hover_rect: None,
+            ghosted_leaf: None,
             window_bounds: None,
             show_window_close_buttons: true,
             show_window_collapse_buttons: true,

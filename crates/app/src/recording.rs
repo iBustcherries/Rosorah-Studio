@@ -118,6 +118,14 @@ impl Shared {
         !self.abort.load(Ordering::Relaxed)
     }
 }
+/// Pictures the writer queue holds. Every picture waits `LEAD` before it's written, so the queue
+/// must hold that many frames and a few spare; sized by memory alone it held 3 at 1080p60, and
+/// the oldest were thrown away before their turn, repeating a frame and skipping the next.
+fn video_capacity(canvas: &Canvas) -> usize {
+    let in_lead = units_up(LEAD, u64::from(canvas.fps.max(1))) as usize;
+    let by_memory = 32 * 1024 * 1024 / (canvas.width as usize * canvas.height as usize * 4).max(1);
+    by_memory.max(in_lead + 3).clamp(2, 16)
+}
 fn units(at: Duration, rate: u64) -> u64 {
     (at.as_nanos() * rate as u128 / 1_000_000_000) as u64
 }
@@ -376,9 +384,7 @@ impl Recording {
             } else {
                 2
             },
-            video_capacity: (32 * 1024 * 1024
-                / (canvas.width as usize * canvas.height as usize * 4))
-                .clamp(2, 8),
+            video_capacity: video_capacity(&canvas),
         });
         let project = Arc::new(Mutex::new((0, project.clone())));
         let (s, p, c) = (shared.clone(), project.clone(), canvas.clone());
@@ -461,12 +467,15 @@ fn video_writer(s: Arc<Shared>, mut pipe: impl Write, first: Arc<Vec<u8>>) -> Re
         if s.video_limit().is_some_and(|n| index >= n) {
             break;
         }
+        let mut taken = 0;
         {
             let mut queue = s.video.lock().unwrap();
             while queue.front().is_some_and(|v| v.at <= at) {
                 last = queue.pop_front().unwrap().data;
+                taken += 1;
             }
         }
+        trace_writes(taken);
         pipe.write_all(&last)
             .context("Video encoder stopped accepting frames")?;
         index += 1;
@@ -559,6 +568,8 @@ fn upload_frames(
     previous: &mut BTreeMap<Id, Option<Arc<Frame>>>,
 ) -> Result<()> {
     previous.retain(|id, _| used.contains(id));
+    let mut fresh = 0;
+    let mut stale = 0;
     for (id, current) in frames.into_iter().filter(|(id, _)| used.contains(id)) {
         let same = match (previous.get(&id), &current) {
             (Some(Some(a)), Some(b)) => Arc::ptr_eq(a, b),
@@ -566,6 +577,7 @@ fn upload_frames(
             _ => false,
         };
         if same {
+            stale += u32::from(id == TRACED.load(Ordering::Relaxed));
             continue;
         }
         match &current {
@@ -573,8 +585,47 @@ fn upload_frames(
             None => gpu.upload(id, 1, 1, &[0, 0, 0, 0])?,
         }
         previous.insert(id, current);
+        fresh += 1;
     }
+    trace_ticks(fresh, stale);
     Ok(())
+}
+/// The capture the trace follows: the game capture (set when it publishes a frame).
+pub(crate) static TRACED: AtomicU64 = AtomicU64::new(0);
+/// `ROSORAH_CAPTURE_TRACE=1`: once a second, frames written again for want of a new picture,
+/// and pictures dropped because two arrived for one frame.
+fn trace_writes(taken: u32) {
+    static TRACE: std::sync::Mutex<Option<(Instant, u32, u32, u32)>> = std::sync::Mutex::new(None);
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("ROSORAH_CAPTURE_TRACE").is_some()) {
+        return;
+    }
+    let mut trace = TRACE.lock().unwrap();
+    let (since, written, repeated, dropped) = trace.get_or_insert((Instant::now(), 0, 0, 0));
+    *written += 1;
+    *repeated += u32::from(taken == 0);
+    *dropped += taken.saturating_sub(1);
+    if since.elapsed() >= Duration::from_secs(1) {
+        eprintln!("writer trace: {written} frames written, {repeated} repeated, {dropped} pictures dropped");
+        *trace = None;
+    }
+}
+/// `ROSORAH_CAPTURE_TRACE=1`: once a second, how many output ticks had a new capture frame.
+fn trace_ticks(fresh: u32, stale: u32) {
+    static TRACE: std::sync::Mutex<Option<(Instant, u32, u32, u32)>> = std::sync::Mutex::new(None);
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("ROSORAH_CAPTURE_TRACE").is_some()) {
+        return;
+    }
+    let mut trace = TRACE.lock().unwrap();
+    let (since, ticks, with_new, game_stale) = trace.get_or_insert((Instant::now(), 0, 0, 0));
+    *ticks += 1;
+    *with_new += u32::from(fresh > 0);
+    *game_stale += stale;
+    if since.elapsed() >= Duration::from_secs(1) {
+        eprintln!("output trace: {ticks} ticks/s, {with_new} with a new capture frame, {game_stale} reusing the game's previous frame");
+        *trace = None;
+    }
 }
 fn run(
     s: &Arc<Shared>,
@@ -797,6 +848,14 @@ fn run_windows_camera(s: &Arc<Shared>, project: Arc<Mutex<(u64, Project)>>, canv
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn writer_queue_holds_every_picture_waiting_out_the_lead() {
+        for (width, height, fps) in [(1920, 1080, 60), (2560, 1440, 60), (1080, 1920, 60), (3840, 2160, 120), (1280, 720, 30)] {
+            let canvas = Canvas { id: 1, name: String::new(), width, height, fps, scene: 1 };
+            let waiting = units_up(LEAD, u64::from(fps)) as usize;
+            assert!(video_capacity(&canvas) > waiting, "{width}x{height}@{fps}");
+        }
+    }
     use encoding::Codecs;
     use std::process::Command;
     #[test]
@@ -894,6 +953,41 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         output.stdout
+    }
+    #[test]
+    #[ignore = "Requires FFmpeg/ffprobe and Vulkan; exercises the real background compositor and muxer"]
+    fn a_180_fps_capture_records_a_new_picture_in_every_1080p60_frame() -> Result<()> {
+        let folder = output_dir();
+        let mut project = Project::default();
+        project.sources[0].kind = auroracast_core::SourceKind::ScreenCapture;
+        project.scenes[0].layers.retain(|l| l.source == 1);
+        (project.canvases[0].width, project.canvases[0].height, project.canvases[0].fps) = (1920, 1080, 60);
+        let mut engine = rosorah_capture::Engine::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        engine.start(1, Box::new(Controlled(tx)), rosorah_capture::Options::default())?;
+        let source = rx.recv_timeout(Duration::from_secs(2))?;
+        // Eight grey levels far apart, stepping one level per captured frame like a 180 fps game.
+        let level = |n: u64| (16 + (n % 8) * 30) as u8;
+        source.publish(Frame { width: 1, height: 1, rgba: vec![level(0), level(0), level(0), 255] })?;
+        let recording = Recording::start(&project, 0, engine.reader(), &folder)?;
+        let start = wait_ready(&recording);
+        let mut n = 0;
+        while start.elapsed() < Duration::from_secs(4) {
+            n += 1;
+            let v = level(n);
+            // Full-size frames, as a game capture delivers them.
+            source.publish(Frame { width: 1920, height: 1080, rgba: [v, v, v, 255].repeat(1920 * 1080) })?;
+            let _ = engine.drain();
+            thread::sleep(Duration::from_micros(5555));
+        }
+        let path = finish(&recording);
+        engine.stop(1);
+        let pixels = ffmpeg_decode(&path, &["-map", "0:v:0", "-vf", "scale=1:1", "-fps_mode", "passthrough", "-pix_fmt", "gray", "-f", "rawvideo", "pipe:1"]);
+        // Skip the first half second while the pipeline settles.
+        let levels: Vec<u64> = pixels[30..].iter().map(|&p| (u64::from(p).saturating_sub(1) / 30).min(7)).collect();
+        let repeats = levels.windows(2).filter(|w| w[0] == w[1]).count();
+        assert!(repeats * 100 <= levels.len(), "{repeats} of {} recorded frames repeated the one before", levels.len());
+        Ok(())
     }
     #[test]
     #[ignore = "Requires FFmpeg/ffprobe and Vulkan; exercises the real background compositor and muxer"]

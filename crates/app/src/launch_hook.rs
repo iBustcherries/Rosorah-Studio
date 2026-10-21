@@ -1,5 +1,6 @@
 //! Experimental Steam launch observer; the capture receiver remains independent.
-//! Permission prompts are initiated only by the explicit in-app button.
+//! Off until turned on in Capture details (or `ROSORAH_LAUNCH_WATCH=1`): attaching to Steam's
+//! launches stalled Proton games. Permission prompts come only from the explicit in-app button.
 use std::{
     fs,
     io::{BufRead, BufReader},
@@ -17,8 +18,11 @@ struct State {
     elevated: bool,
     requesting: bool,
     generation: u64,
+    /// The observer has been turned on this session.
+    on: bool,
 }
 enum Request {
+    Start,
     Elevate,
     Stop,
 }
@@ -33,6 +37,16 @@ pub fn status() -> String {
         .get()
         .map(|c| c.state.lock().unwrap().message.clone())
         .unwrap_or_else(|| "OpenGL launch activation has not started.".into())
+}
+/// Whether the observer was turned on this session.
+pub fn active() -> bool {
+    CONTROL.get().is_some_and(|c| c.state.lock().unwrap().on)
+}
+/// Turns the observer on for this session.
+pub fn enable() {
+    if let Some(c) = CONTROL.get() {
+        let _ = c.sender.send(Request::Start);
+    }
 }
 pub fn needs_permission() -> bool {
     CONTROL.get().is_some_and(|c| {
@@ -111,6 +125,7 @@ fn spawn(elevated: bool, state: &Arc<Mutex<State>>) -> Option<Child> {
     let generation = {
         let mut s = state.lock().unwrap();
         s.generation += 1;
+        s.on = true;
         s.elevated = elevated;
         s.blocked = false;
         s.requesting = false;
@@ -201,7 +216,7 @@ impl Guard {
     pub fn start() -> Self {
         let (sender, receiver) = mpsc::channel();
         let state = Arc::new(Mutex::new(State {
-            message: "Starting OpenGL launch activation (experimental)…".into(),
+            message: "OpenGL launch activation is off. Vulkan games, including Proton games, are captured without it.".into(),
             ..State::default()
         }));
         if CONTROL
@@ -221,12 +236,17 @@ impl Guard {
             return Self { thread: None };
         }
         let handle = thread::spawn(move || {
-            let mut child = spawn(false, &state);
+            let mut child = std::env::var_os("ROSORAH_LAUNCH_WATCH").and_then(|_| spawn(false, &state));
             loop {
                 match receiver.recv_timeout(Duration::from_millis(250)) {
                     Ok(Request::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                         stop(&mut child);
                         break;
+                    }
+                    Ok(Request::Start) => {
+                        if child.is_none() {
+                            child = spawn(false, &state);
+                        }
                     }
                     Ok(Request::Elevate) => {
                         if stop(&mut child) {

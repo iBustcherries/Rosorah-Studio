@@ -33,6 +33,12 @@ inline uint64_t now_ns() {
     timespec t{}; clock_gettime(CLOCK_MONOTONIC, &t);
     return uint64_t(t.tv_sec)*1000000000ull+uint64_t(t.tv_nsec);
 }
+// Capture pacing on the game's presents. A present up to half an interval early counts as on
+// time: a game presenting at the capture rate jitters around each deadline, and skipping the
+// early ones turned 60 fps into a mix of 60 and 30.
+inline bool capture_due(uint64_t now,uint64_t next,uint64_t interval){return now+interval/2>=next;}
+// The deadline after a capture at `now`; the grid restarts only after falling a whole interval behind.
+inline uint64_t following_capture(uint64_t now,uint64_t next,uint64_t interval){return now>=next+interval?now+interval:next+interval;}
 struct Header {
     uint32_t magic=MAGIC, version=VERSION, width=0, height=0;
     uint32_t format=1, pid=0, flags=0, reserved=0;
@@ -125,9 +131,10 @@ public:
     }
     bool publish(const void* pixels,uint64_t captured_at) {
         if(!rate || fd<0 || !pixels || !header.width || !header.height || header.width>4096 || header.height>4096)return false;
-        // Reader reopens its received memfd to get an independent flock owner.
-        // Contention drops a frame; neither game nor receiver ever waits for it.
-        if(flock(fd,LOCK_EX|LOCK_NB)!=0)return false;
+        // Reader reopens its received memfd to get an independent flock owner. The studio holds
+        // the lock only while copying a frame out, so this worker thread (never the game's)
+        // waits up to 4 ms for it; dropping at once lost frames whenever the two met.
+        for(int tries=0;flock(fd,LOCK_EX|LOCK_NB)!=0;tries++){if(tries==16)return false;usleep(250);}
         header.sequence++;header.timestamp=captured_at;
         memcpy(static_cast<char*>(mapped)+sizeof(header),pixels,size_t(header.width)*header.height*4);
         memcpy(mapped,&header,sizeof(header));

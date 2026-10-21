@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <vector>
 #include <thread>
+#include <tuple>
 int main(int argc,char** argv) {
     if(argc==3 && std::string(argv[1])=="--produce") {
         rosorah::Mailbox producer(argv[2]);producer.configure(2,1,true);
@@ -56,5 +57,16 @@ int main(int argc,char** argv) {
     assert(pread(memory,copied,sizeof(copied),sizeof(header))==sizeof(copied) && copied[0]==999);
     close(client);assert(producer.service()==0);
     close(memory);close(server);unlink(path.c_str());rmdir(root);
+    // Pacing: a game presenting at the capture rate with jitter keeps every frame; a faster one is
+    // thinned to the capture rate.
+    for(auto [present_hz,jitter_ns,expected]:{std::tuple{60.,1500000.,600},std::tuple{144.,300000.,600},std::tuple{30.,1000000.,300}}) {
+        const uint64_t interval=1000000000ull/60;uint64_t next=0;int captured=0;uint32_t seed=1;
+        for(int i=0;i<int(present_hz*10);i++) {
+            seed=seed*1103515245u+12345u;
+            const uint64_t now=uint64_t(1e9+i*1e9/present_hz+(double(seed>>16)/65535.-0.5)*2*jitter_ns);
+            if(rosorah::capture_due(now,next,interval)){captured++;next=rosorah::following_capture(now,next,interval);}
+        }
+        if(std::abs(captured-expected)>3){fprintf(stderr,"pacing at %.0f Hz captured %d of %d\n",present_hz,captured,expected);return 1;}
+    }
     puts("PASS: descriptor passing, anonymous sealed memory, independent locks, drop on contention, latest-frame coalescing, studio disconnect");
 }

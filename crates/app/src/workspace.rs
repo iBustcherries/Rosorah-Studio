@@ -275,6 +275,26 @@ impl Workspace {
         }
         self.windows.push(panel);
     }
+    /// The floating panel window under `pos`: its panels and where it sits.
+    pub fn floating_at(&self, pos: eframe::egui::Pos2) -> Option<(Vec<Panel>, eframe::egui::Rect)> {
+        self.dock
+            .iter_surfaces()
+            .filter_map(|surface| match surface {
+                egui_dock::Surface::Window(tree, _) => Some((tree, floating_area(tree)?)),
+                _ => None,
+            })
+            .filter(|(_, rect)| rect.contains(pos))
+            .last()
+            .map(|(tree, rect)| (tree.iter().filter_map(|node| node.tabs()).flatten().copied().collect(), rect))
+    }
+    /// Where the floating window holding `panel` sits now.
+    pub fn floating_rect(&self, panel: Panel) -> Option<eframe::egui::Rect> {
+        let (surface, _, _) = self.dock.find_tab(&panel)?;
+        match self.dock.get_surface(surface)? {
+            egui_dock::Surface::Window(tree, _) => floating_area(tree),
+            _ => None,
+        }
+    }
     /// Returns a panel from its own window to where it last sat in the workspace.
     pub fn dock_window(&mut self, panel: Panel) {
         if !self.windows.contains(&panel) {
@@ -441,6 +461,11 @@ impl Workspace {
         }
         Ok(())
     }
+}
+/// Where a floating panel window was last drawn. The dock doesn't record the window's own
+/// rectangle, so this is the area of the panels inside it.
+fn floating_area(tree: &egui_dock::Tree<Panel>) -> Option<eframe::egui::Rect> {
+    tree.root_node().and_then(|node| node.rect()).filter(|rect| rect.is_finite() && rect.is_positive())
 }
 #[cfg(test)]
 mod tests {

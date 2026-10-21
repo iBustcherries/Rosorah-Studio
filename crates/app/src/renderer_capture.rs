@@ -12,7 +12,10 @@ use std::{
         },
     },
     path::PathBuf,
-    sync::{Arc, Mutex, OnceLock, Weak},
+    sync::{
+        Arc, Condvar, Mutex, OnceLock, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::watch;
@@ -159,6 +162,8 @@ struct Header {
     hdr: bool,
     bits32: bool,
     sequence: u64,
+    /// When the game captured the frame (monotonic nanoseconds).
+    timestamp: u64,
     name: String,
 }
 fn parse_header(bytes: &[u8], now: u64) -> Option<Header> {
@@ -192,6 +197,7 @@ fn parse_header(bytes: &[u8], now: u64) -> Option<Header> {
         hdr: u32at(24) & 4 != 0,
         bits32: u32at(24) & 8 != 0,
         sequence: u64at(32),
+        timestamp,
         name: String::from_utf8_lossy(&bytes[48..48 + end])
             .chars()
             .filter(|c| !c.is_control())
@@ -237,11 +243,11 @@ fn read_frame(file: &File, previous: u64) -> Result<Option<(Header, Frame)>> {
     file.read_exact_at(&mut rgba, HEADER as u64)?;
     // Release the mailbox before conversion, minimizing producer contention.
     drop(_guard);
+    // Whole pixels at a time; a byte-wise swap took several milliseconds per 1080p frame.
     for pixel in rgba.as_chunks_mut::<4>().0 {
-        if header.bgra {
-            pixel.swap(0, 2);
-        }
-        pixel[3] = 255;
+        let v = u32::from_le_bytes(*pixel);
+        let v = if header.bgra { (v & 0x0000_ff00) | ((v >> 16) & 0xff) | ((v & 0xff) << 16) } else { v & 0x00ff_ffff };
+        *pixel = (v | 0xff00_0000).to_le_bytes();
     }
     let frame = Frame {
         width: header.width,
@@ -322,22 +328,22 @@ struct Server {
     game: Option<GameProcess>,
     generation: u64,
     disconnected: Option<Instant>,
+    /// `ROSORAH_CAPTURE_TRACE=1`: frame timing for game capture.
+    trace: Option<crate::capture::Trace>,
 }
 impl Server {
-    fn pump(&mut self, fps: u32, resolution: u32) {
-        let mut poll: Vec<libc::pollfd> = std::iter::once(self.listener.as_raw_fd())
+    /// The sockets to wait on before the next `pump`.
+    fn poll_fds(&self) -> Vec<libc::pollfd> {
+        std::iter::once(self.listener.as_raw_fd())
             .chain(self.clients.iter().map(|c| c.socket.as_raw_fd()))
             .map(|fd| libc::pollfd {
                 fd,
                 events: libc::POLLIN,
                 revents: 0,
             })
-            .collect();
-        // Notifications wake immediately; the short timeout serves cancellation
-        // and a retry if the producer owned the mailbox at the notification.
-        unsafe {
-            libc::poll(poll.as_mut_ptr(), poll.len() as libc::nfds_t, 10);
-        }
+            .collect()
+    }
+    fn pump(&mut self, fps: u32, resolution: u32) {
         for _ in 0..16 {
             let raw = unsafe {
                 libc::accept4(
@@ -382,6 +388,9 @@ impl Server {
         if next_selected != self.selected || next_selected.is_none() {
             self.game = None;
         }
+        if self.trace.is_some() && next_selected != self.selected {
+            eprintln!("capture trace: game capture switched source ({} connected)", self.clients.len());
+        }
         self.selected = next_selected;
         for (i, client) in self.clients.iter_mut().enumerate() {
             if client.memory.is_none() {
@@ -401,8 +410,12 @@ impl Server {
             if Some(i) != selected || !client.notified {
                 continue;
             }
+            let work = Instant::now();
             match read_frame(client.memory.as_ref().unwrap(), client.sequence) {
                 Ok(Some((header, frame))) => {
+                    if let Some(trace) = &mut self.trace {
+                        trace.frame(Some(gst::ClockTime::from_nseconds(header.timestamp)), work.elapsed(), Some(crate::capture::fingerprint(&frame.rgba)));
+                    }
                     if client.sequence == 0 {
                         crate::capture_log::event(format!(
                             "{} connected: {} (PID {}) {}x{} · {}-bit{} · shared memory",
@@ -441,6 +454,12 @@ impl Server {
 struct Lease {
     path: PathBuf,
     server: Mutex<Server>,
+    /// Signalled after every pump, so each game capture source publishes a new frame at once.
+    pumped: Condvar,
+    /// One source's thread waits for the game at a time, without holding `server`; while it
+    /// held the lock through its wait, three game layers in a scene took turns and each got
+    /// its frames late and in bursts.
+    pumping: AtomicBool,
     _owner: File,
 }
 impl Drop for Lease {
@@ -525,6 +544,8 @@ impl Lease {
         }
         Ok(Self {
             path,
+            pumped: Condvar::new(),
+            pumping: AtomicBool::new(false),
             _owner: owner,
             server: Mutex::new(Server {
                 listener,
@@ -534,6 +555,7 @@ impl Lease {
                 game: None,
                 generation: 0,
                 disconnected: None,
+                trace: std::env::var_os("ROSORAH_CAPTURE_TRACE").map(|_| Default::default()),
             }),
         })
     }
@@ -567,9 +589,24 @@ impl Backend for RendererBackend {
         let mut generation = 0;
         output.waiting(installation_status());
         while !*cancel.borrow() {
+            if !lease.pumping.swap(true, Ordering::AcqRel) {
+                let mut poll = lease.server.lock().unwrap().poll_fds();
+                // Notifications wake immediately; the short timeout serves cancellation
+                // and a retry if the producer owned the mailbox at the notification.
+                unsafe {
+                    libc::poll(poll.as_mut_ptr(), poll.len() as libc::nfds_t, 10);
+                }
+                lease.server.lock().unwrap().pump(options.fps, options.resolution);
+                lease.pumping.store(false, Ordering::Release);
+                lease.pumped.notify_all();
+            } else {
+                let server = lease.server.lock().unwrap();
+                if server.generation == generation {
+                    let _ = lease.pumped.wait_timeout(server, Duration::from_millis(20)).unwrap();
+                }
+            }
             let update = {
-                let mut server = lease.server.lock().unwrap();
-                server.pump(options.fps, options.resolution);
+                let server = lease.server.lock().unwrap();
                 output.game(server.game.clone());
                 if server.generation == generation {
                     None
@@ -695,6 +732,7 @@ mod tests {
                 hdr: false,
                 bits32: false,
                 sequence: 0,
+                timestamp: 0,
                 name: "test".into(),
             }),
             sequence: 0,

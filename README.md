@@ -9,7 +9,18 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
 **[Download the latest release](https://github.com/iBustcherries/RosorahStudio-releases/releases/latest)**
 · Windows 10/11 installer, Fedora `.rpm`, Ubuntu/Debian `.deb`
 
-## What's new in 0.40.0
+## What's new in 0.41.0
+
+- **Smoother game capture:** every frame of your stream and recording now gets a new game frame.
+  Before, a 60 fps game could look closer to 30 fps.
+- **Moving panels:** dragging a panel carries the whole panel under the pointer, and its old spot
+  stays reserved until you let go. Drag a panel past the window edge to give it its own window.
+- **Play media and Play sound steps** show just the file they play, and clips longer than 10 seconds
+  play to the end.
+- Games no longer fail to launch while Rosorah is open, and right-click menus on the canvas are
+  no longer squashed into a narrow column.
+
+## 0.40.0
 
 - **Read paid messages aloud:** Super Chats, donations, cheers and Kicks spoken in a natural voice
   that runs on your computer, with its own mixer strip.
@@ -19,16 +30,6 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
   scenes with live previews.
 - **Chat widget:** well-known bots are hidden, and you can hide any chatter. Right-click their message
   and choose **Hide from chat widgets**.
-
-## 0.39.0
-
-- **Chat widget:** messages slide and fade in, and out when they're set to disappear. Chatters'
-  profile pictures, badges (moderator, VIP, subscriber…) and their own name colours show beside
-  each message. Paid messages, first-time chatters and highlighted messages stand out.
-- **Alerts:** themed alert cards with the event, the viewer's picture and your message. They pop
-  in and fade away.
-- **More than one alert box:** one shared box shows everything by default; send any alert to a box
-  of its own with **Show in → New alert box…**.
 
 ## Screenshots
 

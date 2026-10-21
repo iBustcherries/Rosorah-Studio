@@ -248,11 +248,13 @@ VkSemaphore capture(Device& d,VkQueue queue,Swap& s,uint32_t image,const VkPrese
     if(!s.output.width && !configure_output(d,s)){s.supported=false;return VK_NULL_HANDLE;}
     start_worker(d,s);
     uint32_t fps=s.fps.load(std::memory_order_relaxed);if(!fps)return VK_NULL_HANDLE;
-    const uint64_t now=rosorah::now_ns(), interval=1000000000ull/fps;
-    if(now<s.next_capture)return VK_NULL_HANDLE;
+    // Twice the studio's rate: frames arriving at the output's own rate drifted against its clock,
+    // and 5-10 output frames a second showed the previous game frame. The wire still says 30/60.
+    const uint64_t now=rosorah::now_ns(), interval=1000000000ull/(fps*2);
+    if(!rosorah::capture_due(now,s.next_capture,interval))return VK_NULL_HANDLE;
     if(!prepare(d,s,qi->second))return VK_NULL_HANDLE;
     auto ready=submit_copy(d,queue,s,image,present,VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-    if(ready)s.next_capture=(now-s.next_capture>interval)?now+interval:s.next_capture+interval;
+    if(ready)s.next_capture=rosorah::following_capture(now,s.next_capture,interval);
     return ready;
 }
 
