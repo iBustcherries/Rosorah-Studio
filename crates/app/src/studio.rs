@@ -1897,7 +1897,15 @@ impl Studio {
                 self.update_window = true;
             }
             ui.separator();ui.label(RichText::new(&self.message).small());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{note(ui,format!("RAM {}",fmt(self.resources.ram)));note(ui,format!("GPU {}",self.resources.gpu.iter().map(|(_,v)|*v).max().map_or("—".into(),|v|format!("{v}%"))));note(ui,format!("CPU {}",fmt(self.resources.cpu)));}).response.on_hover_text("System usage (all applications), updated once per second. GPU shows the busiest reported device/engine. Unsupported counters show —, never a fabricated zero.");
+            // Laid out right to left: RAM, GPU temperature, GPU, CPU temperature, CPU.
+            let temperature = |ui: &mut egui::Ui, t: Option<crate::system_monitor::Temperature>, what: &str| {
+                if let Some(t) = t {
+                    let text = RichText::new(format!("{:.0}°C", t.celsius)).small();
+                    let text = if t.too_hot() { text.strong().color(Color32::from_rgb(255, 92, 92)) } else { text.weak() };
+                    ui.label(text).on_hover_text(format!("{what} temperature. Red from {:.0}°C, close to its limit.", t.hot));
+                }
+            };
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{note(ui,format!("RAM {}",fmt(self.resources.ram)));temperature(ui,self.resources.gpu_temp,"GPU");note(ui,format!("GPU {}",self.resources.gpu.iter().map(|(_,v)|*v).max().map_or("—".into(),|v|format!("{v}%"))));temperature(ui,self.resources.cpu_temp,"CPU");note(ui,format!("CPU {}",fmt(self.resources.cpu)));}).response.on_hover_text("System usage (all applications), updated once per second. GPU shows the busiest reported device/engine. Unsupported counters show —, never a fabricated zero.");
         });});
     }
     fn scene_context(&mut self, ui: &mut egui::Ui, canvas: Id, id: Id) {

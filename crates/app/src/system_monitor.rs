@@ -3,16 +3,31 @@ use std::{
     sync::{Arc, Mutex, mpsc},
     time::Duration,
 };
+/// A temperature and the point from which it counts as too hot, both in °C.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Temperature {
+    pub celsius: f32,
+    pub hot: f32,
+}
+impl Temperature {
+    pub fn too_hot(&self) -> bool {
+        self.celsius >= self.hot
+    }
+}
 #[derive(Clone, Default)]
 struct Sample {
     cpu: Option<f32>,
     ram: Option<f32>,
     gpu: Vec<(String, u32)>,
+    cpu_temp: Option<Temperature>,
+    gpu_temp: Option<Temperature>,
 }
 pub struct Resources {
     pub cpu: Option<f32>,
     pub ram: Option<f32>,
     pub gpu: Vec<(String, u32)>,
+    pub cpu_temp: Option<Temperature>,
+    pub gpu_temp: Option<Temperature>,
     latest: Arc<Mutex<Sample>>,
     stop: mpsc::Sender<()>,
 }
@@ -32,7 +47,8 @@ impl Default for Resources {
                     previous = Some(now);
                     value
                 });
-                *shared.lock().unwrap() = Sample { cpu, ram, gpu };
+                let (cpu_temp, gpu_temp) = temperatures();
+                *shared.lock().unwrap() = Sample { cpu, ram, gpu, cpu_temp, gpu_temp };
                 if rx.recv_timeout(Duration::from_secs(1)) != Err(mpsc::RecvTimeoutError::Timeout) {
                     break;
                 }
@@ -42,6 +58,8 @@ impl Default for Resources {
             cpu: None,
             ram: None,
             gpu: Vec::new(),
+            cpu_temp: None,
+            gpu_temp: None,
             latest,
             stop,
         }
@@ -53,6 +71,8 @@ impl Resources {
         self.cpu = s.cpu;
         self.ram = s.ram;
         self.gpu = s.gpu;
+        self.cpu_temp = s.cpu_temp;
+        self.gpu_temp = s.gpu_temp;
     }
 }
 impl Drop for Resources {
@@ -96,6 +116,58 @@ impl Platform {
             .collect();
         (ticks, ram, gpu)
     }
+}
+/// One hwmon temperature: the driver's name, the sensor's label, and its reading, critical and
+/// high limits in °C.
+#[cfg(any(not(windows), test))]
+struct Sensor {
+    driver: String,
+    label: String,
+    celsius: f32,
+    critical: Option<f32>,
+    high: Option<f32>,
+}
+/// The CPU and GPU temperatures from the kernel's hwmon sensors. Windows has no equivalent
+/// without a driver, so it shows none.
+#[cfg(not(windows))]
+fn temperatures() -> (Option<Temperature>, Option<Temperature>) {
+    let read = |path: std::path::PathBuf| std::fs::read_to_string(path).ok().and_then(|s| s.trim().parse::<f32>().ok()).map(|v| v / 1000.);
+    let mut sensors = Vec::new();
+    for hwmon in std::fs::read_dir("/sys/class/hwmon").into_iter().flatten().filter_map(Result::ok).map(|e| e.path()) {
+        let Ok(driver) = std::fs::read_to_string(hwmon.join("name")) else { continue };
+        for n in 1..=32 {
+            let Some(celsius) = read(hwmon.join(format!("temp{n}_input"))) else { continue };
+            sensors.push(Sensor {
+                driver: driver.trim().to_owned(),
+                label: std::fs::read_to_string(hwmon.join(format!("temp{n}_label"))).unwrap_or_default().trim().to_owned(),
+                celsius,
+                critical: read(hwmon.join(format!("temp{n}_crit"))),
+                high: read(hwmon.join(format!("temp{n}_max"))),
+            });
+        }
+    }
+    (pick(&sensors, CPU_SENSORS, 90.), pick(&sensors, GPU_SENSORS, 95.))
+}
+#[cfg(windows)]
+fn temperatures() -> (Option<Temperature>, Option<Temperature>) {
+    (None, None)
+}
+/// Drivers and labels to use, best first: the whole CPU package (Intel) or die (AMD), and the
+/// GPU's hottest spot (AMD junction) before its edge.
+#[cfg(any(not(windows), test))]
+const CPU_SENSORS: &[(&str, &str)] = &[("coretemp", "Package id 0"), ("k10temp", "Tdie"), ("k10temp", "Tctl"), ("zenpower", "Tdie"), ("zenpower", "Tctl"), ("cpu_thermal", "")];
+#[cfg(any(not(windows), test))]
+const GPU_SENSORS: &[(&str, &str)] = &[("amdgpu", "junction"), ("amdgpu", "edge"), ("nouveau", ""), ("xe", "pkg"), ("i915", "")];
+/// The best sensor present; too hot within 10 °C of its critical limit, else at its high limit,
+/// else at `fallback`.
+#[cfg(any(not(windows), test))]
+fn pick(sensors: &[Sensor], wanted: &[(&str, &str)], fallback: f32) -> Option<Temperature> {
+    let plausible = |v: &Option<f32>| v.filter(|v| (50.0..=150.0).contains(v));
+    wanted.iter().find_map(|(driver, label)| {
+        let s = sensors.iter().find(|s| s.driver == *driver && (label.is_empty() || s.label == *label))?;
+        let hot = plausible(&s.critical).map(|c| c - 10.).or(plausible(&s.high)).unwrap_or(fallback);
+        Some(Temperature { celsius: s.celsius, hot })
+    })
 }
 #[cfg(any(not(windows), test))]
 fn parse_cpu(s: &str) -> Option<(u64, u64)> {
@@ -327,6 +399,24 @@ mod tests {
             Some(60.)
         );
         assert_eq!(parse_memory("MemTotal: 0 kB\nMemAvailable: 0 kB"), None);
+    }
+    #[test]
+    fn temperatures_use_the_package_and_junction_and_turn_hot_near_the_limit() {
+        let sensor = |driver: &str, label: &str, celsius, critical, high| Sensor { driver: driver.into(), label: label.into(), celsius, critical, high };
+        let sensors = [
+            sensor("coretemp", "Core 0", 60., Some(100.), Some(80.)),
+            sensor("coretemp", "Package id 0", 74., Some(100.), Some(80.)),
+            sensor("amdgpu", "edge", 48., Some(100.), None),
+            sensor("amdgpu", "junction", 59., Some(110.), None),
+            sensor("nvme", "Composite", 31., Some(84.8), None),
+        ];
+        assert_eq!(pick(&sensors, CPU_SENSORS, 90.), Some(Temperature { celsius: 74., hot: 90. }));
+        assert_eq!(pick(&sensors, GPU_SENSORS, 95.), Some(Temperature { celsius: 59., hot: 100. }));
+        // No usable limit: the sensor's high mark, then the fallback.
+        assert_eq!(pick(&[sensor("k10temp", "Tctl", 70., Some(0.), Some(95.))], CPU_SENSORS, 90.).unwrap().hot, 95.);
+        assert_eq!(pick(&[sensor("k10temp", "Tctl", 70., None, None)], CPU_SENSORS, 90.).unwrap().hot, 90.);
+        assert!(Temperature { celsius: 91., hot: 90. }.too_hot());
+        assert_eq!(pick(&[sensor("nvme", "Composite", 31., None, None)], GPU_SENSORS, 95.), None);
     }
     #[test]
     fn sampler_stops_on_drop() {

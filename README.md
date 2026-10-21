@@ -9,24 +9,18 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
 **[Download the latest release](https://github.com/iBustcherries/RosorahStudio-releases/releases/latest)**
 · Windows 10/11 installer, Fedora `.rpm`, Ubuntu/Debian `.deb`
 
-## What's new in 0.42.0
+## What's new in 0.43.0
+
+- **CPU and GPU temperatures** in the status bar next to their usage (Linux). They turn red when
+  they get close to the sensor's limit.
+
+## 0.42.0
 
 - **Updates inside Rosorah:** Help → **Check for updates…**, a check every few hours, and an update
   window that opens by itself once per new version (never while you're live). Turn the window off in
   Settings → Advanced → Updates to keep just the reminder at the bottom.
 - **Install now on Linux** installs the update with your system's password prompt and offers
   **Restart now**.
-
-## 0.41.0
-
-- **Smoother game capture:** every frame of your stream and recording now gets a new game frame.
-  Before, a 60 fps game could look closer to 30 fps.
-- **Moving panels:** dragging a panel carries the whole panel under the pointer, and its old spot
-  stays reserved until you let go. Drag a panel past the window edge to give it its own window.
-- **Play media and Play sound steps** show just the file they play, and clips longer than 10 seconds
-  play to the end.
-- Games no longer fail to launch while Rosorah is open, and right-click menus on the canvas are
-  no longer squashed into a narrow column.
 
 ## Screenshots
 
