@@ -32,6 +32,12 @@ pub enum State {
     Available(Release),
     Downloading(Release, u64, u64),
     Downloaded(Release, PathBuf),
+    /// Linux: the package manager is installing it, after the system password prompt.
+    Installing(Release),
+    /// Linux: installed; a restart starts the new version.
+    Installed(Release),
+    /// Linux: the install didn't happen (declined or failed); the download is kept to retry.
+    InstallFailed(Release, PathBuf, String),
     Failed(String),
 }
 #[derive(Default)]
@@ -191,6 +197,26 @@ impl Updates {
             *state.lock().unwrap() = match result {
                 Ok(path) => State::Downloaded(release, path),
                 Err(e) => State::Failed(format!("The update didn't download: {e:#}")),
+            };
+            ctx.request_repaint();
+        });
+    }
+}
+impl Updates {
+    /// Installs a downloaded .rpm or .deb with the system's package manager, asking for the
+    /// password through the desktop's usual prompt (pkexec).
+    pub fn install(&self, ctx: &egui::Context, release: Release, path: PathBuf) {
+        *self.state.lock().unwrap() = State::Installing(release.clone());
+        let (state, ctx) = (self.state.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let tool: &[&str] = if path.extension().is_some_and(|e| e == "deb") { &["apt", "install", "-y"] } else { &["dnf", "install", "-y"] };
+            let status = std::process::Command::new("pkexec").args(tool).arg(&path).status();
+            *state.lock().unwrap() = match status {
+                Ok(s) if s.success() => State::Installed(release),
+                // pkexec: 126 the prompt was dismissed, 127 not authorized.
+                Ok(s) if matches!(s.code(), Some(126 | 127)) => State::InstallFailed(release, path, "The install was cancelled at the password prompt.".into()),
+                Ok(s) => State::InstallFailed(release, path, format!("The package manager stopped with code {}.", s.code().unwrap_or(-1))),
+                Err(e) => State::InstallFailed(release, path, format!("Couldn't ask for permission to install ({e}).")),
             };
             ctx.request_repaint();
         });

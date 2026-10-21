@@ -9,7 +9,15 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
 **[Download the latest release](https://github.com/iBustcherries/RosorahStudio-releases/releases/latest)**
 · Windows 10/11 installer, Fedora `.rpm`, Ubuntu/Debian `.deb`
 
-## What's new in 0.41.0
+## What's new in 0.42.0
+
+- **Updates inside Rosorah:** Help → **Check for updates…**, a check every few hours, and an update
+  window that opens by itself once per new version (never while you're live). Turn the window off in
+  Settings → Advanced → Updates to keep just the reminder at the bottom.
+- **Install now on Linux** installs the update with your system's password prompt and offers
+  **Restart now**.
+
+## 0.41.0
 
 - **Smoother game capture:** every frame of your stream and recording now gets a new game frame.
   Before, a 60 fps game could look closer to 30 fps.
@@ -19,17 +27,6 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
   play to the end.
 - Games no longer fail to launch while Rosorah is open, and right-click menus on the canvas are
   no longer squashed into a narrow column.
-
-## 0.40.0
-
-- **Read paid messages aloud:** Super Chats, donations, cheers and Kicks spoken in a natural voice
-  that runs on your computer, with its own mixer strip.
-- **Browser sources:** local overlay files, custom CSS, keep running or refresh when shown, saved
-  sign-ins, overlays made for OBS, and overlay sound on Windows.
-- **+ Add** opens a dialog, and **Use again** brings in captures, cameras and widgets from your other
-  scenes with live previews.
-- **Chat widget:** well-known bots are hidden, and you can hide any chatter. Right-click their message
-  and choose **Hide from chat widgets**.
 
 ## Screenshots
 

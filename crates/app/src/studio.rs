@@ -602,6 +602,12 @@ pub struct Studio {
     updates: crate::updates::Updates,
     update_window: bool,
     update_checked: bool,
+    /// When updates were last looked for; long sessions look again every few hours.
+    last_update_check: Instant,
+    /// Help > Check for updates: says so when there's nothing new.
+    update_asked: bool,
+    /// Start the new version once this one has closed (after an update installed).
+    restart_after_update: bool,
     /// The scene being named inside its own pill: its id, the text so far, and whether the
     /// box has been focused yet.
     naming_scene: Option<(Id, String, bool)>,
@@ -984,7 +990,7 @@ impl Studio {
             project,
             project_path,
             page: match page.as_str() {
-                "settings" | "streaming" | "accounts" | "donations" | "announcements" | "hotkeys" => Page::Settings,
+                "settings" | "streaming" | "accounts" | "donations" | "announcements" | "hotkeys" | "advanced" => Page::Settings,
                 "automation-preview" | "alerts" | "alert-guide" | "alert-guide-media" | "alert-guide-finish" => Page::Alerts,
                 _ => Page::Studio,
             },
@@ -996,6 +1002,8 @@ impl Studio {
                 Settings::Hotkeys
             } else if page == "accounts" || page == "streaming" {
                 Settings::Accounts
+            } else if page == "advanced" {
+                Settings::Advanced
             } else {
                 Settings::Appearance
             },
@@ -1058,6 +1066,9 @@ impl Studio {
             // `--page update` (with --screenshot) shows the update window, checking as an old version.
             update_window: page == "update",
             update_checked: false,
+            last_update_check: Instant::now(),
+            update_asked: false,
+            restart_after_update: false,
             // `--page name-scene` opens the name box in the current scene's pill for screenshots.
             naming_scene: (page == "name-scene").then(|| (scene_for_naming, String::new(), false)),
             web_dock_dialog: None,
@@ -1657,6 +1668,10 @@ impl Studio {
             self.report_open = true;
             ui.close();
         }
+        if ui.button("Check for updates…").clicked() {
+            self.check_for_updates(ui.ctx());
+            ui.close();
+        }
         if self.advanced() {
             ui.separator();
             if ui.button("Monitoring & sync…").clicked() {
@@ -1677,6 +1692,56 @@ impl Studio {
                 ui.close();
             }
         }
+    }
+    /// Looks again during long sessions, opens the window once for a new version, and answers
+    /// Help > Check for updates.
+    fn update_tick(&mut self, ctx: &egui::Context) {
+        use crate::updates::State;
+        if self.screenshot.is_some() {
+            return;
+        }
+        let state = self.updates.state();
+        if self.project.preferences.workspace.check_updates
+            && self.last_update_check.elapsed() >= Duration::from_secs(6 * 3600)
+            && matches!(state, State::Idle | State::UpToDate | State::Failed(_))
+        {
+            self.updates.check(ctx);
+            self.last_update_check = Instant::now();
+        }
+        if self.update_asked {
+            match &state {
+                State::UpToDate => self.tell(concat!("You have the latest version (", env!("CARGO_PKG_VERSION"), ").").into()),
+                State::Failed(e) => self.tell(e.clone()),
+                _ => {}
+            }
+            if !matches!(state, State::Idle | State::Checking) {
+                self.update_asked = false;
+            }
+        }
+        let live = self.live_stream.is_some() || self.live_recording.is_some();
+        let workspace = &self.project.preferences.workspace;
+        if let State::Available(release) = &state
+            && workspace.update_popup
+            && !live
+            && release.version != workspace.skipped_update
+            && release.version != workspace.update_offered
+        {
+            self.project.preferences.workspace.update_offered = release.version.clone();
+            self.update_window = true;
+            self.dirty = true;
+        }
+        ctx.request_repaint_after(Duration::from_secs(60));
+    }
+    /// Help > Check for updates: looks now and shows the result, even for a skipped version.
+    fn check_for_updates(&mut self, ctx: &egui::Context) {
+        use crate::updates::State;
+        // A found or downloaded update is kept rather than looked up again.
+        if !matches!(self.updates.state(), State::Available(_) | State::Downloaded(..) | State::Downloading(..) | State::Installing(..) | State::Installed(_) | State::InstallFailed(..)) {
+            self.updates.check(ctx);
+            self.last_update_check = Instant::now();
+        }
+        self.update_asked = true;
+        self.update_window = true;
     }
     /// Confirms a removal with an Undo button, so a slip is one click to reverse.
     fn deleted(&mut self, text: String) {
@@ -1823,7 +1888,9 @@ impl Studio {
             let offer = match self.updates.state() {
                 crate::updates::State::Available(r) if r.version != self.project.preferences.workspace.skipped_update => Some(format!("⬆ Update {} available", r.version)),
                 crate::updates::State::Downloading(..) => Some("⬆ Downloading update…".into()),
-                crate::updates::State::Downloaded(r, _) => Some(format!("⬆ Install {}", r.version)),
+                crate::updates::State::Downloaded(r, _) | crate::updates::State::InstallFailed(r, ..) => Some(format!("⬆ Install {}", r.version)),
+                crate::updates::State::Installing(..) => Some("⬆ Installing update…".into()),
+                crate::updates::State::Installed(r) => Some(format!("⬆ Restart for {}", r.version)),
                 _ => None,
             };
             if let Some(text) = offer && ui.add(egui::Button::new(RichText::new(text).small().strong().color(Color32::from_rgb(40, 22, 84))).fill(self.accent())).clicked() {
@@ -2067,7 +2134,7 @@ impl Studio {
         }
         let state = self.updates.state();
         let release = match &state {
-            State::Available(r) | State::Downloading(r, ..) | State::Downloaded(r, _) => r.clone(),
+            State::Available(r) | State::Downloading(r, ..) | State::Downloaded(r, _) | State::Installing(r) | State::Installed(r) | State::InstallFailed(r, ..) => r.clone(),
             // Still finding out; the window opens once there's something to show.
             State::Idle | State::Checking => return,
             _ => {
@@ -2082,7 +2149,9 @@ impl Studio {
             note(ui, concat!("You have ", env!("CARGO_PKG_VERSION"), "."));
             ui.add_space(8.);
             egui::ScrollArea::vertical().max_height(240.).show(ui, |ui| {
-                ui.label(release.notes.lines().filter(|l| !l.starts_with('|')).collect::<Vec<_>>().join("\n").replace("**", "").replace("## ", ""));
+                // Plain text from the release notes: headings without their #s, up to the downloads table.
+                let notes: Vec<&str> = release.notes.lines().take_while(|l| !l.starts_with("## Downloads")).filter(|l| !l.starts_with('|')).map(|l| l.trim_start_matches('#').trim_start()).collect();
+                ui.label(notes.join("\n").trim().replace("**", ""));
             });
             ui.add_space(10.);
             match &state {
@@ -2103,17 +2172,25 @@ impl Studio {
                             }
                         }
                     } else {
-                        let command = if path.extension().is_some_and(|e| e == "deb") { "sudo apt install" } else { "sudo dnf install" };
-                        let command = format!("{command} \"{}\"", path.display());
-                        ui.horizontal_wrapped(|ui| {
-                            if ui.add(self.primary_button("Install…")).on_hover_text("Opens it in your software app (Discover or Software)").clicked() {
-                                let _ = crate::desktop::open(path);
-                            }
-                            if ui.button("Copy install command").on_hover_text(&command).clicked() {
-                                ui.ctx().copy_text(command.clone());
-                                self.tell("Copied. Paste it into a terminal, then restart Rosorah.".into());
-                            }
-                        });
+                        self.linux_install_buttons(ui, &release, path);
+                    }
+                }
+                State::InstallFailed(_, path, error) => {
+                    note(ui, error);
+                    self.linux_install_buttons(ui, &release, path);
+                }
+                State::Installing(..) => {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        note(ui, "Installing… approve the password prompt if one appears.");
+                    });
+                }
+                State::Installed(_) => {
+                    note(ui, format!("Rosorah {} is installed. Restart to start using it.", release.version));
+                    let busy = self.live_stream.is_some() || self.live_recording.is_some();
+                    if ui.add_enabled(!busy, self.primary_button("Restart now")).on_disabled_hover_text("Stop streaming and recording first").clicked() {
+                        self.restart_after_update = true;
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 }
                 _ => {
@@ -2133,7 +2210,7 @@ impl Studio {
                 if ui.button("View on GitHub").clicked() {
                     let _ = crate::desktop::open(&release.page);
                 }
-                if !matches!(state, State::Downloading(..)) && ui.button("Skip this version").clicked() {
+                if matches!(state, State::Available(_) | State::Downloaded(..) | State::InstallFailed(..)) && ui.button("Skip this version").clicked() {
                     self.project.preferences.workspace.skipped_update = release.version.clone();
                     self.dirty = true;
                     close = true;
@@ -2146,6 +2223,24 @@ impl Studio {
         if close || modal.should_close() {
             self.update_window = false;
         }
+    }
+    /// Linux: install the downloaded package here (system password prompt), or by hand.
+    fn linux_install_buttons(&mut self, ui: &mut egui::Ui, release: &crate::updates::Release, path: &std::path::Path) {
+        let command = if path.extension().is_some_and(|e| e == "deb") { "sudo apt install" } else { "sudo dnf install" };
+        let command = format!("{command} \"{}\"", path.display());
+        let busy = self.live_stream.is_some() || self.live_recording.is_some();
+        ui.horizontal_wrapped(|ui| {
+            if ui.add_enabled(!busy, self.primary_button("Install now")).on_hover_text("Installs it with your system's password prompt").on_disabled_hover_text("Stop streaming and recording first").clicked() {
+                self.updates.install(ui.ctx(), release.clone(), path.to_path_buf());
+            }
+            if ui.button("Open in software app").on_hover_text("Discover or Software").clicked() {
+                let _ = crate::desktop::open(path);
+            }
+            if ui.button("Copy install command").on_hover_text(&command).clicked() {
+                ui.ctx().copy_text(command.clone());
+                self.tell("Copied. Paste it into a terminal, then restart Rosorah.".into());
+            }
+        });
     }
     /// Title, category and where to watch, from the accounts and the destinations switched on.
     fn announce_stream(&self) -> crate::announce::Stream {
@@ -5264,8 +5359,10 @@ impl Studio {
             self.update_checked = true;
             if self.project.preferences.workspace.check_updates {
                 self.updates.check(ctx);
+                self.last_update_check = Instant::now();
             }
         }
+        self.update_tick(ctx);
         self.web_docks.tick();
         // The page itself stays clear so the backdrop shows in the gaps between docked panels.
         egui::CentralPanel::default().frame(egui::Frame::central_panel(&ctx.style()).fill(bg())).show(ctx, |ui| {
@@ -6132,7 +6229,10 @@ if changed{self.changed();}
         card().show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.strong("Updates");
-            changed |= ui.checkbox(&mut self.project.preferences.workspace.check_updates, "Check for updates when Rosorah starts").changed();
+            changed |= ui.checkbox(&mut self.project.preferences.workspace.check_updates, "Check for updates (when Rosorah starts and every few hours)").changed();
+            ui.add_enabled_ui(self.project.preferences.workspace.check_updates, |ui| {
+                changed |= ui.checkbox(&mut self.project.preferences.workspace.update_popup, "Show a window when a new version is found").on_hover_text("Never while you're streaming or recording. Off: only the button at the bottom of the window").changed();
+            });
             ui.horizontal_wrapped(|ui| {
                 let state = self.updates.state();
                 let busy = matches!(state, crate::updates::State::Checking | crate::updates::State::Downloading(..));
@@ -6143,12 +6243,18 @@ if changed{self.changed();}
                 match state {
                     crate::updates::State::Checking => note(ui, "Checking…"),
                     crate::updates::State::UpToDate => note(ui, concat!("You have the latest version (", env!("CARGO_PKG_VERSION"), ").")),
-                    crate::updates::State::Available(r) | crate::updates::State::Downloaded(r, _) => {
+                    crate::updates::State::Available(r) | crate::updates::State::Downloaded(r, _) | crate::updates::State::InstallFailed(r, ..) => {
                         if ui.button(format!("Version {} is available…", r.version)).clicked() {
                             self.update_window = true;
                         }
                     }
                     crate::updates::State::Downloading(..) => note(ui, "Downloading the update…"),
+                    crate::updates::State::Installing(..) => note(ui, "Installing the update…"),
+                    crate::updates::State::Installed(r) => {
+                        if ui.button(format!("Restart for {}…", r.version)).clicked() {
+                            self.update_window = true;
+                        }
+                    }
                     crate::updates::State::Failed(e) => note(ui, e),
                     crate::updates::State::Idle => {}
                 }
@@ -7396,9 +7502,11 @@ impl eframe::App for Studio {
             let _ = self.back_up("on close");
         }
         // Switching profile: start Rosorah again once this one has saved and stopped everything.
-        if self.restart_profile.take().is_some()
+        if (self.restart_profile.take().is_some() || self.restart_after_update)
             && let Ok(exe) = std::env::current_exe()
         {
+            // After an update replaced the program, Linux names the running file "… (deleted)".
+            let exe = std::path::PathBuf::from(exe.to_string_lossy().trim_end_matches(" (deleted)"));
             let mut command = std::process::Command::new(&exe);
             if let Some(dir) = exe.parent() {
                 command.current_dir(dir);

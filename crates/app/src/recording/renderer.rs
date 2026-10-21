@@ -323,7 +323,6 @@ fn prepare(g: &mut Compositor, scene: &mut Scene, revision: u64, project: &Proje
 fn draw(g: &mut Compositor, current: &Project, active: &Canvas, job: &Job, tag: &mut u64, pending: &mut HashMap<u64, Pending>) -> Result<()> {
     let (width, height) = (job.canvas.width, job.canvas.height);
     let (at, started) = (job.due, Instant::now());
-    let mut waited = Duration::ZERO;
     let pictures: Vec<Nv12> = job.formats.iter().filter_map(|f| if let Format::Nv12(n) = f { Some(*n) } else { None }).collect();
     if !pictures.is_empty() {
         // Two frames out at once at most; beyond that the graphics card is behind, so wait.
@@ -333,7 +332,7 @@ fn draw(g: &mut Compositor, current: &Project, active: &Canvas, job: &Job, tag: 
                 hand_over(pending, done_tag, done);
             }
         }
-        waited = wait.elapsed();
+        let waited = wait.elapsed();
         *tag += 1;
         g.begin_nv12(current, active, width, height, &pictures, *tag)?;
         // Which picture each output gets, by its place among the NV12 ones.

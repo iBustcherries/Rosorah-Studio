@@ -1,6 +1,6 @@
 # Rosorah Studio roadmap
 
-Updated for 0.41.0 (October 2026). Rosorah Studio is original code built on
+Updated for 0.42.0 (October 2026). Rosorah Studio is original code built on
 independent libraries (Rust, egui/wgpu, GStreamer, Qt WebEngine). It aims to be an easier
 all-in-one alternative to running OBS, a chat bot and an alert service side by side,
 not a feature-for-feature copy of OBS.
@@ -17,7 +17,7 @@ not a feature-for-feature copy of OBS.
 | Capture (Windows) | Shipped | Automatic game capture (finds the game's window and captures it with Windows Graphics Capture), monitor and window capture, application audio and cursor |
 | Sound | Shipped | Music strip that follows music apps automatically (never browser video), per-app sound strips that survive app restarts, right-click rename/hide/delete, mixer with per-scene volumes, Sound settings window (device, live level, noise suppression, gate, compressor, limiter, expander, EQ, mono, balance), monitoring, delay, six recording tracks |
 | Recording and streaming | Shipped | Hardware encoders (AMD/NVIDIA, software fallback), multistreaming to Twitch, YouTube, YouTube vertical, Kick, TikTok and custom RTMP, per-destination bitrate, reconnect, Go live checklist, replay buffer (saves the last seconds as an MP4) |
-| Virtual camera | Linux shipped, Windows preview | Rosorah's video as a webcam for Discord, Zoom and browsers (Linux: v4l2loopback; Windows 11: Rosorah's own camera component, untested on real PCs yet) |
+| Virtual camera | Shipped | Rosorah's video as a webcam for Discord, Zoom and browsers (Linux: v4l2loopback; Windows 11: Rosorah's own camera component) |
 | Hotkeys, remote control and scripts | Shipped | System-wide hotkeys for scenes, mute, push-to-talk and outputs; remote control for Stream Deck, Touch Portal and phone apps (Rosorah's protocol, plus OBS's for tools made for OBS); sandboxed Lua scripts |
 | Accounts | Shipped | Twitch, YouTube and Kick sign-in with renewable tokens in the system keyring, titles/categories, automatic stream keys |
 | Chat and activity | Shipped | Unified Twitch/YouTube/Kick/TikTok chat with moderation, colour emoji (Twemoji), an emoji and emote picker with your own Twitch, YouTube and Kick emotes, emotes and emoji as pictures in the on-canvas chat widget, which also shows profile pictures, badges, name colours and highlighted paid and first-time messages, sliding and fading in and out, leaving out bots and chatters you hide (right-click a message), Activity history for every connected account |
@@ -26,17 +26,16 @@ not a feature-for-feature copy of OBS.
 | Transitions | Shipped | Cut, fade, wipe, Move (shared layers glide to their new place), stinger videos and transition screens |
 | Projects | Shipped | Profiles, hourly and on-close backups, recording recovery, OBS and Firebot import |
 | Announcements | Shipped | "I'm live" posts to Discord (webhook), Bluesky (app password) and Threads, once per stream, with a message template and per-stream skip |
-| Distribution | Shipped | Windows installer, Fedora .rpm and Ubuntu/Debian .deb on GitHub Releases; in-app update check |
+| Distribution | Shipped | Windows installer, Fedora .rpm and Ubuntu/Debian .deb on GitHub Releases; in-app updates (checks at start and every few hours, Help > Check for updates, a window or a bottom-bar reminder, one-click install on Windows and Linux) |
 
 ## Next
 
-1. **Windows testing pass**: check capture, encoders, the virtual camera and the installer on real Windows PCs.
-2. **Updates through the software apps** (on hold): a package repository so Discover and GNOME Software can update Rosorah, and later a Flatpak for Bazaar. The game-capture hooks don't fit Flatpak's sandbox, which still needs a plan.
+Nothing is scheduled right now. Rosorah updates itself from GitHub Releases, so it isn't listed in Discover or GNOME Software.
 
 ## Later
 
 - X (Twitter) announcements (on hold): X's API is pay-per-use only, at $0.20 per post with a link (October 2026).
-- Signed installers (Windows code signing, signed package repositories).
+- Signed installers (Windows code signing).
 
 ## Known limits
 
