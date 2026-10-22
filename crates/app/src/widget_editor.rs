@@ -207,6 +207,7 @@ impl Studio {
         };
         if let Some(project) = result {
             self.project = project;
+            self.every_scene_last.clear();
             self.selections.clear();self.crop_layer=None;
             self.layer = None;
             self.canvas = self

@@ -279,6 +279,11 @@ impl Captures {
             }
         }
         let alert_media = self.widgets.active_media();
+        // A Play sound or Play media step's clip needs no layer: it plays from its trigger to its end.
+        let queued = &self.videos.queued;
+        let triggered = |id: Id, v: &auroracast_core::VideoSettings| {
+            (v.automation_only || v.trigger.is_some()) && (queued.get(&id).is_some_and(|q| *q > 0) || engine.running(id))
+        };
         let desired: std::collections::BTreeMap<_, _> = project
             .sources
             .iter()
@@ -286,6 +291,7 @@ impl Captures {
                 if let SourceKind::VideoFile(v) = &s.kind {
                     (v.enabled
                         && (alert_media.contains(&s.id)
+                            || triggered(s.id, v)
                             || project.preferences.overlays.values().any(|o| o.source == s.id)
                             || project.preferences.speech.source == Some(s.id)
                             || project

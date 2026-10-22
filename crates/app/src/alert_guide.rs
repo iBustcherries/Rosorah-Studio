@@ -80,7 +80,6 @@ impl Guide {
   }
   let mut add=|path:&str,sound:bool|->Option<Id>{if path.is_empty(){return None;}let id=p.id();p.sources.push(Source{id,name:format!("{} · {}",self.name,if sound{"Sound"}else{"Media"}),kind:SourceKind::VideoFile(VideoSettings{path:path.into(),gain:self.gain,audio:sound||self.sound.is_empty(),looped:false,automation_only:true,duration_secs:self.seconds,canvases:vec![canvas.id],..Default::default()})});
    let audio_id=p.id();p.audio.push(AudioChannel{id:audio_id,name:format!("{} · {}",self.name,if sound{"Sound"}else{"Media"}),gain_db:0.,muted:false,tracks:[true,false,false,false,false,false],delay_ms:0,monitor:self.monitor,monitor_only:false,noise_suppression:Default::default(),media_source:Some(id)});
-   if sound&& let Some(s)=p.scenes.iter_mut().find(|s|s.id==canvas.scene){s.layers.push(Layer{ frame: Default::default(), look: Default::default(),source:id,rect:[0.,0.,0.001,0.001],visible:true,locked:true,opacity:0.,crop:[0.;4],group:0});}
    Some(id)};
   let media=add(&self.media,false);let sound=add(&self.sound,true);
   if self.monitor&&(media.is_some()||sound.is_some())&&p.preferences.monitor_device.is_empty(){p.preferences.monitor_device=crate::audio::DEFAULT_MONITOR.into();}

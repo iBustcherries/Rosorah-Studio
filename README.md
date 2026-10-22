@@ -9,18 +9,19 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
 **[Download the latest release](https://github.com/iBustcherries/RosorahStudio-releases/releases/latest)**
 · Windows 10/11 installer, Fedora `.rpm`, Ubuntu/Debian `.deb`
 
-## What's new in 0.44.0
+## What's new in 0.45.0
+
+- **One alert box for all your scenes:** alerts show in every scene, and moving, resizing or hiding
+  the box in one scene does the same everywhere. Copies of the alert box are merged into one, and
+  alert sounds no longer need hidden layers.
+
+## 0.44.0
 
 - **Easier editing:** click away to unselect, Main video / Vertical video tabs on Scenes and Layers,
   Delete asks first, F2 renames, and Ctrl+C / Ctrl+V copies scenes.
 - **Layer Properties** opens centred with tabs, and every dialog shares the same look.
 - **Named audio tracks**, plus an experimental **Twitch VOD track** (a separate audio mix for VODs).
 - **Windows:** fixed "Media runtime is missing" right after installing.
-
-## 0.43.0
-
-- **CPU and GPU temperatures** in the status bar next to their usage (Linux). They turn red when
-  they get close to the sensor's limit.
 
 ## Screenshots
 

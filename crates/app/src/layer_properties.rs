@@ -162,15 +162,30 @@ impl Studio {
             self.paste_layers(si);
             ui.close();
         }
+        self.every_scene_toggle(ui, source_id);
         if ui.button(if locked { "Unlock" } else { "Lock" }).clicked() {
             self.project.scenes[si].layers[i].locked = !locked;
             self.changed();
             ui.close();
         }
         ui.separator();
-        if ui.add_enabled(!locked, egui::Button::new("Delete")).on_hover_text("Remove this layer from this scene").clicked() {
+        let hint = if self.project.every_scene(source_id) { "Remove this layer from every scene" } else { "Remove this layer from this scene" };
+        if ui.add_enabled(!locked, egui::Button::new("Delete")).on_hover_text(hint).clicked() {
             self.pending_layer_delete = Some((active, i));
             ui.close();
+        }
+    }
+    /// "Same in every scene": the layer matches in all of this video's scenes, or is placed per scene.
+    fn every_scene_toggle(&mut self, ui: &mut egui::Ui, source: Id) {
+        let mut on = self.project.every_scene(source);
+        if ui.checkbox(&mut on, "Same in every scene")
+            .on_hover_text("Moving, resizing, cropping or hiding it in one scene does the same in all of this video's scenes, and new scenes get it too.")
+            .changed()
+        {
+            self.project.preferences.every_scene.insert(source, on);
+            // Turned on, it starts from where it is in the scene on screen.
+            self.every_scene_last.retain(|&(_, s), _| s != source);
+            self.changed();
         }
     }
     fn layer_properties_body(&mut self, ui: &mut egui::Ui, si: usize, i: usize) {
@@ -217,6 +232,7 @@ impl Studio {
             self.folder_source_controls(ui, id);
         });
         section(ui, tab == PropertiesTab::Position, None, |ui| {
+            self.every_scene_toggle(ui, id);
             ui.add_enabled_ui(!locked, |ui| {
                 let layer = &mut self.project.scenes[si].layers[i];
                 ui.checkbox(&mut self.keep_aspect, "Keep aspect ratio");

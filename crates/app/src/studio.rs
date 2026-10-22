@@ -663,6 +663,8 @@ pub struct Studio {
     list_focus: ListFocus,
     /// Layers waiting for "Delete?" to be answered: the scene and the layers' places in it.
     delete_confirm: Option<(Id, Vec<usize>)>,
+    /// How each "Same in every scene" layer was left after the last edit, per video and source.
+    every_scene_last: std::collections::BTreeMap<(Id, Id), Layer>,
     /// Where each canvas was drawn last frame (its scene), so a click elsewhere unselects it.
     canvas_hits: Vec<(Id, egui::Rect)>,
     /// Places a click doesn't unselect from: Layers, Layer Properties, the widget studio.
@@ -817,6 +819,10 @@ impl Studio {
         let demo_drag = (demo && page == "drag").then_some(None);
         let demo = demo.then(|| crate::demo::project(&mut project));
         project.prepare_workspace();
+        project.merge_alert_boxes();
+        project.drop_hidden_alert_layers();
+        let mut every_scene_last = Default::default();
+        project.sync_every_scene(&mut every_scene_last);
         if project.preferences.accent == [141, 101, 255] {
             project.preferences.accent = [208, 188, 255];
         }
@@ -1150,6 +1156,7 @@ impl Studio {
             list_focus: if page == "copy-scene" { ListFocus::Scenes } else { ListFocus::default() },
             // `--page delete-layers` asks about the first two layers, for screenshots.
             delete_confirm: (page == "delete-layers").then(|| (scene_for_naming, vec![0, 1])),
+            every_scene_last,
             canvas_hits: Vec::new(),
             keep_selection: Vec::new(),
             scenes_area: None,
@@ -1267,6 +1274,7 @@ impl Studio {
         self.changed();
     }
     fn changed(&mut self) {
+        self.project.sync_every_scene(&mut self.every_scene_last);
         self.update_widget_geometry();
         self.project.ensure_alert_channels();
         self.edit_history
@@ -1453,6 +1461,10 @@ impl Studio {
     fn adopt_project(&mut self, mut project: Project) {
         project.prepare_workspace();
         project.ensure_alert_channels();
+        project.merge_alert_boxes();
+        project.drop_hidden_alert_layers();
+        self.every_scene_last.clear();
+        project.sync_every_scene(&mut self.every_scene_last);
         self.project = project;
         self.selections.clear();
         self.layer = None;
@@ -1956,7 +1968,12 @@ impl Studio {
                     note(ui, format!("and {} more", names.len() - 8));
                 }
             }
-            note(ui, "Their sources stay available to your other scenes.");
+            let everywhere: Vec<&String> = layers.iter().zip(&names).filter(|&(&i, _)| self.project.scenes[si].layers.get(i).is_some_and(|l| self.project.every_scene(l.source))).map(|(_, n)| n).collect();
+            match everywhere.as_slice() {
+                [] => note(ui, "Their sources stay available to your other scenes."),
+                [name] => note(ui, format!("“{name}” is the same in every scene, so it's removed from all of them.")),
+                _ => note(ui, "Layers set to be the same in every scene are removed from all of them."),
+            }
             ui.add_space(8.);
             ui.horizontal(|ui| {
                 confirm = ui.add(egui::Button::new(RichText::new("Delete").strong().color(Color32::WHITE)).fill(Color32::from_rgb(190, 50, 60))).clicked();
@@ -1970,8 +1987,13 @@ impl Studio {
             let mut doomed: Vec<usize> = layers.into_iter().filter(|&i| layers_in_scene.get(i).is_some_and(|l| !l.locked)).collect();
             doomed.sort_unstable();
             doomed.dedup();
+            let mut everywhere = Vec::new();
             for &i in doomed.iter().rev() {
-                layers_in_scene.remove(i);
+                everywhere.push(layers_in_scene.remove(i).source);
+            }
+            everywhere.retain(|&source| self.project.every_scene(source));
+            for source in everywhere {
+                self.project.remove_from_every_scene(scene, source);
             }
             self.selections.remove(&scene);
             self.layer = None;

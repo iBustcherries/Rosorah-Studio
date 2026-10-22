@@ -1188,6 +1188,10 @@ pub struct Preferences {
     pub widget_periods: std::collections::BTreeMap<Id, String>,
     #[serde(default)]
     pub widget_values: std::collections::BTreeMap<Id, u64>,
+    /// Sources whose layer is set to match in every scene (true) or to be placed per scene (false).
+    /// Unset, alert boxes match and everything else is per scene; see `Project::every_scene`.
+    #[serde(default)]
+    pub every_scene: std::collections::BTreeMap<Id, bool>,
     #[serde(default)]
     pub scene_audio: std::collections::BTreeMap<Id, std::collections::BTreeMap<Id, SceneVolume>>,
     #[serde(default)]
@@ -1262,6 +1266,11 @@ pub struct Project {
     pub audio: Vec<AudioChannel>,
     pub rules: Vec<Rule>,
     pub preferences: Preferences,
+}
+
+/// Two layers sit and look the same (their group, which belongs to one scene, aside).
+fn same_place(a: &Layer, b: &Layer) -> bool {
+    a.rect == b.rect && a.crop == b.crop && a.frame == b.frame && a.look == b.look && a.visible == b.visible && a.locked == b.locked && a.opacity == b.opacity
 }
 
 fn layer(source: Id, rect: [f32; 4]) -> Layer {
@@ -1409,6 +1418,7 @@ impl Default for Project {
                 donations: Default::default(),
                 widget_periods: Default::default(),
                 widget_values: Default::default(),
+                every_scene: Default::default(),
                 scene_audio: Default::default(),
                 transition: Transition::Cut,
                 transition_ms: 300,
@@ -1490,6 +1500,130 @@ impl Project {
             added = true;
         }
         added
+    }
+    /// Merges alert boxes that are copies of one another (the same settings) into one, so every scene
+    /// shows the box alerts are sent to: pasting a layer used to give the box a source of its own.
+    /// The box the most alert steps use is kept. Returns whether any were merged.
+    pub fn merge_alert_boxes(&mut self) -> bool {
+        let boxes: Vec<(Id, widgets::Settings)> = self.sources.iter().filter_map(|s| match &s.kind {
+            SourceKind::Widget(w) if w.kind == widgets::Kind::AlertBox => Some((s.id, widgets::Settings { layout_width: 0, layout_height: 0, ..w.clone() })),
+            _ => None,
+        }).collect();
+        let uses = |id: Id| self.rules.iter().flat_map(|r| &r.actions).filter(|a| matches!(a, Action::DisplayAlert { source, .. } if *source == id)).count();
+        let mut merged = std::collections::BTreeMap::new();
+        let mut done = Vec::new();
+        for (id, settings) in &boxes {
+            if done.contains(id) {
+                continue;
+            }
+            let copies: Vec<Id> = boxes.iter().filter(|(_, s)| s == settings).map(|(i, _)| *i).collect();
+            done.extend(&copies);
+            let keep = copies.iter().copied().max_by_key(|&i| (uses(i), std::cmp::Reverse(i))).unwrap();
+            merged.extend(copies.into_iter().filter(|&i| i != keep).map(|i| (i, keep)));
+        }
+        if merged.is_empty() {
+            return false;
+        }
+        for scene in &mut self.scenes {
+            let mut seen = Vec::new();
+            scene.layers.retain_mut(|l| {
+                l.source = merged.get(&l.source).copied().unwrap_or(l.source);
+                // A scene that had two of the copies keeps one layer.
+                let box_layer = boxes.iter().any(|(id, _)| *id == l.source);
+                let again = box_layer && seen.contains(&l.source);
+                seen.push(l.source);
+                !again
+            });
+        }
+        for action in self.rules.iter_mut().flat_map(|r| &mut r.actions) {
+            if let Action::DisplayAlert { source, .. } | Action::UpdateWidget { source, .. } = action
+                && let Some(keep) = merged.get(source)
+            {
+                *source = *keep;
+            }
+        }
+        self.sources.retain(|s| !merged.contains_key(&s.id));
+        let prefs = &mut self.preferences;
+        for id in merged.keys() {
+            prefs.widget_periods.remove(id);
+            prefs.widget_values.remove(id);
+            prefs.chroma_keys.remove(id);
+            prefs.every_scene.remove(id);
+        }
+        true
+    }
+    /// Removes the hidden layers earlier versions added so alert sounds could play (locked,
+    /// invisible, a pixel wide): alert clips now play from their trigger. Returns whether any went.
+    pub fn drop_hidden_alert_layers(&mut self) -> bool {
+        let clips: Vec<Id> = self.sources.iter().filter(|s| matches!(&s.kind, SourceKind::VideoFile(v) if v.automation_only)).map(|s| s.id).collect();
+        let mut removed = false;
+        for scene in &mut self.scenes {
+            let before = scene.layers.len();
+            scene.layers.retain(|l| !(clips.contains(&l.source) && l.locked && l.opacity == 0. && l.rect[2] <= 0.001 && l.rect[3] <= 0.001));
+            removed |= scene.layers.len() != before;
+        }
+        removed
+    }
+    /// Whether this source's layer is the same in every scene of a video: place, size, crop, look
+    /// and whether it shows. Alert boxes are unless turned off, so alerts don't jump between scenes.
+    pub fn every_scene(&self, source: Id) -> bool {
+        self.preferences.every_scene.get(&source).copied().unwrap_or_else(|| {
+            self.source(source).is_some_and(|s| matches!(&s.kind, SourceKind::Widget(w) if w.kind == widgets::Kind::AlertBox))
+        })
+    }
+    /// The video (canvas) whose scene list holds this scene.
+    pub fn video_of(&self, scene: Id) -> Option<Id> {
+        self.canvases.iter().find(|c| c.scene == scene || self.canvas_scenes(c.id).contains(&scene)).map(|c| c.id)
+    }
+    /// Makes the layers of "every scene" sources match in all scenes of each video. A layer that
+    /// differs from what the last call left in `last` was just edited and is copied to the others
+    /// (the video's current scene wins a tie). Scenes without it get it on top, except scenes shown
+    /// inside another scene, where it would be drawn twice. Returns whether anything changed.
+    pub fn sync_every_scene(&mut self, last: &mut std::collections::BTreeMap<(Id, Id), Layer>) -> bool {
+        let linked: Vec<Id> = self.sources.iter().map(|s| s.id).filter(|&id| self.every_scene(id)).collect();
+        last.retain(|(_, source), _| linked.contains(source));
+        let nested: Vec<Id> = self.scenes.iter().flat_map(|s| &s.layers).filter_map(|l| match self.source(l.source).map(|s| &s.kind) {
+            Some(SourceKind::Scene(inner)) => Some(*inner),
+            _ => None,
+        }).collect();
+        let mut changed = false;
+        for (video, current) in self.canvases.iter().map(|c| (c.id, c.scene)).collect::<Vec<_>>() {
+            let scenes: Vec<usize> = self.canvas_scenes(video).iter().filter_map(|id| self.scenes.iter().position(|s| s.id == *id)).collect();
+            for &source in &linked {
+                let placed: Vec<(usize, usize)> = scenes.iter().filter_map(|&si| self.scenes[si].layers.iter().position(|l| l.source == source).map(|i| (si, i))).collect();
+                if placed.is_empty() {
+                    last.remove(&(video, source));
+                    continue;
+                }
+                let before = last.get(&(video, source));
+                let edited: Vec<(usize, usize)> = placed.iter().copied().filter(|&(si, i)| before.is_none_or(|b| !same_place(&self.scenes[si].layers[i], b))).collect();
+                let pick = |from: &[(usize, usize)]| from.iter().copied().find(|&(si, _)| self.scenes[si].id == current).or(from.first().copied());
+                let (si, i) = pick(&edited).or(pick(&placed)).unwrap();
+                let leader = Layer { group: 0, ..self.scenes[si].layers[i].clone() };
+                for &si in &scenes {
+                    let scene = &mut self.scenes[si];
+                    if let Some(layer) = scene.layers.iter_mut().find(|l| l.source == source) {
+                        if !same_place(layer, &leader) {
+                            *layer = Layer { group: layer.group, ..leader.clone() };
+                            changed = true;
+                        }
+                    } else if !nested.contains(&scene.id) {
+                        scene.layers.push(leader.clone());
+                        changed = true;
+                    }
+                }
+                last.insert((video, source), leader);
+            }
+        }
+        changed
+    }
+    /// Removes an "every scene" source's layer from all scenes of the video `scene` belongs to.
+    pub fn remove_from_every_scene(&mut self, scene: Id, source: Id) {
+        let Some(video) = self.video_of(scene) else { return };
+        let scenes = self.canvas_scenes(video);
+        for s in self.scenes.iter_mut().filter(|s| scenes.contains(&s.id)) {
+            s.layers.retain(|l| l.source != source);
+        }
     }
     /// Whether this channel plays an alert's sound or media (not a transition or ordinary video).
     pub fn is_alert_channel(&self, c: &AudioChannel) -> bool {
@@ -2135,5 +2269,76 @@ mod transition_media_tests {
         assert!(json["preferences"].get("overlays").is_none(), "overlays are never saved");
         let old: Project = serde_json::from_value(json).unwrap();
         assert_eq!(old.preferences.transition_media, TransitionMedia::default());
+    }
+    #[test]
+    fn alert_box_layers_match_in_every_scene_of_a_video() {
+        let mut p = Project::default();
+        let alerts = p.id();
+        p.sources.push(Source { id: alerts, name: "Alerts".into(), kind: SourceKind::Widget(widgets::Settings { kind: widgets::Kind::AlertBox, ..Default::default() }) });
+        let first = p.canvases[0].scene;
+        let (second, inner, nest) = (p.id(), p.id(), p.id());
+        p.scenes.push(Scene { id: second, name: "Second".into(), layers: vec![] });
+        p.scenes.push(Scene { id: inner, name: "Shown inside".into(), layers: vec![] });
+        p.sources.push(Source { id: nest, name: "Shown inside".into(), kind: SourceKind::Scene(inner) });
+        p.scenes[0].layers.push(layer(nest, [0., 0., 1., 1.]));
+        p.scenes[0].layers.push(layer(alerts, [0.1, 0.1, 0.5, 0.3]));
+        let mut last = Default::default();
+        let at = |p: &Project, scene: Id| p.scene(scene).unwrap().layers.iter().find(|l| l.source == alerts).map(|l| (l.rect, l.visible));
+        assert!(p.sync_every_scene(&mut last));
+        assert_eq!(at(&p, second), Some(([0.1, 0.1, 0.5, 0.3], true)), "a scene without it gets it");
+        assert_eq!(at(&p, inner), None, "a scene shown inside another would draw it twice");
+        // An edit in a scene that isn't the current one still leads.
+        let l = p.scenes.iter_mut().find(|s| s.id == second).unwrap().layers.iter_mut().find(|l| l.source == alerts).unwrap();
+        l.rect = [0.6, 0.6, 0.3, 0.2];
+        l.visible = false;
+        assert!(p.sync_every_scene(&mut last));
+        assert_eq!(at(&p, first), Some(([0.6, 0.6, 0.3, 0.2], false)));
+        assert!(!p.sync_every_scene(&mut last), "nothing left to change");
+        // Placed per scene again: scenes keep their own.
+        p.preferences.every_scene.insert(alerts, false);
+        p.scenes[0].layers.iter_mut().find(|l| l.source == alerts).unwrap().rect = [0.; 4];
+        assert!(!p.sync_every_scene(&mut last));
+        assert_eq!(at(&p, second).unwrap().0, [0.6, 0.6, 0.3, 0.2]);
+        p.preferences.every_scene.remove(&alerts);
+        p.remove_from_every_scene(first, alerts);
+        assert!(!p.sync_every_scene(&mut last), "removed everywhere stays removed");
+        assert!(p.scenes.iter().all(|s| s.layers.iter().all(|l| l.source != alerts)));
+    }
+    #[test]
+    fn hidden_alert_sound_layers_are_removed_and_shown_media_kept() {
+        let mut p = Project::default();
+        let (sound, shown) = (p.id(), p.id());
+        for id in [sound, shown] {
+            p.sources.push(Source { id, name: "Clip".into(), kind: SourceKind::VideoFile(VideoSettings { automation_only: true, ..Default::default() }) });
+        }
+        let kept = p.scenes[0].layers.len();
+        p.scenes[0].layers.push(Layer { locked: true, opacity: 0., ..layer(sound, [0., 0., 0.001, 0.001]) });
+        p.scenes[0].layers.push(layer(shown, [0.3, 0.2, 0.4, 0.6]));
+        assert!(p.drop_hidden_alert_layers());
+        assert_eq!(p.scenes[0].layers.len(), kept + 1);
+        assert!(p.scenes[0].layers.iter().any(|l| l.source == shown));
+        assert!(!p.drop_hidden_alert_layers());
+    }
+    #[test]
+    fn copied_alert_boxes_merge_into_the_one_alerts_use() {
+        let mut p = Project::default();
+        let alert_box = |p: &mut Project, label: &str| {
+            let id = p.id();
+            p.sources.push(Source { id, name: "Alerts".into(), kind: SourceKind::Widget(widgets::Settings { kind: widgets::Kind::AlertBox, label: label.into(), ..Default::default() }) });
+            id
+        };
+        let (copy, used, other) = (alert_box(&mut p, "Alerts"), alert_box(&mut p, "Alerts"), alert_box(&mut p, "Different look"));
+        let second = p.id();
+        p.scenes.push(Scene { id: second, name: "Second".into(), layers: vec![layer(copy, [0.1; 4]), layer(used, [0.2; 4]), layer(other, [0.3; 4])] });
+        p.scenes[0].layers.push(layer(copy, [0.1; 4]));
+        let rule = p.id();
+        p.rules.push(Rule { id: rule, name: "Follow".into(), enabled: true, platform: None, event: EventKind::Follow, command: String::new(), cooldown_ms: 0, conditions: Default::default(), options: Default::default(),
+            actions: vec![Action::DisplayAlert { source: used, template: String::new(), media: None, seconds: 5, subject: Default::default() }] });
+        assert!(p.merge_alert_boxes());
+        assert!(p.source(copy).is_none() && p.source(used).is_some() && p.source(other).is_some(), "only true copies merge");
+        assert_eq!(p.scenes[0].layers.last().unwrap().source, used);
+        let in_second: Vec<Id> = p.scene(second).unwrap().layers.iter().map(|l| l.source).collect();
+        assert_eq!(in_second, vec![used, other], "one layer for the merged box");
+        assert!(!p.merge_alert_boxes());
     }
 }

@@ -521,18 +521,18 @@ fn add_sample_source(p: &mut Project, sample: &crate::alert_samples::Sample, lay
         return existing.id;
     }
     let id = new_media_source(p, &sample.path.to_string_lossy(), format!("{} (built-in)", sample.name));
-    add_layers(p, id, sample.sound, layer);
+    if layer {
+        add_layers(p, id);
+    }
     id
 }
 /// Media for a file chosen in a Play sound / Play media step: automation-only, reusing one
 /// already added for the same file.
-fn add_media_file(p: &mut Project, path: &str, name: String, sound: bool) -> Id {
+fn add_media_file(p: &mut Project, path: &str, name: String) -> Id {
     if let Some(existing) = p.sources.iter().find(|s| matches!(&s.kind, SourceKind::VideoFile(v) if v.automation_only && v.path == path)) {
         return existing.id;
     }
-    let id = new_media_source(p, path, name);
-    add_layers(p, id, sound, false);
-    id
+    new_media_source(p, path, name)
 }
 fn new_media_source(p: &mut Project, path: &str, name: String) -> Id {
     let id = p.id();
@@ -553,14 +553,11 @@ fn new_media_source(p: &mut Project, path: &str, name: String) -> Id {
     }
     id
 }
-fn add_layers(p: &mut Project, id: Id, sound: bool, layer: bool) {
-    // Sounds need a hidden layer to play; animations shown by Play media need a visible one.
-    let rect = if sound { [0., 0., 0.001, 0.001] } else { [0.3, 0.2, 0.4, 0.6] };
-    if sound || layer {
-        let scenes: Vec<Id> = p.canvases.iter().map(|c| c.scene).collect();
-        for scene in p.scenes.iter_mut().filter(|s| scenes.contains(&s.id)) {
-            scene.layers.push(auroracast_core::Layer { frame: Default::default(), look: Default::default(), source: id, rect, visible: true, locked: sound, opacity: if sound { 0. } else { 1. }, crop: [0.; 4], group: 0 });
-        }
+/// A visible layer for an animation shown by Play media. Sounds need none: they play from their trigger.
+fn add_layers(p: &mut Project, id: Id) {
+    let scenes: Vec<Id> = p.canvases.iter().map(|c| c.scene).collect();
+    for scene in p.scenes.iter_mut().filter(|s| scenes.contains(&s.id)) {
+        scene.layers.push(auroracast_core::Layer { frame: Default::default(), look: Default::default(), source: id, rect: [0.3, 0.2, 0.4, 0.6], visible: true, locked: false, opacity: 1., crop: [0.; 4], group: 0 });
     }
 }
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -702,9 +699,8 @@ impl Editor {
                 && let Some(r) = p.rules.iter().position(|r| r.id == rule_id)
             {
                 // The step gets its own media for the chosen file, so scene layers using other media stay as they are.
-                let sound = matches!(p.rules[r].actions.get(step), Some(Action::PlaySound { .. }));
                 let name = path.file_name().map_or_else(|| "Media".into(), |n| n.to_string_lossy().into_owned());
-                let id = add_media_file(p, &path.to_string_lossy(), name, sound);
+                let id = add_media_file(p, &path.to_string_lossy(), name);
                 if let Some(Action::PlaySound { source } | Action::PlayMedia { source }) = p.rules[r].actions.get_mut(step) {
                     *source = id;
                     changed = true;

@@ -68,7 +68,7 @@ cloned.insert(old,id);id};layer.source=id;}
  fn layer_tools_windows(&mut self,ctx:&egui::Context){
   self.layer_rename_window(ctx);
   self.layer_properties_window(ctx);
-  if let Some((scene,i))=self.pending_layer_delete.take()&& let Some(s)=self.project.scenes.iter_mut().find(|s|s.id==scene)&& s.layers.get(i).is_some_and(|l|!l.locked){let source=s.layers.remove(i).source;self.selections.remove(&scene);self.layer=None;self.crop_layer=None;self.changed();let name=self.project.source(source).map(|s|s.name.clone()).unwrap_or_default();self.deleted(format!("Removed {name} from this scene"));}
+  if let Some((scene,i))=self.pending_layer_delete.take()&& let Some(s)=self.project.scenes.iter_mut().find(|s|s.id==scene)&& s.layers.get(i).is_some_and(|l|!l.locked){let source=s.layers.remove(i).source;let everywhere=self.project.every_scene(source);if everywhere{self.project.remove_from_every_scene(scene,source);}self.selections.remove(&scene);self.layer=None;self.crop_layer=None;self.changed();let name=self.project.source(source).map(|s|s.name.clone()).unwrap_or_default();self.deleted(if everywhere{format!("Removed {name} from every scene")}else{format!("Removed {name} from this scene")});}
   let Some((scene,index))=self.crop_layer else{return};let Some(si)=self.project.scenes.iter().position(|s|s.id==scene)else{self.crop_layer=None;return};let Some(layer)=self.project.scenes[si].layers.get(index).cloned()else{self.crop_layer=None;return};
   let size=self.captures.reader().latest().into_iter().find(|(id,_)|*id==layer.source).and_then(|(_,frame)|frame).map(|f|[f.width as f32,f.height as f32]).or_else(||match &self.project.source(layer.source)?.kind{SourceKind::Image{path}=>image::image_dimensions(path).ok().map(|(w,h)|[w as f32,h as f32]),_=>None});
   let mut crop=layer.crop;let mut open=true;let mut changed=false;
@@ -90,12 +90,13 @@ struct CopiedLayer {
     canvas: [u32; 2],
 }
 /// Sources that cost real work to run (a capture, a camera, a page, a video). A pasted copy shows
-/// the same one rather than starting another; light sources get their own editable copy.
+/// the same one rather than starting another; light sources get their own editable copy. An alert
+/// box is shared too: alerts are sent to one box, so a copy of it would never show any.
 fn shared_when_copied(kind: &SourceKind) -> bool {
     matches!(
         kind,
         SourceKind::ScreenCapture | SourceKind::Game | SourceKind::Camera | SourceKind::VideoCamera(_) | SourceKind::Browser { .. } | SourceKind::VideoFile(_) | SourceKind::ChatOverlay
-    )
+    ) || matches!(kind, SourceKind::Widget(w) if w.kind == auroracast_core::widgets::Kind::AlertBox)
 }
 /// Where a layer goes on a canvas of another shape: same pixel proportions, same centre, scaled
 /// down only if it wouldn't fit.
@@ -215,5 +216,8 @@ mod copy_tests {
         assert!(shared_when_copied(&SourceKind::Browser { url: String::new() }));
         assert!(!shared_when_copied(&SourceKind::Image { path: String::new() }));
         assert!(!shared_when_copied(&SourceKind::Color([0; 4])));
+        use auroracast_core::widgets::{Kind, Settings};
+        assert!(shared_when_copied(&SourceKind::Widget(Settings { kind: Kind::AlertBox, ..Default::default() })));
+        assert!(!shared_when_copied(&SourceKind::Widget(Settings { kind: Kind::Chat, ..Default::default() })));
     }
 }
