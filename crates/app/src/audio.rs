@@ -67,6 +67,8 @@ struct Control {
     frames: Option<rosorah_capture::FrameReader>,
     outlet: Option<crate::recording::AudioOutlet>,
     streaming_outlets: Arc<Vec<crate::recording::AudioOutlet>>,
+    /// NDI output's sound.
+    shared_outlet: Option<crate::recording::AudioOutlet>,
 }
 impl Control {
     fn snapshot(&self) -> Self {
@@ -118,6 +120,9 @@ impl Audio {
     }
     pub fn recording_outlet(&self, outlet: Option<crate::recording::AudioOutlet>) {
         self.control.lock().unwrap().outlet = outlet;
+    }
+    pub fn shared_outlet(&self, outlet: Option<crate::recording::AudioOutlet>) {
+        self.control.lock().unwrap().shared_outlet = outlet;
     }
     pub fn streaming_outlets(&self, outlets: Vec<crate::recording::AudioOutlet>) {
         self.control.lock().unwrap().streaming_outlets = Arc::new(outlets);
@@ -1017,7 +1022,7 @@ fn worker(control: Arc<Mutex<Control>>, view: Arc<Mutex<View>>, stop: Arc<Atomic
         let refs: Vec<_> = pcms.iter().map(|(id, p)| (*id, p.as_slice())).collect();
         // Each output gets the tracks it carries: six for a multitrack recording, Track 1 and the
         // VOD track for a Twitch stream with VOD audio, otherwise Track 1 alone.
-        for outlet in c.outlet.iter().chain(c.streaming_outlets.iter()) {
+        for outlet in c.outlet.iter().chain(c.streaming_outlets.iter()).chain(c.shared_outlet.iter()) {
             let channels = outlet.channels();
             if let [0] = outlet.track_map() {
                 if let Ok(pcm) = mix_audio(&channels, &refs, 0, SAMPLES) {

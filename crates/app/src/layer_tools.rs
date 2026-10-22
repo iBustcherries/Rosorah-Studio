@@ -95,7 +95,7 @@ struct CopiedLayer {
 fn shared_when_copied(kind: &SourceKind) -> bool {
     matches!(
         kind,
-        SourceKind::ScreenCapture | SourceKind::Game | SourceKind::Camera | SourceKind::VideoCamera(_) | SourceKind::Browser { .. } | SourceKind::VideoFile(_) | SourceKind::ChatOverlay
+        SourceKind::ScreenCapture | SourceKind::Game | SourceKind::Camera | SourceKind::VideoCamera(_) | SourceKind::Browser { .. } | SourceKind::VideoFile(_) | SourceKind::ChatOverlay | SourceKind::Ndi(_) | SourceKind::Spout(_)
     ) || matches!(kind, SourceKind::Widget(w) if w.kind == auroracast_core::widgets::Kind::AlertBox)
 }
 /// Where a layer goes on a canvas of another shape: same pixel proportions, same centre, scaled

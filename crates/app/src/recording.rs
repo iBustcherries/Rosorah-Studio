@@ -300,6 +300,11 @@ enum Output {
     /// The Windows camera: Rosorah converts frames itself and hands them straight over.
     #[cfg(windows)]
     WindowsCamera(rosorah_windows::virtual_camera::Sink),
+    /// An NDI sender on the network, with the stream mix as its sound.
+    Ndi(String),
+    /// A Spout sender for apps on this PC.
+    #[cfg(windows)]
+    Spout(String),
 }
 impl Output {
     fn path(&self) -> PathBuf {
@@ -308,7 +313,8 @@ impl Output {
             Self::Streaming(setup) => setup.recording.clone().unwrap_or_default(),
             Self::Camera(_) => PathBuf::new(),
             #[cfg(windows)]
-            Self::WindowsCamera(_) => PathBuf::new(),
+            Self::WindowsCamera(_) | Self::Spout(_) => PathBuf::new(),
+            Self::Ndi(_) => PathBuf::new(),
         }
     }
 }
@@ -349,6 +355,15 @@ impl Recording {
     #[cfg(windows)]
     pub fn start_windows_camera(project: &Project, canvas: usize, frames: FrameReader, sink: rosorah_windows::virtual_camera::Sink) -> Result<Self> {
         Self::start_output(project, canvas, frames, Output::WindowsCamera(sink))
+    }
+    /// Sends the canvas to the network as an NDI sender until stopped.
+    pub fn start_ndi(project: &Project, canvas: usize, frames: FrameReader, name: String) -> Result<Self> {
+        Self::start_output(project, canvas, frames, Output::Ndi(name))
+    }
+    /// Shares the canvas with apps on this PC as a Spout sender until stopped.
+    #[cfg(windows)]
+    pub fn start_spout(project: &Project, canvas: usize, frames: FrameReader, name: String) -> Result<Self> {
+        Self::start_output(project, canvas, frames, Output::Spout(name))
     }
     fn start_output(
         project: &Project,
@@ -563,6 +578,8 @@ fn live_sources(project: &Project) -> std::collections::BTreeSet<Id> {
                         | auroracast_core::SourceKind::VideoCamera(_)
                         | auroracast_core::SourceKind::VideoFile(_)
                         | auroracast_core::SourceKind::Widget(_)
+                        | auroracast_core::SourceKind::Ndi(_)
+                        | auroracast_core::SourceKind::Spout(_)
                 )
             })
         })
@@ -648,6 +665,13 @@ fn run(
     if let Output::WindowsCamera(sink) = output {
         return run_windows_camera(s, project, canvas, frames, sink);
     }
+    #[cfg(windows)]
+    if matches!(output, Output::Spout(_)) {
+        return run_shared(s, project, canvas, frames, output);
+    }
+    if matches!(output, Output::Ndi(_)) {
+        return run_shared(s, project, canvas, frames, output);
+    }
     let path = output.path();
     let mode = project.lock().unwrap().1.preferences.recording_encoder;
     let cancelled = || s.end.lock().unwrap().is_some();
@@ -659,7 +683,8 @@ fn run(
         }
         // A camera takes plain frames: nothing to choose.
         #[cfg(windows)]
-        Output::WindowsCamera(_) => unreachable!(),
+        Output::WindowsCamera(_) | Output::Spout(_) => unreachable!(),
+        Output::Ndi(_) => unreachable!(),
         Output::Camera(_) => Ok(encoding::Selection { codecs: encoding::Codecs::software("rawvideo", "pcm_f32le"), details: "Virtual camera (no encoding)".into() }),
     }?;
     let codec = selection.codecs;
@@ -687,7 +712,8 @@ fn run(
         Output::Streaming(_) => encoding::launch_stream(&canvas, &codec, &s.track_titles, nv12),
         Output::Camera(device) => encoding::launch_camera(&canvas, device, nv12),
         #[cfg(windows)]
-        Output::WindowsCamera(_) => unreachable!(),
+        Output::WindowsCamera(_) | Output::Spout(_) => unreachable!(),
+        Output::Ndi(_) => unreachable!(),
     }?;
     let hub = match output {
         Output::Streaming(setup) => Some(crate::streaming::Hub::start(
@@ -850,6 +876,54 @@ fn run_windows_camera(s: &Arc<Shared>, project: Arc<Mutex<(u64, Project)>>, canv
             sink.send(&picture.data);
             s.render_ns.store(picture.render.as_nanos() as u64, Ordering::Relaxed);
             s.video_progress.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    Ok(())
+}
+
+/// NDI and Spout outputs: the renderer's RGBA pictures handed straight over, newest only, with no
+/// encoder. NDI also sends the stream mix, read from the audio queue once each block is due.
+fn run_shared(s: &Arc<Shared>, project: Arc<Mutex<(u64, Project)>>, canvas: Canvas, frames: FrameReader, output: &Output) -> Result<()> {
+    let initial = project.lock().unwrap().1.clone();
+    selected_project(&initial, &canvas)?;
+    let mut ndi = match output {
+        Output::Ndi(name) => Some(crate::ndi::Sender::new(name, canvas.width, canvas.height, canvas.fps)?),
+        _ => None,
+    };
+    #[cfg(windows)]
+    let mut spout = match output {
+        Output::Spout(name) => Some(rosorah_windows::spout::Sender::new(name)?),
+        _ => None,
+    };
+    let subscription = renderer::Subscription::new(&initial, frames, &canvas, renderer::Format::Rgba, canvas.fps);
+    let start = Instant::now();
+    *s.clock.lock().unwrap() = Some(start);
+    {
+        let mut view = s.view.lock().unwrap();
+        view.phase = Phase::Recording;
+        view.encoder = if ndi.is_some() { "NDI output" } else { "Spout output" }.into();
+        view.details = format!("{} (no encoding)", view.encoder);
+    }
+    let mut sound = 0u64;
+    while s.end.lock().unwrap().is_none() && !s.abort.load(Ordering::Relaxed) {
+        if let Some(picture) = subscription.take(Duration::from_millis(5))?.pop() {
+            if let Some(ndi) = &ndi {
+                ndi.picture(&picture.data, picture.at.saturating_duration_since(start))?;
+            }
+            #[cfg(windows)]
+            if let Some(spout) = &mut spout {
+                spout.send(&picture.data, canvas.width, canvas.height)?;
+            }
+            s.render_ns.store(picture.render.as_nanos() as u64, Ordering::Relaxed);
+            s.video_progress.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(ndi) = &mut ndi {
+            while start.elapsed() >= time_of(sound + BLOCK, RATE) + LEAD {
+                let pcm = s.audio.lock().unwrap().read_channels(sound, BLOCK, s.audio_channels);
+                ndi.sound(&pcm)?;
+                sound += BLOCK;
+                s.audio_progress.store(sound, Ordering::Relaxed);
+            }
         }
     }
     Ok(())

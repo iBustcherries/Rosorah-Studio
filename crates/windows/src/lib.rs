@@ -24,3 +24,6 @@ pub mod hotkeys;
 pub mod virtual_camera;
 
 pub mod capture_policy;
+
+#[cfg(windows)]
+pub mod spout;

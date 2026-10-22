@@ -1,6 +1,6 @@
 # Rosorah Studio roadmap
 
-Updated for 0.46.0 (October 2026). Rosorah Studio is original code built on
+Updated for 0.47.0 (October 2026). Rosorah Studio is original code built on
 independent libraries (Rust, egui/wgpu, GStreamer, Qt WebEngine). It aims to be an easier
 all-in-one alternative to running OBS, a chat bot and an alert service side by side,
 not a feature-for-feature copy of OBS.
@@ -18,6 +18,7 @@ not a feature-for-feature copy of OBS.
 | Sound | Shipped | Music strip that follows music apps automatically (never browser video), per-app sound strips that survive app restarts, right-click rename/hide/delete, mixer with per-scene volumes, Sound settings window (device, live level, noise suppression, gate, compressor, limiter, expander, EQ, mono, balance), monitoring, delay, six recording tracks |
 | Recording and streaming | Shipped | Hardware encoders (AMD/NVIDIA, software fallback), multistreaming to Twitch, YouTube, YouTube vertical, Kick, TikTok and custom RTMP, per-destination bitrate, reconnect, Go live checklist, replay buffer (saves the last seconds as an MP4) |
 | Virtual camera | Shipped | Rosorah's video as a webcam for Discord, Zoom and browsers (Linux: v4l2loopback; Windows 11: Rosorah's own camera component) |
+| NDI and Spout | Partly shipped | Windows: NDI sources (with sound) and an NDI output, Spout 2 sources and a Spout output, under Add → Capture devices and in the Stream panel. NDI needs the free NDI runtime (NDI Tools). Next: NDI on Linux (ship the GStreamer NDI plugin) and Spout on Linux for Windows apps in Wine/Proton (a bridge helper in the app's prefix) |
 | Hotkeys, remote control and scripts | Shipped | System-wide hotkeys for scenes, mute, push-to-talk and outputs; remote control for Stream Deck, Touch Portal and phone apps (Rosorah's protocol, plus OBS's for tools made for OBS); sandboxed Lua scripts |
 | Accounts | Shipped | Twitch, YouTube and Kick sign-in with renewable tokens in the system keyring, titles/categories, automatic stream keys |
 | Chat and activity | Shipped | Unified Twitch/YouTube/Kick/TikTok chat with moderation, colour emoji (Twemoji), an emoji and emote picker with your own Twitch, YouTube and Kick emotes, emotes and emoji as pictures in the on-canvas chat widget, which also shows profile pictures, badges, name colours and highlighted paid and first-time messages, sliding and fading in and out, leaving out bots and chatters you hide (right-click a message), Activity history for every connected account |

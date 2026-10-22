@@ -9,15 +9,16 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
 **[Download the latest release](https://github.com/iBustcherries/RosorahStudio-releases/releases/latest)**
 · Windows 10/11 installer, Fedora `.rpm`, Ubuntu/Debian `.deb`
 
-## What's new in 0.46.0
+## What's new in 0.47.0
+
+- **NDI and Spout 2 (Windows):** bring in video from another app or PC with NDI (with its sound)
+  or from apps like VTube Studio and Warudo with Spout, under **+ Add → Capture devices**. Send
+  Rosorah's main video out with the **NDI output** and **Spout output** switches in the Stream
+  panel. NDI needs the free NDI runtime (install NDI Tools). Linux support is coming next.
+
+## 0.46.0
 
 - UI adjustments.
-
-## 0.45.0
-
-- **One alert box for all your scenes:** alerts show in every scene, and moving, resizing or hiding
-  the box in one scene does the same everywhere. Copies of the alert box are merged into one, and
-  alert sounds no longer need hidden layers.
 
 ## Screenshots
 
@@ -34,7 +35,7 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
 
 ## Features
 
-- **Scenes and layers**: game, window, screen and camera capture, images, videos and playlists,
+- **Scenes and layers**: game, window, screen and camera capture, NDI and Spout (Windows), images, videos and playlists,
   browser sources, text with 68 bundled fonts, widgets, scenes inside scenes, crop, align and group
   tools, layer effects, colour correction, masks and a green-screen key.
 - **Main and vertical videos**: a second canvas for TikTok, YouTube Shorts and Reels, with linked

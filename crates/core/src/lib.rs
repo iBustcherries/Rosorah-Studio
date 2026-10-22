@@ -33,6 +33,16 @@ pub enum SourceKind {
     /// Another scene, shown as one layer (nested scene).
     Scene(Id),
     Slideshow(Slideshow),
+    /// Video (and sound) another app or PC sends over the network with NDI.
+    Ndi(Shared),
+    /// Video another app on this PC shares with Spout.
+    Spout(Shared),
+}
+/// Which NDI or Spout sender a source shows.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Shared {
+    pub sender: String,
 }
 
 impl SourceKind {
@@ -49,6 +59,8 @@ impl SourceKind {
                 | Self::Image { .. }
                 | Self::Scene(_)
                 | Self::Slideshow(_)
+                | Self::Ndi(_)
+                | Self::Spout(_)
         )
     }
     pub fn label(&self) -> &'static str {
@@ -65,6 +77,8 @@ impl SourceKind {
             Self::Widget(_) => "Widget",
             Self::Scene(_) => "Scene",
             Self::Slideshow(_) => "Image slideshow",
+            Self::Ndi(_) => "NDI",
+            Self::Spout(_) => "Spout",
         }
     }
 }

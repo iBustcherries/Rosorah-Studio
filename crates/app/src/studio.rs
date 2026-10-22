@@ -146,6 +146,7 @@ fn confirm(ctx: &egui::Context, id: &str, title: &str, body: &str, yes: &str) ->
 #[derive(Clone, Copy, PartialEq)]
 enum AddView {
     Main,
+    Devices,
     Widgets,
     Scenes,
 }
@@ -154,6 +155,8 @@ enum AddView {
 enum AddChoice {
     Capture,
     Camera,
+    Ndi,
+    Spout,
     Media,
     Image,
     Slideshow,
@@ -170,6 +173,8 @@ fn source_kind_label(kind: &SourceKind) -> (&'static str, &'static str) {
         SourceKind::ScreenCapture | SourceKind::Game => ("🖥", "Capture"),
         SourceKind::VideoCamera(_) | SourceKind::Camera => ("📷", "Camera"),
         SourceKind::VideoFile(_) => ("🎞", "Media"),
+        SourceKind::Ndi(_) => ("📡", "NDI"),
+        SourceKind::Spout(_) => ("🔀", "Spout"),
         SourceKind::Image { .. } => ("🖼", "Image"),
         SourceKind::Slideshow(_) => ("🗐", "Slideshow"),
         SourceKind::Browser { .. } => ("🌐", "Browser source"),
@@ -604,6 +609,12 @@ pub struct Studio {
     pending_events: Vec<serde_json::Value>,
     /// The virtual camera's output while it's on, and ones still finishing.
     virtual_camera: Option<crate::recording::Recording>,
+    /// Rosorah's main video sent out as NDI (network) and Spout (this PC, Windows).
+    ndi_output: Option<crate::recording::Recording>,
+    #[cfg(windows)]
+    spout_output: Option<crate::recording::Recording>,
+    /// NDI (true) and Spout (false) senders last seen, refreshed every 2 s while picking one.
+    shared_senders: std::collections::BTreeMap<bool, (Instant, Result<Vec<String>, String>)>,
     /// Windows: the camera as Windows shows it to apps, while it's on.
     #[cfg(windows)]
     windows_camera: Option<rosorah_windows::virtual_camera::Camera>,
@@ -1112,6 +1123,10 @@ impl Studio {
             scripts_loaded: Vec::new(),
             pending_events: Vec::new(),
             virtual_camera: None,
+            ndi_output: None,
+            #[cfg(windows)]
+            spout_output: None,
+            shared_senders: Default::default(),
             #[cfg(windows)]
             windows_camera: None,
             camera_stopping: Vec::new(),
@@ -1295,6 +1310,13 @@ impl Studio {
         }
         if let Some(camera) = &self.virtual_camera {
             camera.update_project(&self.project);
+        }
+        if let Some(output) = &self.ndi_output {
+            output.update_project(&self.project);
+        }
+        #[cfg(windows)]
+        if let Some(output) = &self.spout_output {
+            output.update_project(&self.project);
         }
     }
     fn accent(&self) -> Color32 {
@@ -2912,6 +2934,118 @@ impl Studio {
             }
         }
     }
+    /// NDI and Spout output switches for the Stream panel: the main video, as "Rosorah Studio".
+    fn shared_output_controls(&mut self, ui: &mut egui::Ui) {
+        let mut stopped = Vec::new();
+        if let Some(Err(e)) = self.ndi_output.as_ref().and_then(|o| o.view().result) {
+            stopped.push(format!("NDI output stopped: {e}"));
+            self.ndi_output = None;
+            self.audio.shared_outlet(None);
+        }
+        #[cfg(windows)]
+        if let Some(Err(e)) = self.spout_output.as_ref().and_then(|o| o.view().result) {
+            stopped.push(format!("Spout output stopped: {e}"));
+            self.spout_output = None;
+        }
+        for message in stopped {
+            self.tell(message);
+        }
+        ui.horizontal_wrapped(|ui| {
+            let mut on = self.ndi_output.is_some();
+            if ui.toggle_value(&mut on, "📡 NDI output").on_hover_text("Sends the main video and sound to your network as “Rosorah Studio”, for OBS, vMix or another PC").changed() {
+                if let Some(output) = self.ndi_output.take() {
+                    output.stop();
+                    self.audio.shared_outlet(None);
+                } else {
+                    match crate::recording::Recording::start_ndi(&self.project, 0, self.captures.reader(), "Rosorah Studio".into()) {
+                        Ok(output) => {
+                            self.audio.shared_outlet(Some(output.outlet()));
+                            self.ndi_output = Some(output);
+                        }
+                        Err(e) => self.tell(format!("{e:#}")),
+                    }
+                }
+            }
+            #[cfg(windows)]
+            {
+                let mut on = self.spout_output.is_some();
+                if ui.toggle_value(&mut on, "🔀 Spout output").on_hover_text("Shares the main video with apps on this PC as the Spout sender “Rosorah Studio”").changed() {
+                    if let Some(output) = self.spout_output.take() {
+                        output.stop();
+                    } else {
+                        match crate::recording::Recording::start_spout(&self.project, 0, self.captures.reader(), "Rosorah Studio".into()) {
+                            Ok(output) => self.spout_output = Some(output),
+                            Err(e) => self.tell(format!("{e:#}")),
+                        }
+                    }
+                }
+            }
+        });
+    }
+    /// The sender picker for NDI and Spout layers, with what the source is doing now.
+    fn shared_source_controls(&mut self, ui: &mut egui::Ui, id: Id) {
+        let Some((ndi, current)) = self.project.source(id).and_then(|s| match &s.kind {
+            SourceKind::Ndi(n) => Some((true, n.sender.clone())),
+            SourceKind::Spout(n) => Some((false, n.sender.clone())),
+            _ => None,
+        }) else {
+            return;
+        };
+        let stale = self.shared_senders.get(&ndi).is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(2));
+        if stale {
+            let found = if ndi {
+                crate::ndi::senders().map_err(|e| e.to_string())
+            } else {
+                #[cfg(windows)]
+                let found = Ok(rosorah_windows::spout::senders());
+                #[cfg(not(windows))]
+                let found = Err("Spout is a Windows feature. On Linux, Spout from Windows apps running in Wine is coming in a later update.".to_string());
+                found
+            };
+            self.shared_senders.insert(ndi, (Instant::now(), found));
+            ui.ctx().request_repaint_after(Duration::from_secs(2));
+        }
+        let mut chosen = None;
+        match &self.shared_senders[&ndi].1 {
+            Err(e) => {
+                ui.colored_label(egui::Color32::LIGHT_RED, e);
+                if ndi {
+                    ui.hyperlink_to("Get NDI Tools (free)", crate::ndi::GET_NDI);
+                }
+            }
+            Ok(list) => {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(if ndi { "NDI sender" } else { "Spout sender" });
+                    let shown = if current.is_empty() { "Choose…".to_owned() } else { current.clone() };
+                    egui::ComboBox::from_id_salt(("shared-sender", id)).selected_text(shown).show_ui(ui, |ui| {
+                        if list.is_empty() {
+                            ui.weak(if ndi { "Looking on your network…" } else { "No app is sending with Spout" });
+                        }
+                        for name in list {
+                            if ui.selectable_label(*name == current, name).clicked() {
+                                chosen = Some(name.clone());
+                            }
+                        }
+                    });
+                });
+                note(ui, if ndi { "Senders on your network appear here within a few seconds." } else { "Turn on Spout output in the other app (VTube Studio, Warudo, TouchDesigner…), and it appears here." });
+            }
+        }
+        if !current.is_empty() {
+            note(ui, self.captures.camera_status(id));
+        }
+        if let Some(name) = chosen
+            && let Some(source) = self.project.sources.iter_mut().find(|s| s.id == id)
+        {
+            if let SourceKind::Ndi(n) | SourceKind::Spout(n) = &mut source.kind {
+                n.sender = name.clone();
+            }
+            if source.name == "NDI" || source.name == "Spout" {
+                source.name = name;
+            }
+            self.changed();
+        }
+    }
     /// Virtual camera controls for the Stream panel.
     fn virtual_camera_controls(&mut self, ui: &mut egui::Ui) {
         self.camera_stopping.retain(|c| c.view().result.is_none());
@@ -3294,6 +3428,16 @@ impl Studio {
                 self.add_source_layer(si, "Camera", SourceKind::VideoCamera(Default::default()), rect);
                 self.layer_properties = Some((scene, self.project.scenes[si].layers.len() - 1));
             }
+            AddChoice::Ndi | AddChoice::Spout => {
+                let ndi = matches!(choice, AddChoice::Ndi);
+                let (name, kind) = if ndi { ("NDI", SourceKind::Ndi(Default::default())) } else { ("Spout", SourceKind::Spout(Default::default())) };
+                let id = self.add_source_layer(si, name, kind, [0.1, 0.1, 0.5, 0.5]);
+                // NDI carries sound too; it gets a mixer strip like a media file.
+                if ndi {
+                    self.project.add_media_audio(id, name.into());
+                }
+                self.layer_properties = Some((scene, self.project.scenes[si].layers.len() - 1));
+            }
             // Choosing a file adds it straight away; there's no separate Add step.
             AddChoice::Media => self.pick_media(scene, MediaPick::File, "Choose a video, GIF or sound"),
             AddChoice::Image => self.pick_media(scene, MediaPick::File, "Choose an image"),
@@ -3363,7 +3507,6 @@ impl Studio {
                         tile_rows(ui, |ui| {
                             for (icon, title, hint, choice) in [
                                 ("🖥", "Game, window or screen", "Capture what you're playing", Some(AddChoice::Capture)),
-                                ("📷", "Camera", "Webcam, USB camera or DroidCam", Some(AddChoice::Camera)),
                                 ("🎞", "Media file", "Video, GIF or sound", Some(AddChoice::Media)),
                                 ("🖼", "Image", "A picture or logo", Some(AddChoice::Image)),
                                 ("🗐", "Image slideshow", "Every picture in a folder", Some(AddChoice::Slideshow)),
@@ -3379,6 +3522,9 @@ impl Studio {
                                         Some(c) => chosen = Some(c),
                                         None => next_view = Some(AddView::Widgets),
                                     }
+                                }
+                                if title == "Game, window or screen" && add_tile(ui, "📷", "Capture devices", "Camera, NDI or Spout", true) {
+                                    next_view = Some(AddView::Devices);
                                 }
                             }
                             if add_tile(ui, "🗖", "Scene", "Another scene as one layer", !others.is_empty()) {
@@ -3423,6 +3569,25 @@ impl Studio {
                                 }
                             }
                         });
+                    });
+                }
+                AddView::Devices => {
+                    if ui.button("← Back").clicked() {
+                        next_view = Some(AddView::Main);
+                    }
+                    ui.heading("Capture devices");
+                    ui.add_space(6.);
+                    tile_rows(ui, |ui| {
+                        if add_tile(ui, "📷", "Camera", "Webcam, USB camera or DroidCam", true) {
+                            chosen = Some(AddChoice::Camera);
+                        }
+                        if add_tile(ui, "📡", "NDI", "Video and sound from another app or PC on your network", true) {
+                            chosen = Some(AddChoice::Ndi);
+                        }
+                        let spout = if cfg!(windows) { "Video from another app on this PC (VTube Studio, Warudo…)" } else { "Windows apps only (coming to Linux)" };
+                        if add_tile(ui, "🔀", "Spout", spout, cfg!(windows)) {
+                            chosen = Some(AddChoice::Spout);
+                        }
                     });
                 }
                 AddView::Scenes => {
@@ -4341,6 +4506,7 @@ impl Studio {
         ui.separator();
         self.replay_controls(ui);
         self.virtual_camera_controls(ui);
+        self.shared_output_controls(ui);
         ui.separator();
         ui.strong("Where to stream");
         let before = self.stream_config.clone();
@@ -7622,10 +7788,11 @@ impl eframe::App for Studio {
             self.audio_scene = Some(scene);
         }
         self.captures.sync_cameras(&self.project);
+        self.captures.sync_shared(&self.project);
         self.captures.tick();
         let mut resized = false;
         for source in &self.project.sources {
-            if matches!(source.kind, SourceKind::VideoFile(_))
+            if matches!(source.kind, SourceKind::VideoFile(_) | SourceKind::Ndi(_) | SourceKind::Spout(_))
                 && let Some(size) = self.captures.camera_dimensions(source.id)
                 && self.video_aspects.get(&source.id) != Some(&size)
             {

@@ -227,6 +227,7 @@ impl Studio {
                 _ => {}
             }
             self.camera_controls(ui, id);
+            self.shared_source_controls(ui, id);
             self.video_controls(ui, id);
             self.browser_source_ui(ui, id);
             self.folder_source_controls(ui, id);

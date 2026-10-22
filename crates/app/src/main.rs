@@ -51,6 +51,7 @@ mod launch_hook;
 mod material;
 mod media;
 mod music_service;
+mod ndi;
 #[cfg(not(windows))]
 mod music;
 #[cfg(windows)]

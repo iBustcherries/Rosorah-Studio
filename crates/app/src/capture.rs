@@ -67,6 +67,8 @@ pub struct Captures {
     browser_state: serde_json::Value,
     cameras: std::collections::BTreeMap<Id, auroracast_core::CameraSettings>,
     camera_errors: std::collections::BTreeMap<Id, String>,
+    /// NDI and Spout sources running now.
+    shared: std::collections::BTreeMap<Id, SourceKind>,
     modes: std::collections::BTreeMap<Id, Target>,
     armed: std::collections::BTreeSet<Id>,
     attempts: std::collections::BTreeMap<Id, std::time::Instant>,
@@ -422,6 +424,52 @@ impl Captures {
                     self.camera_errors.remove(&id);
                 }
             }
+        }
+    }
+    /// Runs the NDI and Spout sources used in a scene, retrying every 5 s while their sender is away.
+    pub fn sync_shared(&mut self, project: &Project) {
+        let desired: std::collections::BTreeMap<_, _> = project
+            .sources
+            .iter()
+            .filter(|s| matches!(s.kind, SourceKind::Ndi(_) | SourceKind::Spout(_)))
+            .filter(|s| project.scenes.iter().any(|scene| scene.layers.iter().any(|l| l.source == s.id)))
+            .map(|s| (s.id, &s.kind))
+            .collect();
+        let removed: Vec<_> = self.shared.keys().filter(|id| !desired.contains_key(id)).copied().collect();
+        for id in removed {
+            self.engine.stop(id);
+            self.shared.remove(&id);
+            self.camera_errors.remove(&id);
+            self.videos.bus.clear(id);
+        }
+        for (id, kind) in desired {
+            if self.shared.get(&id) != Some(kind) {
+                self.engine.stop(id);
+                if self.engine.running(id) {
+                    continue;
+                }
+                self.shared.insert(id, kind.clone());
+                self.attempts.remove(&id);
+            }
+            if self.engine.running(id) || self.attempts.get(&id).is_some_and(|t| t.elapsed() < Duration::from_secs(5)) {
+                continue;
+            }
+            self.attempts.insert(id, std::time::Instant::now());
+            let backend: Box<dyn rosorah_capture::Backend> = match kind {
+                SourceKind::Ndi(n) => Box::new(crate::ndi::NdiBackend { id, sender: n.sender.clone(), audio: self.videos.bus.clone() }),
+                #[cfg(windows)]
+                SourceKind::Spout(n) => Box::new(rosorah_windows::spout::SpoutBackend(n.sender.clone())),
+                #[cfg(not(windows))]
+                SourceKind::Spout(_) => {
+                    self.camera_errors.insert(id, "Spout is a Windows feature; on Linux it needs Rosorah's Spout bridge for Wine apps (coming soon)".into());
+                    continue;
+                }
+                _ => continue,
+            };
+            match self.engine.start(id, backend, Options::default()) {
+                Ok(_) => self.camera_errors.remove(&id),
+                Err(e) => self.camera_errors.insert(id, e.to_string()),
+            };
         }
     }
     pub fn camera_dimensions(&self, id: Id) -> Option<[u32; 2]> {
