@@ -1713,13 +1713,19 @@ impl Studio {
                     format!("{} {mark}", d.name)
                 })
                 .collect();
+            // Just the timer up here; where it's going is in the hover (and the Stream panel).
+            let failed = destinations.iter().filter(|d| d.ends_with('✕')).count();
             let (text, color) = if view.phase == Phase::Starting {
                 ("● STARTING…".to_owned(), Color32::from_rgb(230, 190, 90))
+            } else if failed > 0 {
+                (format!("● LIVE {} · {failed} {} attention", clock(view.elapsed), if failed == 1 { "needs" } else { "need" }), Color32::from_rgb(255, 92, 92))
             } else {
-                (format!("● LIVE {} · {}", clock(view.elapsed), destinations.join("  ")), Color32::from_rgb(255, 92, 92))
+                (format!("● LIVE {}", clock(view.elapsed)), Color32::from_rgb(255, 92, 92))
             };
-            ui.label(RichText::new(text).strong().color(color))
-                .on_hover_text("✓ sending · … connecting · ✕ needs attention. Check your platform's dashboard to see what viewers get.");
+            ui.label(RichText::new(text).strong().color(color)).on_hover_text(format!(
+                "{}\n\n✓ sending · … connecting · ✕ needs attention. Check your platform's dashboard to see what viewers get.",
+                destinations.join("\n")
+            ));
         } else if ui
             .add(self.primary_button("Go live"))
             .on_hover_text("Checks your setup, then starts the stream")

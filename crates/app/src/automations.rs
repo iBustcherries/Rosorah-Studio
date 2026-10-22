@@ -701,9 +701,16 @@ impl Editor {
                 // The step gets its own media for the chosen file, so scene layers using other media stay as they are.
                 let name = path.file_name().map_or_else(|| "Media".into(), |n| n.to_string_lossy().into_owned());
                 let id = add_media_file(p, &path.to_string_lossy(), name);
-                if let Some(Action::PlaySound { source } | Action::PlayMedia { source }) = p.rules[r].actions.get_mut(step) {
-                    *source = id;
-                    changed = true;
+                match p.rules[r].actions.get_mut(step) {
+                    Some(Action::PlaySound { source } | Action::PlayMedia { source }) => {
+                        *source = id;
+                        changed = true;
+                    }
+                    Some(Action::DisplayAlert { media, .. }) => {
+                        *media = Some(id);
+                        changed = true;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1329,16 +1336,42 @@ impl Editor {
                 ui.add(egui::Slider::new(seconds, 1..=60).text("seconds on screen"));
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Picture / video");
-                    egui::ComboBox::from_id_salt(("alert_media", i))
-                        .selected_text(media.and_then(|id| media_name(sources, id)).unwrap_or_else(|| "None".into()))
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(media, None, "None");
-                            for s in sources.iter().filter(|s| matches!(s.kind, SourceKind::VideoFile(_))) {
-                                ui.selectable_value(media, Some(s.id), &s.name);
-                            }
+                    // A file from disk, like Play media; choosing one gives the alert its own media.
+                    let path = media.and_then(|id| sources.iter().find(|s| s.id == id)).and_then(|s| match &s.kind {
+                        SourceKind::VideoFile(v) => Some(v.path.clone()),
+                        _ => None,
+                    });
+                    match &path {
+                        Some(path) => {
+                            let file = std::path::Path::new(path).file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
+                            ui.strong(file).on_hover_text(path);
+                        }
+                        None => {
+                            ui.weak("None");
+                        }
+                    }
+                    let choosing = self.picker.as_ref().is_some_and(|(key, _)| *key == (rule_id, i));
+                    if ui.add_enabled(!choosing, egui::Button::new(if path.is_some() { "Change file…" } else { "Choose file…" })).clicked() {
+                        let (tx, rx) = mpsc::channel();
+                        self.picker = Some(((rule_id, i), rx));
+                        std::thread::spawn(move || {
+                            let path = crate::desktop::pick(crate::desktop::Pick::Open, "Choose a picture or video", "").unwrap_or_else(|e| {
+                                crate::capture_log::event(e.to_string());
+                                None
+                            });
+                            let _ = tx.send(path);
                         });
+                    }
                     if let Some(sample) = self.sample_menu(ui, false) {
                         *sample_choice = Some((i, sample));
+                    }
+                    if let Some(id) = *media {
+                        if path.is_some() && ui.button("Preview").clicked() {
+                            cmds.push(Command::Preview(id));
+                        }
+                        if ui.button("Remove").on_hover_text("Show the alert text without a picture or video").clicked() {
+                            *media = None;
+                        }
                     }
                 });
                 if let Some(id) = *media {

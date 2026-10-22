@@ -192,7 +192,7 @@ checksum = "21e4227379beff4205943696e6c3e0cd809bacdf3f0edd6e3dd153e2269571a4"
 
 [[package]]
 name = "auroracast-core"
-version = "0.45.0"
+version = "0.46.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "auroracast-gpu"
-version = "0.45.0"
+version = "0.46.0"
 dependencies = [
  "anyhow",
  "auroracast-core",
@@ -3016,7 +3016,7 @@ dependencies = [
 
 [[package]]
 name = "rosorah-camera"
-version = "0.45.0"
+version = "0.46.0"
 dependencies = [
  "windows",
  "windows-core",
@@ -3024,7 +3024,7 @@ dependencies = [
 
 [[package]]
 name = "rosorah-capture"
-version = "0.45.0"
+version = "0.46.0"
 dependencies = [
  "anyhow",
  "tokio",
@@ -3032,7 +3032,7 @@ dependencies = [
 
 [[package]]
 name = "rosorah-studio"
-version = "0.45.0"
+version = "0.46.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -3068,7 +3068,7 @@ dependencies = [
 
 [[package]]
 name = "rosorah-windows"
-version = "0.45.0"
+version = "0.46.0"
 dependencies = [
  "anyhow",
  "rosorah-capture",
