@@ -42,16 +42,7 @@ fn sessions() -> Vec<Session> {
             continue;
         }
         let Ok(environ) = std::fs::read(dir.join("environ")) else { continue };
-        let mut env: Vec<(OsString, OsString)> = Vec::new();
-        for pair in environ.split(|b| *b == 0) {
-            let pair = String::from_utf8_lossy(pair);
-            // The server socket is an inherited handle that only works in Wine's own children.
-            if let Some((k, v)) = pair.split_once('=')
-                && !matches!(k, "WINESERVERSOCKET" | "WINELOADERNOEXEC")
-            {
-                env.push((k.into(), v.into()));
-            }
-        }
+        let env = outside_env(&environ);
         let var = |key: &str| env.iter().find(|(k, _)| k == key).map(|(_, v)| v.to_string_lossy().into_owned());
         let prefix = var("WINEPREFIX").unwrap_or_else(|| format!("{home}/.wine"));
         let prefix = prefix.trim_end_matches('/').to_owned();
@@ -64,6 +55,32 @@ fn sessions() -> Vec<Session> {
         found.push(Session { prefix, loader, env });
     }
     found
+}
+/// The app's environment, made to work outside Steam's runtime container: games from Steam run
+/// inside it, and their graphics driver paths (/usr/lib/pressure-vessel/…) only exist in there.
+/// Without them the helper uses the system's own drivers, which reach the same Wine session.
+fn outside_env(environ: &[u8]) -> Vec<(OsString, OsString)> {
+    const CONTAINER: [&str; 2] = ["/usr/lib/pressure-vessel", "/run/host"];
+    let mut env = Vec::new();
+    for pair in environ.split(|b| *b == 0) {
+        let pair = String::from_utf8_lossy(pair);
+        let Some((k, v)) = pair.split_once('=') else { continue };
+        // The server socket is an inherited handle that only works in Wine's own children.
+        if matches!(k, "WINESERVERSOCKET" | "WINELOADERNOEXEC") || k.starts_with("PRESSURE_VESSEL") {
+            continue;
+        }
+        let v = if CONTAINER.iter().any(|c| v.contains(c)) {
+            let kept: Vec<&str> = v.split(':').filter(|e| !e.is_empty() && !CONTAINER.iter().any(|c| e.starts_with(c)) && std::path::Path::new(e).exists()).collect();
+            if kept.is_empty() {
+                continue;
+            }
+            kept.join(":")
+        } else {
+            v.to_owned()
+        };
+        env.push((k.into(), v.into()));
+    }
+    env
 }
 /// The helper shipped beside Rosorah (ROSORAH_SPOUT_BRIDGE overrides it, for testing).
 fn helper() -> Result<PathBuf> {
@@ -191,6 +208,17 @@ impl rosorah_capture::Backend for BridgeBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn steam_container_paths_are_dropped_and_host_paths_kept() {
+        let environ = b"WINESERVERSOCKET=21\0VK_ICD_FILENAMES=/usr/lib/pressure-vessel/overrides/share/vulkan/icd.d/radeon_icd.x86_64.json\0XDG_DATA_DIRS=/usr/lib/pressure-vessel/overrides/share:/usr/share:/run/host/share\0PRESSURE_VESSEL_RUNTIME=steamrt4\0WINEPREFIX=/home/a/pfx\0";
+        let env = outside_env(environ);
+        let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.to_string_lossy().into_owned());
+        assert_eq!(get("VK_ICD_FILENAMES"), None);
+        assert_eq!(get("XDG_DATA_DIRS").as_deref(), Some("/usr/share"));
+        assert_eq!(get("WINEPREFIX").as_deref(), Some("/home/a/pfx"));
+        assert_eq!(get("WINESERVERSOCKET"), None);
+        assert_eq!(get("PRESSURE_VESSEL_RUNTIME"), None);
+    }
     /// Needs a Windows app sending ROSORAH_SPOUT_TEST_SENDER in Wine/Proton (the bridge's own
     /// `--send` works) and ROSORAH_SPOUT_BRIDGE pointing at rosorah-spout-bridge.exe.
     #[test]
