@@ -46,6 +46,8 @@ impl Sources {
                     | SourceKind::VideoCamera(_)
                     | SourceKind::VideoFile(_)
                     | SourceKind::Widget(_)
+                    | SourceKind::Ndi(_)
+                    | SourceKind::Spout(_)
             ) {
                 gpu.ensure_empty_source(source.id)?;
                 self.uploaded.remove(&source.id);

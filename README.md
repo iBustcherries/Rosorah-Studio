@@ -9,18 +9,16 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
 **[Download the latest release](https://github.com/iBustcherries/RosorahStudio-releases/releases/latest)**
 · Windows 10/11 installer, Fedora `.rpm`, Ubuntu/Debian `.deb`
 
-## What's new in 0.48.0
+## What's new in 0.49.0
+
+- **Fix:** Spout and NDI layers (such as VTube Studio) no longer vanish with a "not implemented"
+  message while you move or resize them.
+
+## 0.48.0
 
 - **NDI and Spout on Linux:** NDI sources and output now work on Linux too (install the free NDI
   runtime). Spout works with Windows apps running in Wine or Proton, such as VTube Studio:
   bring their Spout video in, or share Rosorah's video with them.
-
-## 0.47.0
-
-- **NDI and Spout 2 (Windows):** bring in video from another app or PC with NDI (with its sound)
-  or from apps like VTube Studio and Warudo with Spout, under **+ Add → Capture devices**. Send
-  Rosorah's main video out with the **NDI output** and **Spout output** switches in the Stream
-  panel. NDI needs the free NDI runtime (install NDI Tools). Linux support is coming next.
 
 ## Screenshots
 
