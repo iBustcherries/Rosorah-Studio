@@ -8,10 +8,15 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 command -v podman >/dev/null || { echo "Missing 'podman': sudo dnf install podman" >&2; exit 1; }
 mkdir -p "$root/dist" "${CARGO_HOME:-$HOME/.cargo}/registry"
+# The Spout bridge is a Windows program, so it's built here (cargo-xwin) and handed in.
+bridge="$root/target-windows/bridge-out"
+rm -rf "$bridge" && mkdir -p "$bridge"
+bash "$here/../spout-bridge/build-bridge.sh" "$bridge" || echo "WARNING: the Spout bridge was not built. The package will work, but without Spout." >&2
 # Build tools and the compiled output are kept in podman volumes, so later builds are quicker.
 podman run --rm \
     -v "$root:/src:ro,z" \
     -v "$root/dist:/dist:z" \
+    -v "$bridge:/bridge:ro,z" \
     -v "${CARGO_HOME:-$HOME/.cargo}/registry:/root/.cargo/registry:z" \
     -v rosorah-deb-rustup:/root/.rustup \
     -v rosorah-deb-target:/work/target \

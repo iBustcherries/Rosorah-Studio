@@ -302,8 +302,7 @@ enum Output {
     WindowsCamera(rosorah_windows::virtual_camera::Sink),
     /// An NDI sender on the network, with the stream mix as its sound.
     Ndi(String),
-    /// A Spout sender for apps on this PC.
-    #[cfg(windows)]
+    /// A Spout sender for apps on this PC (on Linux, Windows apps in Wine/Proton).
     Spout(String),
 }
 impl Output {
@@ -313,8 +312,8 @@ impl Output {
             Self::Streaming(setup) => setup.recording.clone().unwrap_or_default(),
             Self::Camera(_) => PathBuf::new(),
             #[cfg(windows)]
-            Self::WindowsCamera(_) | Self::Spout(_) => PathBuf::new(),
-            Self::Ndi(_) => PathBuf::new(),
+            Self::WindowsCamera(_) => PathBuf::new(),
+            Self::Ndi(_) | Self::Spout(_) => PathBuf::new(),
         }
     }
 }
@@ -361,7 +360,6 @@ impl Recording {
         Self::start_output(project, canvas, frames, Output::Ndi(name))
     }
     /// Shares the canvas with apps on this PC as a Spout sender until stopped.
-    #[cfg(windows)]
     pub fn start_spout(project: &Project, canvas: usize, frames: FrameReader, name: String) -> Result<Self> {
         Self::start_output(project, canvas, frames, Output::Spout(name))
     }
@@ -665,11 +663,7 @@ fn run(
     if let Output::WindowsCamera(sink) = output {
         return run_windows_camera(s, project, canvas, frames, sink);
     }
-    #[cfg(windows)]
-    if matches!(output, Output::Spout(_)) {
-        return run_shared(s, project, canvas, frames, output);
-    }
-    if matches!(output, Output::Ndi(_)) {
+    if matches!(output, Output::Ndi(_) | Output::Spout(_)) {
         return run_shared(s, project, canvas, frames, output);
     }
     let path = output.path();
@@ -683,8 +677,8 @@ fn run(
         }
         // A camera takes plain frames: nothing to choose.
         #[cfg(windows)]
-        Output::WindowsCamera(_) | Output::Spout(_) => unreachable!(),
-        Output::Ndi(_) => unreachable!(),
+        Output::WindowsCamera(_) => unreachable!(),
+        Output::Ndi(_) | Output::Spout(_) => unreachable!(),
         Output::Camera(_) => Ok(encoding::Selection { codecs: encoding::Codecs::software("rawvideo", "pcm_f32le"), details: "Virtual camera (no encoding)".into() }),
     }?;
     let codec = selection.codecs;
@@ -712,8 +706,8 @@ fn run(
         Output::Streaming(_) => encoding::launch_stream(&canvas, &codec, &s.track_titles, nv12),
         Output::Camera(device) => encoding::launch_camera(&canvas, device, nv12),
         #[cfg(windows)]
-        Output::WindowsCamera(_) | Output::Spout(_) => unreachable!(),
-        Output::Ndi(_) => unreachable!(),
+        Output::WindowsCamera(_) => unreachable!(),
+        Output::Ndi(_) | Output::Spout(_) => unreachable!(),
     }?;
     let hub = match output {
         Output::Streaming(setup) => Some(crate::streaming::Hub::start(
@@ -890,9 +884,11 @@ fn run_shared(s: &Arc<Shared>, project: Arc<Mutex<(u64, Project)>>, canvas: Canv
         Output::Ndi(name) => Some(crate::ndi::Sender::new(name, canvas.width, canvas.height, canvas.fps)?),
         _ => None,
     };
-    #[cfg(windows)]
     let mut spout = match output {
+        #[cfg(windows)]
         Output::Spout(name) => Some(rosorah_windows::spout::Sender::new(name)?),
+        #[cfg(not(windows))]
+        Output::Spout(name) => Some(crate::spout_bridge::Sender::new(name)?),
         _ => None,
     };
     let subscription = renderer::Subscription::new(&initial, frames, &canvas, renderer::Format::Rgba, canvas.fps);
@@ -910,7 +906,6 @@ fn run_shared(s: &Arc<Shared>, project: Arc<Mutex<(u64, Project)>>, canvas: Canv
             if let Some(ndi) = &ndi {
                 ndi.picture(&picture.data, picture.at.saturating_duration_since(start))?;
             }
-            #[cfg(windows)]
             if let Some(spout) = &mut spout {
                 spout.send(&picture.data, canvas.width, canvas.height)?;
             }

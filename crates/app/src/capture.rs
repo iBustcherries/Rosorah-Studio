@@ -459,11 +459,9 @@ impl Captures {
                 SourceKind::Ndi(n) => Box::new(crate::ndi::NdiBackend { id, sender: n.sender.clone(), audio: self.videos.bus.clone() }),
                 #[cfg(windows)]
                 SourceKind::Spout(n) => Box::new(rosorah_windows::spout::SpoutBackend(n.sender.clone())),
+                // On Linux, Spout comes from Windows apps in Wine/Proton through Rosorah's bridge.
                 #[cfg(not(windows))]
-                SourceKind::Spout(_) => {
-                    self.camera_errors.insert(id, "Spout is a Windows feature; on Linux it needs Rosorah's Spout bridge for Wine apps (coming soon)".into());
-                    continue;
-                }
+                SourceKind::Spout(n) => Box::new(crate::spout_bridge::BridgeBackend(n.sender.clone())),
                 _ => continue,
             };
             match self.engine.start(id, backend, Options::default()) {

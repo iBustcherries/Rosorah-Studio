@@ -35,6 +35,14 @@ cp packaging/rpm/rosorah-studio-wrapper "$work/"
 cp packaging/io.rosorah.Studio.desktop "$work/"
 cp -r packaging/icons "$work/icons"
 
+echo "== Building the Spout bridge for Windows apps in Wine/Proton (skipped without cargo-xwin)"
+if ! bash "$here/../spout-bridge/build-bridge.sh" "$stage"; then
+    echo "WARNING: the Spout bridge was not built. The package will work, but without Spout." >&2
+fi
+
+echo "== Building the NDI plugin"
+bash "$here/../ndi/build-ndi.sh" "$work" "$stage/gstreamer"
+
 echo "== Building optional game-capture hooks (skipped if the 32-bit tools are missing)"
 if (cd native && bash ./build.sh); then
     mkdir -p "$stage/hooks"

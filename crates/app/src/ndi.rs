@@ -39,13 +39,14 @@ pub fn ready() -> Result<()> {
     }
     if gst::ElementFactory::find("ndisrc").is_none() {
         if !plugin_files().iter().any(|p| p.is_file()) && !cfg!(windows) {
-            bail!("NDI on Linux arrives in the next Rosorah update.");
+            bail!("This Rosorah build doesn't include GStreamer's NDI plugin (packaging/ndi/build-ndi.sh builds it).");
         }
         bail!(missing());
     }
     Ok(())
 }
-/// Where the NDI plugin may be: beside GStreamer's own plugins, or shipped with Rosorah (Linux).
+/// Where the NDI plugin may be: beside GStreamer's own plugins, or shipped with Rosorah in
+/// /opt/rosorah-studio/gstreamer (Linux).
 fn plugin_files() -> Vec<std::path::PathBuf> {
     let name = if cfg!(windows) { "gstndi.dll" } else { "libgstndi.so" };
     let mut dirs = Vec::new();
@@ -56,8 +57,6 @@ fn plugin_files() -> Vec<std::path::PathBuf> {
         && let Some(dir) = exe.parent()
     {
         dirs.push(dir.join("gstreamer"));
-        dirs.push(dir.join("../lib64/rosorah-studio/gstreamer"));
-        dirs.push(dir.join("../lib/rosorah-studio/gstreamer"));
     }
     dirs.into_iter().map(|d| d.join(name)).collect()
 }
@@ -277,5 +276,65 @@ impl Sender {
 impl Drop for Sender {
     fn drop(&mut self) {
         let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    /// Needs the NDI runtime; ROSORAH_NDI_PLUGIN points at a libgstndi.so when GStreamer has none.
+    #[test]
+    #[ignore]
+    fn real_ndi_output_is_found_and_received_with_picture_and_sound() -> Result<()> {
+        gst::init()?;
+        if let Some(plugin) = std::env::var_os("ROSORAH_NDI_PLUGIN") {
+            gst::Plugin::load_file(plugin)?;
+        }
+        let mut sender = Sender::new("Rosorah NDI test", 320, 240, 30)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        let sending = std::thread::spawn(move || -> Result<()> {
+            let red: Vec<u8> = [255, 0, 0, 255].repeat(320 * 240);
+            let start = Instant::now();
+            while !stopping.load(Ordering::Relaxed) {
+                sender.picture(&red, start.elapsed())?;
+                sender.sound(&[0.5; 3200])?;
+                std::thread::sleep(Duration::from_millis(33));
+            }
+            Ok(())
+        });
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let name = loop {
+            if let Some(name) = senders()?.into_iter().find(|n| n.ends_with("(Rosorah NDI test)")) {
+                break name;
+            }
+            anyhow::ensure!(Instant::now() < deadline, "Rosorah's NDI output never appeared in the sender list");
+            std::thread::sleep(Duration::from_millis(200));
+        };
+        let audio = crate::video::AudioBus::default();
+        let mut engine = rosorah_capture::Engine::default();
+        engine.start(1, Box::new(NdiBackend { id: 1, sender: name, audio: audio.clone() }), rosorah_capture::Options::default())?;
+        let (mut picture, mut sound) = (false, false);
+        while !(picture && sound) && Instant::now() < deadline + Duration::from_secs(10) {
+            if let Some((_, Some(frame))) = engine.reader().latest().into_iter().find(|(id, _)| *id == 1) {
+                assert_eq!((frame.width, frame.height), (320, 240));
+                // NDI may carry it as YUV, so red comes back within a few steps of pure red.
+                let [r, g, b, a] = frame.rgba[..4] else { unreachable!() };
+                assert!(r > 240 && g < 16 && b < 16 && a == 255, "{:?}", &frame.rgba[..4]);
+                picture = true;
+            }
+            sound |= audio.read().get(&1).is_some_and(|pcm| pcm.iter().any(|s| (s - 0.5).abs() < 0.01));
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        engine.stop(1);
+        stop.store(true, Ordering::Relaxed);
+        sending.join().unwrap()?;
+        anyhow::ensure!(picture, "No picture arrived over NDI");
+        anyhow::ensure!(sound, "No sound arrived over NDI");
+        Ok(())
     }
 }

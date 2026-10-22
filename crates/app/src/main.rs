@@ -53,6 +53,8 @@ mod media;
 mod music_service;
 mod ndi;
 #[cfg(not(windows))]
+mod spout_bridge;
+#[cfg(not(windows))]
 mod music;
 #[cfg(windows)]
 #[path = "platform_windows/music.rs"]

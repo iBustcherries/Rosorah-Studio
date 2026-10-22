@@ -611,7 +611,6 @@ pub struct Studio {
     virtual_camera: Option<crate::recording::Recording>,
     /// Rosorah's main video sent out as NDI (network) and Spout (this PC, Windows).
     ndi_output: Option<crate::recording::Recording>,
-    #[cfg(windows)]
     spout_output: Option<crate::recording::Recording>,
     /// NDI (true) and Spout (false) senders last seen, refreshed every 2 s while picking one.
     shared_senders: std::collections::BTreeMap<bool, (Instant, Result<Vec<String>, String>)>,
@@ -1124,7 +1123,6 @@ impl Studio {
             pending_events: Vec::new(),
             virtual_camera: None,
             ndi_output: None,
-            #[cfg(windows)]
             spout_output: None,
             shared_senders: Default::default(),
             #[cfg(windows)]
@@ -1314,7 +1312,6 @@ impl Studio {
         if let Some(output) = &self.ndi_output {
             output.update_project(&self.project);
         }
-        #[cfg(windows)]
         if let Some(output) = &self.spout_output {
             output.update_project(&self.project);
         }
@@ -2935,6 +2932,7 @@ impl Studio {
         }
     }
     /// NDI and Spout output switches for the Stream panel: the main video, as "Rosorah Studio".
+    /// On Linux, Spout output reaches Windows apps already running in Wine or Proton.
     fn shared_output_controls(&mut self, ui: &mut egui::Ui) {
         let mut stopped = Vec::new();
         if let Some(Err(e)) = self.ndi_output.as_ref().and_then(|o| o.view().result) {
@@ -2942,7 +2940,6 @@ impl Studio {
             self.ndi_output = None;
             self.audio.shared_outlet(None);
         }
-        #[cfg(windows)]
         if let Some(Err(e)) = self.spout_output.as_ref().and_then(|o| o.view().result) {
             stopped.push(format!("Spout output stopped: {e}"));
             self.spout_output = None;
@@ -2966,10 +2963,14 @@ impl Studio {
                     }
                 }
             }
-            #[cfg(windows)]
             {
                 let mut on = self.spout_output.is_some();
-                if ui.toggle_value(&mut on, "🔀 Spout output").on_hover_text("Shares the main video with apps on this PC as the Spout sender “Rosorah Studio”").changed() {
+                let hint = if cfg!(windows) {
+                    "Shares the main video with apps on this PC as the Spout sender “Rosorah Studio”"
+                } else {
+                    "Shares the main video as the Spout sender “Rosorah Studio” with Windows apps running in Wine or Proton (start them first)"
+                };
+                if ui.toggle_value(&mut on, "🔀 Spout output").on_hover_text(hint).changed() {
                     if let Some(output) = self.spout_output.take() {
                         output.stop();
                     } else {
@@ -2999,7 +3000,7 @@ impl Studio {
                 #[cfg(windows)]
                 let found = Ok(rosorah_windows::spout::senders());
                 #[cfg(not(windows))]
-                let found = Err("Spout is a Windows feature. On Linux, Spout from Windows apps running in Wine is coming in a later update.".to_string());
+                let found = crate::spout_bridge::senders().map_err(|e| e.to_string());
                 found
             };
             self.shared_senders.insert(ndi, (Instant::now(), found));
@@ -3019,7 +3020,7 @@ impl Studio {
                     let shown = if current.is_empty() { "Choose…".to_owned() } else { current.clone() };
                     egui::ComboBox::from_id_salt(("shared-sender", id)).selected_text(shown).show_ui(ui, |ui| {
                         if list.is_empty() {
-                            ui.weak(if ndi { "Looking on your network…" } else { "No app is sending with Spout" });
+                            ui.weak(if ndi { "Looking on your network…" } else if cfg!(windows) { "No app is sending with Spout" } else { "No Windows app in Wine or Proton is sending with Spout" });
                         }
                         for name in list {
                             if ui.selectable_label(*name == current, name).clicked() {
@@ -3028,7 +3029,13 @@ impl Studio {
                         }
                     });
                 });
-                note(ui, if ndi { "Senders on your network appear here within a few seconds." } else { "Turn on Spout output in the other app (VTube Studio, Warudo, TouchDesigner…), and it appears here." });
+                note(ui, if ndi {
+                    "Senders on your network appear here within a few seconds."
+                } else if cfg!(windows) {
+                    "Turn on Spout output in the other app (VTube Studio, Warudo, TouchDesigner…), and it appears here."
+                } else {
+                    "Start the Windows app in Wine or Proton (Steam, Lutris, Bottles…) and turn on its Spout output; it appears here within a few seconds."
+                });
             }
         }
         if !current.is_empty() {
@@ -3584,8 +3591,8 @@ impl Studio {
                         if add_tile(ui, "📡", "NDI", "Video and sound from another app or PC on your network", true) {
                             chosen = Some(AddChoice::Ndi);
                         }
-                        let spout = if cfg!(windows) { "Video from another app on this PC (VTube Studio, Warudo…)" } else { "Windows apps only (coming to Linux)" };
-                        if add_tile(ui, "🔀", "Spout", spout, cfg!(windows)) {
+                        let spout = if cfg!(windows) { "Video from another app on this PC (VTube Studio, Warudo…)" } else { "Video from Windows apps running in Wine or Proton" };
+                        if add_tile(ui, "🔀", "Spout", spout, true) {
                             chosen = Some(AddChoice::Spout);
                         }
                     });

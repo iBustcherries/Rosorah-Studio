@@ -157,72 +157,94 @@ fn device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
     Ok((device.context("No DirectX device")?, context.context("No DirectX context")?))
 }
 
+/// Reads one Spout sender's pictures.
+pub struct Receiver {
+    name: String,
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    lock: Lock,
+    opened: Option<(Info, ID3D11Texture2D, ID3D11Texture2D)>,
+}
+impl Receiver {
+    pub fn new(name: &str) -> Result<Self> {
+        ensure!(!name.is_empty(), "Choose a Spout sender in Layer Properties");
+        let (device, context) = device()?;
+        Ok(Self { name: name.into(), device, context, lock: Lock::new(&format!("{name}_SpoutAccessMutex"))?, opened: None })
+    }
+    /// The sender's current picture as RGBA, or None while it isn't sending.
+    pub fn frame(&mut self) -> Result<Option<Frame>> {
+        let Some(block) = Shared::open(&self.name) else {
+            self.opened = None;
+            return Ok(None);
+        };
+        let info = Info::read(block.bytes());
+        drop(block);
+        if info.handle == 0 || info.width == 0 || info.height == 0 {
+            return Ok(None);
+        }
+        if self.opened.as_ref().is_none_or(|(old, ..)| *old != info) {
+            drop(self.opened.take());
+            // DirectX 9 senders use the same 32-bit BGRA as DirectX 11 ones.
+            ensure!(
+                matches!(info.format, 0 | 21 | 28 | 87),
+                "“{}” shares pictures in a format Rosorah can't show yet (format {}); set it to 8-bit RGBA or BGRA in that app",
+                self.name,
+                info.format
+            );
+            let mut texture: Option<ID3D11Texture2D> = None;
+            unsafe { self.device.OpenSharedResource(HANDLE(info.handle as usize as _), &mut texture) }
+                .with_context(|| format!("Couldn't open “{}”'s picture; both apps must use the same graphics card", self.name))?;
+            let texture = texture.context("Spout sender gave no picture")?;
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            unsafe { texture.GetDesc(&mut desc) };
+            desc.Usage = D3D11_USAGE_STAGING;
+            desc.BindFlags = 0;
+            desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
+            desc.MiscFlags = 0;
+            let mut staging = None;
+            unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut staging))? };
+            self.opened = Some((info, texture, staging.context("No staging picture")?));
+        }
+        let Some((info, texture, staging)) = &self.opened else { return Ok(None) };
+        self.lock.with(|| unsafe { self.context.CopyResource(staging, texture) });
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe { self.context.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))? };
+        let (w, h) = (info.width as usize, info.height as usize);
+        let mut rgba = vec![0u8; w * h * 4];
+        unsafe {
+            let src = std::slice::from_raw_parts(mapped.pData.cast::<u8>(), mapped.RowPitch as usize * h);
+            for (row, out) in rgba.chunks_exact_mut(w * 4).enumerate() {
+                out.copy_from_slice(&src[row * mapped.RowPitch as usize..][..w * 4]);
+            }
+            self.context.Unmap(staging, 0);
+        }
+        if info.format != 28 {
+            for px in rgba.chunks_exact_mut(4) {
+                px.swap(0, 2);
+            }
+        }
+        Ok(Some(Frame { width: info.width, height: info.height, rgba }))
+    }
+}
 /// Shows one Spout sender's picture as a source.
 pub struct SpoutBackend(pub String);
 impl Backend for SpoutBackend {
     fn run(self: Box<Self>, output: Producer, cancel: watch::Receiver<bool>, _: Options) -> Result<()> {
-        ensure!(!self.0.is_empty(), "Choose a Spout sender in Layer Properties");
-        let (device, context) = device()?;
-        let lock = Lock::new(&format!("{}_SpoutAccessMutex", self.0))?;
-        let mut opened: Option<(Info, ID3D11Texture2D, ID3D11Texture2D)> = None;
+        let mut receiver = Receiver::new(&self.0)?;
         let mut next = Instant::now();
         while !*cancel.borrow() {
             std::thread::sleep(next.saturating_duration_since(Instant::now()));
             next = Instant::now() + Duration::from_millis(16);
-            let Some(block) = Shared::open(&self.0) else {
-                opened = None;
-                output.waiting(&format!("Waiting for “{}” to start sending", self.0));
-                next += Duration::from_millis(500);
-                continue;
-            };
-            let info = Info::read(block.bytes());
-            drop(block);
-            if info.handle == 0 || info.width == 0 || info.height == 0 {
-                continue;
-            }
-            if opened.as_ref().is_none_or(|(old, ..)| *old != info) {
-                drop(opened.take());
-                // DirectX 9 senders use the same 32-bit BGRA as DirectX 11 ones.
-                ensure!(
-                    matches!(info.format, 0 | 21 | 28 | 87),
-                    "“{}” shares pictures in a format Rosorah can't show yet (format {}); set it to 8-bit RGBA or BGRA in that app",
-                    self.0,
-                    info.format
-                );
-                let mut texture: Option<ID3D11Texture2D> = None;
-                unsafe { device.OpenSharedResource(HANDLE(info.handle as usize as _), &mut texture) }
-                    .with_context(|| format!("Couldn't open “{}”'s picture; both apps must use the same graphics card", self.0))?;
-                let texture = texture.context("Spout sender gave no picture")?;
-                let mut desc = D3D11_TEXTURE2D_DESC::default();
-                unsafe { texture.GetDesc(&mut desc) };
-                desc.Usage = D3D11_USAGE_STAGING;
-                desc.BindFlags = 0;
-                desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ.0 as u32;
-                desc.MiscFlags = 0;
-                let mut staging = None;
-                unsafe { device.CreateTexture2D(&desc, None, Some(&mut staging))? };
-                opened = Some((info, texture, staging.context("No staging picture")?));
-            }
-            let Some((info, texture, staging)) = &opened else { continue };
-            let bgra = !matches!(info.format, 28);
-            lock.with(|| unsafe { context.CopyResource(staging, texture) });
-            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            unsafe { context.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))? };
-            let (w, h) = (info.width as usize, info.height as usize);
-            let mut rgba = vec![0u8; w * h * 4];
-            unsafe {
-                let src = std::slice::from_raw_parts(mapped.pData.cast::<u8>(), mapped.RowPitch as usize * h);
-                for (row, out) in rgba.chunks_exact_mut(w * 4).enumerate() {
-                    out.copy_from_slice(&src[row * mapped.RowPitch as usize..][..w * 4]);
+            match receiver.frame()? {
+                Some(frame) => {
+                    let detail = format!("Spout · {} · {}×{}", self.0, frame.width, frame.height);
+                    output.publish_with_detail(frame, Some(&detail))?;
                 }
-                context.Unmap(staging, 0);
-            }
-            if bgra {
-                for px in rgba.chunks_exact_mut(4) {
-                    px.swap(0, 2);
+                None => {
+                    output.waiting(&format!("Waiting for “{}” to start sending", self.0));
+                    next += Duration::from_millis(500);
                 }
             }
-            output.publish_with_detail(Frame { width: info.width, height: info.height, rgba }, Some(&format!("Spout · {} · {}×{}", self.0, w, h)))?;
         }
         Ok(())
     }

@@ -40,6 +40,11 @@ for size in 16 24 32 48 64 128 256 512; do
     install -Dm 0644 "packaging/icons/io.rosorah.Studio-$size.png" "$pkg/usr/share/icons/hicolor/${size}x${size}/apps/io.rosorah.Studio.png"
 done
 
+if [ -f /bridge/rosorah-spout-bridge.exe ]; then install -m 0644 /bridge/rosorah-spout-bridge.exe "$stage/"; fi
+
+echo "== Building the NDI plugin"
+CARGO_NET_OFFLINE=true bash packaging/ndi/build-ndi.sh /work "$stage/gstreamer"
+
 echo "== Building optional game-capture hooks (skipped if they don't build here)"
 if (cd native && rm -rf build && bash ./build.sh); then
     mkdir -p "$stage/hooks"
