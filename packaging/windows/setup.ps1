@@ -51,14 +51,19 @@ if ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x6
 }
 
 # 2. GStreamer (bundled with the installer; downloaded only if the bundled copy is missing)
-$gst = 'C:\gstreamer\1.0\msvc_x86_64\bin\gst-inspect-1.0.exe'
+# The MSI installs into <INSTALLDIR>\1.0\msvc_x86_64 and records INSTALLDIR in the 64-bit registry
+# (read explicitly: the installer starts this script as a 32-bit process).
+$gstKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey('LocalMachine', 'Registry64').OpenSubKey('SOFTWARE\GStreamer1.0\x86_64')
+$gstDir = if ($gstKey) { $gstKey.GetValue('InstallDir') } else { $null }
+if (-not $gstDir) { $gstDir = 'C:\gstreamer' }
+$gst = Join-Path $gstDir '1.0\msvc_x86_64\bin\gst-inspect-1.0.exe'
 if ((Test-Path $gst) -and ((& $gst --version) -match '1\.26\.10')) {
     Write-Output 'GStreamer 1.26.10: already installed'
 } else {
     Write-Output 'GStreamer 1.26.10: installing...'
     $p = Join-Path $runtime 'gstreamer-1.26.10.msi'
     Get-Verified 'https://gstreamer.freedesktop.org/data/pkg/windows/1.26.10/msvc/gstreamer-1.0-msvc-x86_64-1.26.10.msi' $p 'A863BF3FAA49E9F33BD3CC42967B473482D4DC98655ED95CBA1AC59F26FB0CFB' $null
-    $arguments = '/i "' + $p + '" ADDLOCAL=ALL INSTALLDIR=C:\gstreamer\1.0\msvc_x86_64 /passive /norestart'
+    $arguments = '/i "' + $p + '" ADDLOCAL=ALL INSTALLDIR=C:\gstreamer /passive /norestart'
     $r = Start-Process msiexec.exe -ArgumentList $arguments -Wait -PassThru
     if ($r.ExitCode -notin @(0, 3010)) { throw "GStreamer install did not complete: $($r.ExitCode)" }
 }

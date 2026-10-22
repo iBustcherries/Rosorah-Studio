@@ -69,6 +69,9 @@ pub struct Service {
 pub struct Config {
     pub connection_names: [String; 3],
     pub twitch: Destination,
+    /// Twitch's VOD audio: another track (1–5, 0-based) sent alongside the stream mix, so music
+    /// heard live can be left out of the saved VOD. None sends the stream mix to both.
+    pub twitch_vod_track: Option<usize>,
     pub youtube: Destination,
     pub youtube_vertical: Destination,
     pub services: Vec<Service>,
@@ -113,6 +116,7 @@ impl Default for Config {
                 server: "rtmps://a.rtmps.youtube.com:443/live2".into(),
                 ..Default::default()
             },
+            twitch_vod_track: None,
             services: Vec::new(),
             bitrate: 6000,
             record: false,
@@ -123,6 +127,27 @@ impl Default for Config {
             remote_password: String::new(),
         }
     }
+}
+/// Whether FFmpeg can put two audio tracks in one FLV stream (Enhanced RTMP multitrack, FFmpeg
+/// 8.0 and later), found out once in the background: None until known.
+pub fn multitrack_flv() -> Option<bool> {
+    static KNOWN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static ASKED: std::sync::Once = std::sync::Once::new();
+    ASKED.call_once(|| {
+        std::thread::spawn(|| {
+            let mut probe = std::process::Command::new("ffmpeg");
+            probe
+                .args(["-nostdin", "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"])
+                .args(["-map", "0:a", "-map", "1:a", "-c:a", "aac", "-t", "0.1", "-f", "flv", "-"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            #[cfg(windows)]
+            std::os::windows::process::CommandExt::creation_flags(&mut probe, 0x0800_0000);
+            let _ = KNOWN.set(probe.status().is_ok_and(|s| s.success()));
+        });
+    });
+    KNOWN.get().copied()
 }
 /// Kick hands out its server without the application path. Kick (like Twitch) streams through
 /// Amazon IVS, whose servers (*.live-video.net) always use "app", so it's added when missing.
@@ -359,7 +384,7 @@ impl Config {
                 &service.destination,
             ));
         }
-        for (name, dest) in entries {
+        for (index, (name, dest)) in entries.into_iter().enumerate() {
             if !dest.enabled {
                 continue;
             }
@@ -407,6 +432,8 @@ impl Config {
                 name,
                 destination: Location::Network(format!("{server}/{key}")),
                 secret: key.into(),
+                // Twitch is the first entry; it alone takes the VOD track.
+                vod: index == 0 && self.twitch_vod_track.is_some(),
             });
         }
         ensure!(
@@ -475,6 +502,8 @@ impl Config {
                     index,
                     Config {
                         connection_names: self.connection_names.clone(),
+                        // Only the group that streams to Twitch acts on it.
+                        twitch_vod_track: self.twitch_vod_track,
                         bitrate,
                         // One recording per canvas, from its first encoder.
                         record: self.record && !groups.iter().any(|(i, _)| *i == index),
@@ -505,6 +534,8 @@ pub(super) struct Target {
     pub name: String,
     pub destination: Location,
     pub secret: String,
+    /// Also sends the encoder's second audio track (Twitch's VOD audio).
+    pub vod: bool,
 }
 impl Target {
     fn redact(&self, text: &str) -> String {
@@ -564,6 +595,8 @@ impl State {
 #[derive(Clone)]
 pub struct Setup {
     pub(super) targets: Vec<Target>,
+    /// The track sent as Twitch's VOD audio alongside the stream mix (Track 1).
+    pub vod_track: Option<usize>,
     pub bitrate: u32,
     pub state: Arc<State>,
     pub recording: Option<PathBuf>,
@@ -579,6 +612,7 @@ impl Setup {
                 name: "Recording".into(),
                 destination: Location::File(path.clone()),
                 secret: String::new(),
+                vod: false,
             });
             Some(path)
         } else {
@@ -598,8 +632,14 @@ impl Setup {
                 },
             })
             .collect();
+        // The VOD track needs an FFmpeg that writes two audio tracks to FLV (8.0 or newer).
+        let vod_track = config.twitch_vod_track.filter(|t| (1..6).contains(t) && targets.iter().any(|t| t.vod) && multitrack_flv() == Some(true));
+        if vod_track.is_none() {
+            targets.iter_mut().for_each(|t| t.vod = false);
+        }
         Ok(Self {
             targets,
+            vod_track,
             bitrate: config.bitrate,
             state: Arc::new(State {
                 destinations: Mutex::new(destinations),
@@ -641,6 +681,7 @@ impl Stream {
     pub fn start_replay_only(project: &Project, canvas: usize, frames: FrameReader, bitrate: u32) -> Result<Self> {
         let setup = Setup {
             targets: Vec::new(),
+            vod_track: None,
             bitrate,
             state: Arc::new(State { destinations: Mutex::new(Vec::new()), stopping: AtomicBool::new(false), retry_now: Mutex::default() }),
             recording: None,

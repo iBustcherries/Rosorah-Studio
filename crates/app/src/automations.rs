@@ -762,9 +762,8 @@ impl Editor {
         if let Some((id, t)) = &mut self.tester {
             let mut open = true;
             let mut send = false;
-            egui::Window::new("Test with details")
+            crate::studio::pop_window(ctx, "Test with details")
                 .open(&mut open)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .default_width(360.)
                 .collapsible(false)
                 .show(ctx, |ui| {
@@ -801,7 +800,7 @@ impl Editor {
         }
         if let Some((is_import, text)) = &mut self.transfer {
             let mut close = false;
-            egui::Window::new(if *is_import{"Import automation"}else{"Export automation"}).anchor(egui::Align2::CENTER_CENTER,egui::Vec2::ZERO).default_width(600.).show(ctx,|ui|{
+            crate::studio::pop_window(ctx, if *is_import{"Import automation"}else{"Export automation"}).default_width(600.).show(ctx,|ui|{
   ui.label("Portable JSON · media is matched by source name; account credentials and media paths are excluded.");
   if ui.add_enabled(self.file_job.is_none(),egui::Button::new(if *is_import{"Open JSON file…"}else{"Save JSON file…"})).clicked(){
     let import=*is_import;let content=text.clone();let(tx,rx)=mpsc::channel();self.file_job=Some(rx);

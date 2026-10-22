@@ -51,9 +51,10 @@ cloned.insert(old,id);id};layer.source=id;}
   let Some((id,mut name))=self.layer_rename.clone()else{return};
   if self.project.source(id).is_none(){self.layer_rename=None;return;}
   let open=true;let mut save=false;let mut cancel=false;
-  egui::Modal::new(egui::Id::new("rename_layer_dialog")).frame(solid_window(ctx)).show(ctx,|ui|{
+  pop_modal(ctx, egui::Id::new("rename_layer_dialog")).show(ctx,|ui|{
    ui.set_width(340.);ui.heading("Rename layer");ui.label("Name");let field=ui.add(egui::TextEdit::singleline(&mut name).char_limit(100).desired_width(320.));
-   if !ctx.memory(|m|m.has_focus(field.id))&&!ctx.memory(|m|m.focused().is_some()){field.request_focus();}
+   // Focused with the old name selected, so typing replaces it.
+   if !ctx.memory(|m|m.has_focus(field.id))&&!ctx.memory(|m|m.focused().is_some()){field.request_focus();select_all(ctx,field.id,&name);}
    ui.label("Updates this source's name in every scene. Placement stays the same.");
    let valid=!name.trim().is_empty();
    ui.horizontal(|ui|{save=ui.add_enabled(valid,egui::Button::new("Save")).clicked()||(valid&&field.lost_focus()&&ui.input(|i|i.key_pressed(egui::Key::Enter)));cancel=ui.button("Cancel").clicked();});
@@ -71,7 +72,7 @@ cloned.insert(old,id);id};layer.source=id;}
   let Some((scene,index))=self.crop_layer else{return};let Some(si)=self.project.scenes.iter().position(|s|s.id==scene)else{self.crop_layer=None;return};let Some(layer)=self.project.scenes[si].layers.get(index).cloned()else{self.crop_layer=None;return};
   let size=self.captures.reader().latest().into_iter().find(|(id,_)|*id==layer.source).and_then(|(_,frame)|frame).map(|f|[f.width as f32,f.height as f32]).or_else(||match &self.project.source(layer.source)?.kind{SourceKind::Image{path}=>image::image_dimensions(path).ok().map(|(w,h)|[w as f32,h as f32]),_=>None});
   let mut crop=layer.crop;let mut open=true;let mut changed=false;
-  egui::Window::new("Crop source").open(&mut open).default_pos(egui::pos2(30.,120.)).default_width(280.).show(ctx,|ui|{
+  pop_window(ctx, "Crop source").open(&mut open).pivot(egui::Align2::LEFT_TOP).default_pos(egui::pos2(30.,120.)).default_width(280.).show(ctx,|ui|{
    ui.label("Drag the gold canvas handles, or enter crop values here. Cropping is specific to this layer.");
    ui.add_enabled_ui(!layer.locked,|ui|{for(i,label)in["Left","Top","Right","Bottom"].iter().enumerate(){let unit=size.map_or(100.,|s|s[i%2]);let mut value=crop[i]*unit;changed|=ui.add(egui::DragValue::new(&mut value).range(0.0..=unit*0.99).prefix(format!("{label}: ")).suffix(if size.is_some(){" px"}else{" %"})).changed();crop[i]=value/unit;}if ui.button("Reset crop").clicked(){crop=[0.;4];changed=true;}});
   });if changed{auroracast_core::layout::set_crop(&mut self.project.scenes[si].layers[index],crop);self.changed();}if !open{self.crop_layer=None;}

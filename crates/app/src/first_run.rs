@@ -4,13 +4,12 @@ impl Studio {
         let Some(mut step) = self.tools.guide else { return };
         let mut open = true;
         let titles = ["What will you use Rosorah for?", "Sign in to your accounts", "Check your microphone", "Add a camera (optional)", "Make a test recording"];
-        egui::Window::new("Welcome to Rosorah")
+        pop_window(ctx, "Welcome to Rosorah")
             .frame(solid_window(ctx))
             .fade_in(false)
             .open(&mut open)
             .collapsible(false)
             .default_width(540.)
-            .anchor(egui::Align2::CENTER_CENTER, [0., 0.])
             .show(ctx, |ui| {
                 ui.heading(format!("{} of 5 · {}", step + 1, titles[step]));
                 ui.add_space(6.);

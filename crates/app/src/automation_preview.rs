@@ -12,7 +12,7 @@ pub fn show(
         (screen.x - 48.).clamp(240., 960.),
         (screen.y - 80.).clamp(180., 700.),
     );
-    egui::Window::new("Automation preview")
+    crate::studio::pop_window(ctx, "Automation preview")
         // Discard the old window's saved auto-expanded geometry once.
         .id(egui::Id::new("automation_preview_bounded_v2"))
         .open(open)

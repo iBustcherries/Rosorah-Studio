@@ -148,7 +148,7 @@ impl Studio {
             return;
         }
         let mut open = true;
-        egui::Window::new("Widget studio").id(egui::Id::new("widget-studio")).open(&mut open).default_size([1020.,650.]).min_width(760.).max_height((ctx.content_rect().height()-90.).max(300.)).anchor(egui::Align2::CENTER_CENTER,[0.,0.]).show(ctx,|ui|{
+        let shown=pop_window(ctx, "Widget studio").id(egui::Id::new("widget-studio")).open(&mut open).default_size([1020.,650.]).min_width(760.).max_height((ctx.content_rect().height()-90.).max(300.)).show(ctx,|ui|{
    let name=self.project.source(id).unwrap().name.clone();ui.horizontal(|ui|{ui.heading(name);ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{ui.label(egui::RichText::new("Changes apply immediately · Ctrl+Z to undo").small().color(muted()));});});ui.separator();
    ui.columns(2,|cols|{
     egui::ScrollArea::vertical().id_salt("widget-controls").max_height(550.).show(&mut cols[0],|ui|{
@@ -179,6 +179,9 @@ impl Studio {
     if let Some(Source{kind:SourceKind::Widget(settings),..})=self.project.source(id)&& settings.kind==widgets::Kind::NowPlaying {let (_,status)=crate::music::players();ui.separator();ui.label(status);}
    });
   });
+        if let Some(shown) = shown {
+            self.keep_selection.push(shown.response.rect);
+        }
         if !open {
             editor.id = None;
             editor.texture = None;
@@ -232,7 +235,7 @@ impl Studio {
         }
         if self.recovery_candidate.is_some() {
             let mut action = 0;
-            egui::Modal::new(egui::Id::new("recover-unsaved")).frame(solid_window(ctx)).show(ctx,|ui|{ui.set_width(380.);ui.heading("Recover unsaved changes?");ui.label("A newer recovery copy was found. Your saved project has not been replaced.");ui.horizontal(|ui|{if ui.button("Recover changes").clicked(){action=1;}if ui.button("Keep saved project").clicked(){action=2;}});});
+            pop_modal(ctx, egui::Id::new("recover-unsaved")).show(ctx,|ui|{ui.set_width(380.);ui.heading("Recover unsaved changes?");ui.label("A newer recovery copy was found. Your saved project has not been replaced.");ui.horizontal(|ui|{if ui.button("Recover changes").clicked(){action=1;}if ui.button("Keep saved project").clicked(){action=2;}});});
             if action == 1 {
                 let project = self.recovery_candidate.take().unwrap();
                 self.adopt_project(project);

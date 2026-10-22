@@ -9,7 +9,7 @@ foreach ($name in $packages.Keys) {
     $path = Join-Path $env:TEMP $name
     Invoke-WebRequest "https://gstreamer.freedesktop.org/data/pkg/windows/$version/msvc/$name" -OutFile $path
     if ((Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $packages[$name]) { throw "Checksum mismatch: $name" }
-    $installer = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/i', "`"$path`"", '/qn', '/norestart', 'ADDLOCAL=ALL', 'INSTALLDIR=C:\gstreamer\1.0\msvc_x86_64')
+    $installer = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/i', "`"$path`"", '/qn', '/norestart', 'ADDLOCAL=ALL', 'INSTALLDIR=C:\gstreamer')
     if ($installer.ExitCode -notin @(0,3010)) { throw "GStreamer installation failed: $($installer.ExitCode)" }
 }
 $env:GSTREAMER_1_0_ROOT_MSVC_X86_64 = 'C:\gstreamer\1.0\msvc_x86_64'

@@ -122,7 +122,7 @@ fn message_menu(
 /// Esc counts as Cancel. Returns Some(true) for yes, Some(false) for cancel.
 fn confirm(ctx: &egui::Context, id: &str, title: &str, body: &str, yes: &str) -> Option<bool> {
     let mut answer = None;
-    egui::Modal::new(egui::Id::new(("confirm", id))).frame(solid_window(ctx)).show(ctx, |ui| {
+    pop_modal(ctx, egui::Id::new(("confirm", id))).show(ctx, |ui| {
         ui.set_width(360.);
         ui.heading(title);
         ui.add_space(6.);
@@ -246,6 +246,52 @@ fn preview_picture(frame: &rosorah_capture::Frame, w: u32, h: u32) -> Option<egu
 fn solid_window(ctx: &egui::Context) -> egui::Frame {
     let [r, g, b, _] = panel().to_srgba_unmultiplied();
     egui::Frame::window(&ctx.style()).fill(Color32::from_rgb(r, g, b))
+}
+/// A window that should stand out over the studio: the panel colour, a deep shadow and an
+/// accent edge.
+fn prominent_window(ctx: &egui::Context, accent: Color32) -> egui::Frame {
+    solid_window(ctx)
+        .stroke(egui::Stroke::new(1.5_f32, accent.gamma_multiply(0.75)))
+        .shadow(egui::Shadow { offset: [0, 12], blur: 48, spread: 6, color: Color32::from_black_alpha(150) })
+        .inner_margin(egui::Margin::same(14))
+}
+/// Every pop-out window, in the Layer Properties style: the prominent frame in the accent colour,
+/// opened in the middle of the screen and free to move.
+pub(crate) fn pop_window<'a>(ctx: &egui::Context, title: impl Into<egui::WidgetText>) -> egui::Window<'a> {
+    egui::Window::new(title)
+        .frame(prominent_window(ctx, ctx.style().visuals.selection.bg_fill))
+        .collapsible(false)
+        .pivot(egui::Align2::CENTER_CENTER)
+        .default_pos(ctx.content_rect().center())
+}
+/// Every dialog: the same frame, in front of a greyed-out studio.
+pub(crate) fn pop_modal(ctx: &egui::Context, id: egui::Id) -> egui::Modal {
+    egui::Modal::new(id).frame(prominent_window(ctx, ctx.style().visuals.selection.bg_fill)).backdrop_color(DIM)
+}
+/// Behind a question that needs an answer, the studio is greyed out this much.
+const DIM: Color32 = Color32::from_black_alpha(175);
+/// Selects all of a text field's text, so the next keystroke replaces it.
+fn select_all(ctx: &egui::Context, id: egui::Id, text: &str) {
+    let mut state = egui::TextEdit::load_state(ctx, id).unwrap_or_default();
+    let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(text.chars().count()));
+    state.cursor.set_char_range(Some(all));
+    state.store(ctx, id);
+}
+/// Which list Delete and F2 act on: the last one clicked (the canvas counts as Layers).
+#[derive(Clone, Copy, Default, PartialEq)]
+enum ListFocus {
+    #[default]
+    Layers,
+    Scenes,
+}
+/// The tabs of Layer Properties.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum PropertiesTab {
+    #[default]
+    Source,
+    Position,
+    Appearance,
+    Effects,
 }
 /// Tells Studio Mode's preview drawing apart from the live canvas.
 const STUDIO_PREVIEW: Id = 0x5747_0000_0000_0000;
@@ -581,6 +627,8 @@ pub struct Studio {
     program_drawn: Instant,
     /// Layers copied for pasting into any scene.
     layer_clipboard: Vec<CopiedLayer>,
+    /// The scene Ctrl+C copied in the Scenes panel.
+    scene_clipboard: Option<Id>,
     /// A folder chooser re-pointing a slideshow.
     slideshow_folder: Option<(Id, mpsc::Receiver<Option<PathBuf>>)>,
     /// A file chooser for a layer's look-up table (true) or mask (false).
@@ -611,6 +659,17 @@ pub struct Studio {
     /// The scene being named inside its own pill: its id, the text so far, and whether the
     /// box has been focused yet.
     naming_scene: Option<(Id, String, bool)>,
+    /// Which list Delete and F2 act on.
+    list_focus: ListFocus,
+    /// Layers waiting for "Delete?" to be answered: the scene and the layers' places in it.
+    delete_confirm: Option<(Id, Vec<usize>)>,
+    /// Where each canvas was drawn last frame (its scene), so a click elsewhere unselects it.
+    canvas_hits: Vec<(Id, egui::Rect)>,
+    /// Places a click doesn't unselect from: Layers, Layer Properties, the widget studio.
+    keep_selection: Vec<egui::Rect>,
+    /// Where the Scenes panel was drawn last frame.
+    scenes_area: Option<egui::Rect>,
+    properties_tab: PropertiesTab,
     /// Name and address being entered for a new web page panel.
     web_dock_dialog: Option<(String, String)>,
     /// The scene the Add dialog adds to, and which page of it shows.
@@ -738,6 +797,8 @@ pub struct Studio {
     /// `--page demo-drag`: drags the Sources tab partway across the window for screenshots,
     /// with where its tab sits once drawn.
     demo_drag: Option<Option<egui::Rect>>,
+    /// `--page press-delete`, `press-f2` or `click-away`: that input once the studio is drawn.
+    demo_input: Option<&'static str>,
 }
 impl Studio {
     pub fn new(
@@ -861,11 +922,15 @@ impl Studio {
                     .set_active_tab(tab);
             }
         }
-        let (stream_config, stream_error) =
+        let (mut stream_config, stream_error) =
             match crate::streaming::Config::load_with_keyring(&crate::streaming::Config::path()) {
                 Ok(config) => (config, String::new()),
                 Err(e) => (crate::streaming::Config::default(), format!("{e:#}")),
             };
+        // `--page twitch-vod`: the Twitch connection with a VOD track chosen, for screenshots.
+        if page == "twitch-vod" {
+            stream_config.twitch_vod_track = Some(1);
+        }
         let added_capture = ensure_automatic_source(&mut project);
         let mut captures = crate::capture::Captures::default();
         captures.set_repaint(cc.egui_ctx.clone());
@@ -949,6 +1014,7 @@ impl Studio {
             .then(|| project.canvases.first().and_then(|c| project.scene(c.scene)).map(|s| (s.id, s.name.clone(), true)))
             .flatten();
         let scene_for_naming = project.canvases.first().map(|c| c.scene).unwrap_or_default();
+        let name_for_renaming = project.scene(scene_for_naming).map(|s| s.name.clone()).unwrap_or_default();
         // `--page sound-settings` opens the microphone's settings for screenshots.
         // (`--page music-settings` opens the Music strip's instead.)
         let wanted = match page.as_str() { "sound-settings" => Some("mic"), "music-settings" => Some("music"), _ => None };
@@ -964,7 +1030,7 @@ impl Studio {
         }
         Self {
             tools,
-            selections:project.canvases.first().and_then(|c|selected.map(|i|(c.scene,vec![i]))).into_iter().collect(),crop_layer:None,pending_layer_delete:None,layer_rename:None,layer_properties:None,tiktok_chat:true,tiktok_diagnostic_wanted:false,appearance:Default::default(),appearance_picker:None,scene_transition:None,transition_picker:None,
+            selections:project.canvases.first().and_then(|c|selected.map(|i|(c.scene,vec![i]))).into_iter().collect(),crop_layer:None,pending_layer_delete:None,layer_rename:None,layer_properties:(page=="properties").then_some((scene_for_naming,0)),tiktok_chat:true,tiktok_diagnostic_wanted:false,appearance:Default::default(),appearance_picker:None,scene_transition:None,transition_picker:None,
             widget_editor,
             edit_history,
             continuous_edit: false,
@@ -990,7 +1056,7 @@ impl Studio {
             project,
             project_path,
             page: match page.as_str() {
-                "settings" | "streaming" | "accounts" | "donations" | "announcements" | "hotkeys" | "advanced" => Page::Settings,
+                "settings" | "streaming" | "accounts" | "donations" | "announcements" | "hotkeys" | "advanced" | "audio-tracks" | "twitch-vod" => Page::Settings,
                 "automation-preview" | "alerts" | "alert-guide" | "alert-guide-media" | "alert-guide-finish" => Page::Alerts,
                 _ => Page::Studio,
             },
@@ -1004,6 +1070,10 @@ impl Studio {
                 Settings::Accounts
             } else if page == "advanced" {
                 Settings::Advanced
+            } else if page == "audio-tracks" {
+                Settings::Audio
+            } else if page == "twitch-vod" {
+                Settings::Accounts
             } else {
                 Settings::Appearance
             },
@@ -1053,6 +1123,7 @@ impl Studio {
             program_texture: None,
             program_drawn: Instant::now(),
             layer_clipboard: Vec::new(),
+            scene_clipboard: None,
             look_picker: None,
             browser_picker: None,
             slideshow_folder: None,
@@ -1070,12 +1141,24 @@ impl Studio {
             update_asked: false,
             restart_after_update: false,
             // `--page name-scene` opens the name box in the current scene's pill for screenshots.
-            naming_scene: (page == "name-scene").then(|| (scene_for_naming, String::new(), false)),
+            // `--page rename-scene`: renaming as F2 starts it, the old name selected.
+            naming_scene: match page.as_str() {
+                "name-scene" => Some((scene_for_naming, String::new(), false)),
+                "rename-scene" => Some((scene_for_naming, name_for_renaming, false)),
+                _ => None,
+            },
+            list_focus: if page == "copy-scene" { ListFocus::Scenes } else { ListFocus::default() },
+            // `--page delete-layers` asks about the first two layers, for screenshots.
+            delete_confirm: (page == "delete-layers").then(|| (scene_for_naming, vec![0, 1])),
+            canvas_hits: Vec::new(),
+            keep_selection: Vec::new(),
+            scenes_area: None,
+            properties_tab: PropertiesTab::default(),
             web_dock_dialog: None,
             add_dialog: None,
             add_search: String::new(),
             reuse_previews: Default::default(),
-            broadcast_window: if page == "add-service" { 3 } else { 0 },
+            broadcast_window: match page.as_str() { "add-service" => 3, "twitch-vod" => 100, _ => 0 },
             panels_animating: false,
             frame: 0,
             last_preview: Instant::now(),
@@ -1166,6 +1249,7 @@ impl Studio {
             demo,
             demo_add,
             demo_drag,
+            demo_input: ["press-delete", "press-f2", "click-away", "copy-scene"].into_iter().find(|p| *p == page),
         }
     }
     fn remember_capture_mode(&mut self, id: Id) {
@@ -1743,6 +1827,163 @@ impl Studio {
         self.update_asked = true;
         self.update_window = true;
     }
+    /// Clicks and keys for selected layers and scenes, from where things were drawn last frame:
+    /// a click away from a canvas unselects its layers, Delete asks before deleting, F2 renames.
+    fn selection_input(&mut self, ctx: &egui::Context) {
+        let hits = std::mem::take(&mut self.canvas_hits);
+        let keep = std::mem::take(&mut self.keep_selection);
+        let scenes_area = self.scenes_area.take();
+        let busy = egui::Popup::is_any_open(ctx) || ctx.memory(|m| m.top_modal_layer()).is_some() || self.delete_confirm.is_some();
+        if self.page != Page::Studio || busy {
+            return;
+        }
+        if let Some(pos) = ctx.input(|i| i.pointer.primary_pressed().then(|| i.pointer.press_origin()).flatten()) {
+            if scenes_area.is_some_and(|r| r.contains(pos)) {
+                self.list_focus = ListFocus::Scenes;
+            } else if keep.iter().chain(hits.iter().map(|(_, r)| r)).any(|r| r.contains(pos)) {
+                self.list_focus = ListFocus::Layers;
+            }
+            // Cropping keeps its layer selected; anywhere else that isn't Layers or a properties window lets go.
+            if self.crop_layer.is_none() && !keep.iter().any(|r| r.contains(pos)) {
+                for (scene, rect) in &hits {
+                    if !rect.contains(pos) && self.selections.remove(scene).is_some() && self.project.canvases.get(self.canvas).is_some_and(|c| c.scene == *scene) {
+                        self.layer = None;
+                    }
+                }
+            }
+        }
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+        let (delete, rename) = ctx.input(|i| (i.key_pressed(egui::Key::Delete), i.key_pressed(egui::Key::F2)));
+        if !delete && !rename {
+            return;
+        }
+        let canvas = self.project.canvases[self.canvas].id;
+        let scene = self.project.canvases[self.canvas].scene;
+        match self.list_focus {
+            ListFocus::Layers => {
+                let Some(layers) = self.project.scene(scene).map(|s| s.layers.clone()) else { return };
+                let selected: Vec<usize> = self.selections.get(&scene).cloned().unwrap_or_default().into_iter().filter(|&i| i < layers.len()).collect();
+                if delete {
+                    let unlocked: Vec<usize> = selected.iter().copied().filter(|&i| !layers[i].locked).collect();
+                    if !unlocked.is_empty() {
+                        self.delete_confirm = Some((scene, unlocked));
+                    } else if !selected.is_empty() {
+                        self.tell("Locked layers can't be deleted. Unlock them from their right-click menu first.".into());
+                    }
+                } else if let Some(&i) = selected.last()
+                    && let Some(source) = self.project.source(layers[i].source)
+                {
+                    self.layer_rename = Some((source.id, source.name.clone()));
+                }
+            }
+            ListFocus::Scenes => {
+                let name = self.project.scene(scene).map(|s| s.name.clone()).unwrap_or_default();
+                if rename {
+                    self.naming_scene = Some((scene, name, false));
+                } else if self.project.canvas_scenes(canvas).len() < 2 {
+                    self.tell("A video needs at least one scene.".into());
+                } else if self.live_stream.is_some() || self.live_recording.is_some() {
+                    self.tell("This scene is on air. Switch to another scene first.".into());
+                } else {
+                    self.scene_dialog = Some((scene, name, true));
+                }
+            }
+        }
+    }
+    /// Pastes a copy of a scene just after the current one, into whichever video is selected.
+    fn paste_scene(&mut self, copied: Id) {
+        let canvas = self.project.canvases[self.canvas].id;
+        let current = self.project.canvases[self.canvas].scene;
+        let pasted = if self.project.canvas_scenes(canvas).contains(&copied) {
+            self.project.duplicate_scene(canvas, copied)
+        } else if let Some(mut scene) = self.project.scene(copied).cloned() {
+            // From the other video: same layers, added to this one's list.
+            scene.id = self.project.id();
+            let base = format!("{} copy", scene.name);
+            scene.name = base.clone();
+            let mut n = 2;
+            while self.project.scenes.iter().any(|s| s.name == scene.name) {
+                scene.name = format!("{base} {n}");
+                n += 1;
+            }
+            let id = scene.id;
+            self.project.scenes.push(scene);
+            let ids = self.project.canvas_scenes(canvas);
+            let list = self.project.preferences.workspace.scenes.entry(canvas).or_insert(ids);
+            let at = list.iter().position(|i| *i == current).map_or(list.len(), |i| i + 1);
+            list.insert(at, id);
+            if let Some(audio) = self.project.preferences.scene_audio.get(&copied).cloned() {
+                self.project.preferences.scene_audio.insert(id, audio);
+            }
+            Some(id)
+        } else {
+            self.scene_clipboard = None;
+            None
+        };
+        match pasted.and_then(|id| self.project.scene(id).map(|s| s.name.clone())) {
+            Some(name) => {
+                self.changed();
+                self.tell(format!("Pasted \"{name}\"."));
+            }
+            None => self.tell("That scene was deleted, so there's nothing to paste.".into()),
+        }
+    }
+    /// "Delete these layers?", front and center with the studio dimmed behind it.
+    fn delete_confirm_ui(&mut self, ctx: &egui::Context) {
+        let Some((scene, layers)) = self.delete_confirm.clone() else { return };
+        let Some(si) = self.project.scenes.iter().position(|s| s.id == scene) else {
+            self.delete_confirm = None;
+            return;
+        };
+        let names: Vec<String> = layers
+            .iter()
+            .filter_map(|&i| self.project.scenes[si].layers.get(i))
+            .map(|l| self.project.source(l.source).map(|s| s.name.clone()).unwrap_or_default())
+            .collect();
+        let (mut confirm, mut cancel) = (false, false);
+        pop_modal(ctx, egui::Id::new("delete-layers")).show(ctx, |ui| {
+            ui.set_width(360.);
+            ui.heading(if names.len() == 1 { "Delete layer".to_owned() } else { format!("Delete {} layers", names.len()) });
+            ui.add_space(6.);
+            ui.label(if names.len() == 1 { format!("Remove “{}” from {}?", names[0], self.project.scenes[si].name) } else { format!("Remove these from {}?", self.project.scenes[si].name) });
+            if names.len() > 1 {
+                for name in names.iter().take(8) {
+                    ui.label(format!("• {name}"));
+                }
+                if names.len() > 8 {
+                    note(ui, format!("and {} more", names.len() - 8));
+                }
+            }
+            note(ui, "Their sources stay available to your other scenes.");
+            ui.add_space(8.);
+            ui.horizontal(|ui| {
+                confirm = ui.add(egui::Button::new(RichText::new("Delete").strong().color(Color32::WHITE)).fill(Color32::from_rgb(190, 50, 60))).clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
+            note(ui, "Enter deletes · Esc cancels");
+        });
+        let (enter, escape) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+        if confirm || enter {
+            let layers_in_scene = &mut self.project.scenes[si].layers;
+            let mut doomed: Vec<usize> = layers.into_iter().filter(|&i| layers_in_scene.get(i).is_some_and(|l| !l.locked)).collect();
+            doomed.sort_unstable();
+            doomed.dedup();
+            for &i in doomed.iter().rev() {
+                layers_in_scene.remove(i);
+            }
+            self.selections.remove(&scene);
+            self.layer = None;
+            self.crop_layer = None;
+            self.layer_properties = None;
+            self.changed();
+            self.deleted(if names.len() == 1 { format!("Removed {} from this scene", names[0]) } else { format!("Removed {} layers from this scene", names.len()) });
+            self.delete_confirm = None;
+        } else if cancel || escape {
+            self.delete_confirm = None;
+        }
+    }
     /// Confirms a removal with an Undo button, so a slip is one click to reverse.
     fn deleted(&mut self, text: String) {
         self.toast = Some(Toast { text, undo: true, until: Instant::now() + Duration::from_secs(10) });
@@ -2008,19 +2249,29 @@ impl Studio {
             ui.close();
         }
     }
+    /// Main video / Vertical video tabs over Scenes and Layers. Clicking a video's preview
+    /// switches them too.
+    fn canvas_tabs(&mut self, ui: &mut egui::Ui) {
+        if !(self.project.canvases.len() > 1 && (self.advanced() || self.project.preferences.workspace.vertical_video)) {
+            return;
+        }
+        let canvases: Vec<(String, Id)> = self.project.canvases.iter().map(|c| (c.name.clone(), c.scene)).collect();
+        ui.horizontal_wrapped(|ui| {
+            for (i, (name, scene)) in canvases.iter().enumerate() {
+                if ui.selectable_label(self.canvas == i, name).clicked() && self.canvas != i {
+                    self.canvas = i;
+                    self.layer = self.selections.get(scene).and_then(|v| v.last().copied());
+                }
+            }
+        });
+        ui.add_space(4.);
+    }
     fn scenes_panel(&mut self, ui: &mut egui::Ui) {
+        self.scenes_area = Some(ui.max_rect());
+        self.canvas_tabs(ui);
         let canvas = self.project.canvases[self.canvas].id;
         let active = self.project.canvases[self.canvas].scene;
         let vertical_in_use = self.project.canvases.len() > 1 && (self.advanced() || self.project.preferences.workspace.vertical_video);
-        if self.canvas > 0 {
-            ui.horizontal_wrapped(|ui| {
-                note(ui, format!("{} scenes", self.project.canvases[self.canvas].name));
-                if ui.small_button("Back to main video").clicked() {
-                    self.canvas = 0;
-                    self.layer = None;
-                }
-            });
-        }
         let ids = self.project.canvas_scenes(canvas);
         let live = self.live_stream.is_some() || self.live_recording.is_some();
         let animate = self.project.preferences.workspace.animations;
@@ -2041,6 +2292,8 @@ impl Studio {
                             .inner_margin(egui::Margin::symmetric(8, 0))
                             .show(ui, |ui| {
                                 let ink = ui.visuals().selection.stroke.color;
+                                // The pill is the selection colour, so selected text gets a darker shade to show.
+                                ui.visuals_mut().selection.bg_fill = ink.gamma_multiply(0.3);
                                 ui.add_sized(
                                     [(ui.available_width() - 34.).max(30.), 30.],
                                     egui::TextEdit::singleline(text)
@@ -2055,6 +2308,8 @@ impl Studio {
                     .inner;
                 if !*focused {
                     response.request_focus();
+                    // The whole name is selected, so typing replaces it.
+                    select_all(ui.ctx(), response.id, text);
                     *focused = true;
                 } else if response.lost_focus() {
                     let typed = text.trim().chars().take(80).collect::<String>();
@@ -2112,11 +2367,6 @@ impl Studio {
                     if ui.checkbox(&mut self.project.preferences.workspace.link_scenes, "Switch the vertical video too").on_hover_text("Switching a main video scene also switches the vertical video to its matching scene. Right-click a scene to choose which one.").changed() {
                         self.changed();
                     }
-                    if self.canvas == 0 && ui.button("Edit the vertical video's scenes").clicked() {
-                        self.canvas = 1;
-                        self.layer = None;
-                        ui.close();
-                    }
                 }
             })
             .response
@@ -2151,7 +2401,7 @@ impl Studio {
             }
         };
         let mut close = false;
-        let modal = egui::Modal::new(egui::Id::new("update-window")).frame(solid_window(ctx)).show(ctx, |ui| {
+        let modal = pop_modal(ctx, egui::Id::new("update-window")).show(ctx, |ui| {
             ui.set_width(460.);
             ui.heading(format!("Rosorah Studio {}", release.version));
             note(ui, concat!("You have ", env!("CARGO_PKG_VERSION"), "."));
@@ -2738,7 +2988,7 @@ impl Studio {
         let Some((id, mut name)) = self.sound_rename.take() else { return };
         let mut done = false;
         let mut save = false;
-        egui::Modal::new(egui::Id::new("sound-rename")).frame(solid_window(ctx)).show(ctx, |ui| {
+        pop_modal(ctx, egui::Id::new("sound-rename")).show(ctx, |ui| {
             ui.set_width(320.);
             ui.heading("Rename sound");
             ui.add_space(6.);
@@ -2776,7 +3026,7 @@ impl Studio {
         };
         let mut done = false;
         let valid = crate::browser_source::valid_url(url.trim());
-        egui::Modal::new(egui::Id::new("web-dock-dialog")).frame(solid_window(ctx)).show(ctx, |ui| {
+        pop_modal(ctx, egui::Id::new("web-dock-dialog")).show(ctx, |ui| {
             ui.set_width(380.);
             ui.heading("Add a web page");
             ui.add_space(6.);
@@ -2816,7 +3066,7 @@ impl Studio {
         let mut open = true;
         let mut done = false;
         // Front and center, with the studio dimmed behind it, so the question can't be missed.
-        let modal = egui::Modal::new(egui::Id::new("scene-dialog")).frame(solid_window(ctx)).show(ctx, |ui| {
+        let modal = pop_modal(ctx, egui::Id::new("scene-dialog")).show(ctx, |ui| {
             ui.set_width(340.);
             ui.heading(if delete { "Delete scene" } else { "Rename scene" });
             ui.add_space(6.);
@@ -2860,6 +3110,17 @@ impl Studio {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             open = false;
         }
+        // Enter answers a delete question, as it does for layers.
+        if delete && !done && open && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            let owner = self.project.canvases.iter().find(|c| self.project.canvas_scenes(c.id).contains(&id)).map(|c| c.id);
+            if let Some(owner) = owner {
+                self.project.delete_scene(owner, id);
+                self.layer = None;
+                self.deleted(format!("Deleted the scene “{name}”"));
+                self.changed();
+            }
+            done = true;
+        }
         self.scene_dialog = if open && !done {
             Some((id, name, delete))
         } else {
@@ -2867,10 +3128,9 @@ impl Studio {
         };
     }
     fn sources_panel(&mut self, ui: &mut egui::Ui) {
+        self.keep_selection.push(ui.max_rect());
+        self.canvas_tabs(ui);
         let active = self.project.canvases[self.canvas].scene;
-        if self.canvas > 0 {
-            note(ui, format!("{} · {}", self.project.canvases[self.canvas].name, self.project.scene(active).map(|s| s.name.as_str()).unwrap_or("Scene")));
-        }
         let si = self
             .project
             .scenes
@@ -2890,8 +3150,9 @@ impl Studio {
             ui.spacing_mut().button_padding = egui::vec2(5., 3.);
             ui.spacing_mut().item_spacing = egui::vec2(4., 2.);
             ui.horizontal(|ui| {
-                let eye = egui::Button::new(if visible { RichText::new("👁").color(ui.visuals().strong_text_color()) } else { RichText::new("👁").color(muted()).strikethrough() }).frame(false);
-                if ui.add_sized([22., 26.], eye).on_hover_text(if visible { "Showing · click to hide" } else { "Hidden · click to show" }).clicked() {
+                // A large, bright eye; a hidden layer's is dim and struck through.
+                let eye = egui::Button::new(if visible { RichText::new("👁").size(19.).color(ui.visuals().strong_text_color()) } else { RichText::new("👁").size(19.).color(muted().gamma_multiply(0.7)).strikethrough() }).frame(false);
+                if ui.add_sized([30., 26.], eye).on_hover_text(if visible { "Showing · click to hide" } else { "Hidden · click to show" }).clicked() {
                     self.project.scenes[si].layers[i].visible = !visible;
                     self.changed();
                 }
@@ -3059,7 +3320,7 @@ impl Studio {
         let mut chosen = None;
         let mut next_view = None;
         let mut close = false;
-        let modal = egui::Modal::new(egui::Id::new("add-dialog")).frame(solid_window(ctx)).show(ctx, |ui| {
+        let modal = pop_modal(ctx, egui::Id::new("add-dialog")).show(ctx, |ui| {
             // Five tiles to a row on most screens.
             let width = ui.ctx().content_rect().width().min(888.) - 40.;
             ui.set_width(width);
@@ -4144,9 +4405,8 @@ impl Studio {
         let which = self.broadcast_window;
         let mut open = true;
         if which == 3 {
-            egui::Window::new("Add streaming service")
+            pop_window(ctx, "Add streaming service")
                 .open(&mut open)
-                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
                 .collapsible(false)
                 .resizable(false)
                 .default_width(380.)
@@ -4205,7 +4465,7 @@ impl Studio {
             let mut account = false;
             let advanced = self.advanced();
             let several_videos = self.project.canvases.len() > 1 && (advanced || self.project.preferences.workspace.vertical_video);
-            egui::Window::new(format!("{name} connection")).id(egui::Id::new(("service-connection",slot))).anchor(egui::Align2::CENTER_CENTER,egui::Vec2::ZERO).collapsible(false).open(&mut open).default_width(420.).show(ctx,|ui| {
+            pop_window(ctx, format!("{name} connection")).id(egui::Id::new(("service-connection",slot))).collapsible(false).open(&mut open).default_width(420.).show(ctx,|ui| {
                 ui.add_enabled_ui(self.live_stream.is_none(),|ui| {
                     if let Some(name)=self.stream_config.connection_name_mut(slot) {
                         ui.label("Connection name");
@@ -4228,6 +4488,38 @@ impl Studio {
                     }
                     let dashboard=match slot {0=>"https://dashboard.twitch.tv/settings/stream",1|2=>"https://studio.youtube.com/channel/UC/livestreaming",_=>provider.map_or("",|p|p.dashboard())};
                     if !dashboard.is_empty(){ui.hyperlink_to("Open creator dashboard",dashboard);}
+                    if slot==0 {
+                        // Twitch keeps this track in VODs, so music heard live can stay out of them.
+                        let names:Vec<String>=(0..6).map(|t|self.project.preferences.track_name(t)).collect();
+                        let vod=&mut self.stream_config.twitch_vod_track;
+                        ui.add_space(6.);
+                        ui.horizontal(|ui|{
+                            ui.label("VOD audio");
+                            egui::ComboBox::from_id_salt("twitch-vod-track").selected_text(vod.map_or("Same as the stream".to_owned(),|t|names[t].clone())).show_ui(ui,|ui|{
+                                ui.selectable_value(vod,None,"Same as the stream");
+                                for (t,name) in names.iter().enumerate().skip(1){ui.selectable_value(vod,Some(t),name);}
+                            });
+                        });
+                        if let Some(t)=*vod {
+                            match crate::streaming::multitrack_flv() {
+                                Some(false)=>note(ui,"Your FFmpeg can't send a second audio track (it needs FFmpeg 8 or newer), so VODs get the stream mix."),
+                                None=>{note(ui,"Checking FFmpeg…");ui.ctx().request_repaint_after(Duration::from_millis(300));}
+                                Some(true)=>{
+                                    note(ui,format!("Viewers hear {} live; your VODs get {} instead. Leave music off {}.",names[0],names[t],names[t]));
+                                    if ui.button(format!("Put everything except music on {}",names[t])).on_hover_text("Every sound goes on this track except the Music strip and music apps").clicked(){
+                                        let inputs=self.project.preferences.audio_inputs.clone();
+                                        for channel in &mut self.project.audio {
+                                            let music=inputs.get(&channel.id).is_some_and(|i|i=="auto:music")||channel.name.to_lowercase().contains("music");
+                                            channel.tracks[t]=!music;
+                                        }
+                                        self.changed();
+                                    }
+                                }
+                            }
+                        } else {
+                            note(ui,"Choose a track to keep music out of your saved VODs.");
+                        }
+                    }
                     let shared_bitrate=self.stream_config.bitrate;
                     if let Some(dest)=self.stream_config.destination_mut(slot) {
                         if provider == Some(crate::streaming::Provider::Kick) && ui.checkbox(&mut dest.managed_by_account,"Use connected Kick account").changed() {
@@ -4361,7 +4653,7 @@ impl Studio {
             return;
         }
         let mut open = true;
-        egui::Window::new(if which == 1 {
+        pop_window(ctx, if which == 1 {
             "Stream details"
         } else {
             "Quality & recording"
@@ -5286,6 +5578,7 @@ impl Studio {
                     )
                 })
                 .inner;
+            self.canvas_hits.push((canvas.scene, target));
             if edited {
                 self.changed();
             }
@@ -5341,7 +5634,8 @@ impl Studio {
         }
         self.sound_rename_ui(ctx);
         self.update_window_ui(ctx);
-        // Ctrl+C / Ctrl+V copy and paste layers, unless a text box has the keyboard.
+        // Ctrl+C / Ctrl+V copy and paste layers, or scenes when the Scenes panel was used last,
+        // unless a text box has the keyboard.
         if ctx.memory(|m| m.focused().is_none()) && !egui::Popup::is_any_open(ctx) {
             let (copy, paste) = ctx.input(|i| {
                 (
@@ -5350,7 +5644,16 @@ impl Studio {
                 )
             });
             let scene = self.project.canvases.get(self.canvas).map(|c| c.scene);
-            if let Some(si) = scene.and_then(|scene| self.project.scenes.iter().position(|s| s.id == scene)) {
+            if self.list_focus == ListFocus::Scenes && let Some(scene) = scene {
+                if copy {
+                    self.scene_clipboard = Some(scene);
+                    let name = self.project.scene(scene).map(|s| s.name.clone()).unwrap_or_default();
+                    self.tell(format!("Copied the scene \"{name}\". Press Ctrl+V to paste a copy."));
+                }
+                if paste && let Some(copied) = self.scene_clipboard {
+                    self.paste_scene(copied);
+                }
+            } else if let Some(si) = scene.and_then(|scene| self.project.scenes.iter().position(|s| s.id == scene)) {
                 if copy && let Some(i) = self.layer.filter(|i| *i < self.project.scenes[si].layers.len()) {
                     self.copy_layers(si, i);
                 }
@@ -5509,6 +5812,7 @@ impl Studio {
         }
     }
     fn mixer_panel(&mut self, ui: &mut egui::Ui) {
+        let track_names: Vec<String> = (0..6).map(|t| self.project.preferences.track_name(t)).collect();
         let view = self.audio.view();
         let scene_id = self.project.canvases[self.canvas].scene;
         let advanced = self.advanced();
@@ -5685,7 +5989,7 @@ impl Studio {
                     if *sound_settings == Some(channel.id) {
                     let ctx = ui.ctx().clone();
                     let mut done = false;
-                    let modal = egui::Modal::new(egui::Id::new(("sound-settings", channel.id))).frame(solid_window(&ctx)).show(&ctx, |ui| {
+                    let modal = pop_modal(&ctx, egui::Id::new(("sound-settings", channel.id))).show(&ctx, |ui| {
                     ui.set_width(400.);
                     ui.spacing_mut().item_spacing.y = 6.;
                     ui.heading(&shown_name);
@@ -5867,12 +6171,13 @@ impl Studio {
                             changed |= ui.checkbox(&mut channel.monitor_only, "Monitor only (exclude from stream / recording)").changed();
                         }
                         ui.add_space(6.);
-                        ui.label(RichText::new("Recording tracks").strong());
+                        ui.label(RichText::new("Audio tracks").strong());
                         ui.horizontal_wrapped(|ui| {
                             for (i, route) in channel.tracks.iter_mut().enumerate() {
-                                changed |= ui.checkbox(route, format!("{}", i + 1)).changed();
+                                changed |= ui.checkbox(route, &track_names[i]).changed();
                             }
                         });
+                        note(ui, "Rename tracks in Settings > Sound > Audio tracks.");
                     }
                     ui.add_space(10.);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -6214,7 +6519,7 @@ impl Studio {
                     });
                     if self.advanced() {
                         ui.add_space(16.);
-                        card().show(ui,|ui|{ui.strong("Audio tracks");note(ui,"Assign each channel to up to six independent output tracks.");egui::Grid::new("routing").striped(true).spacing([24.,16.]).show(ui,|ui|{ui.strong("Source");for n in 1..=6{ui.strong(format!("Track {n}"));}ui.end_row();for channel in &mut self.project.audio{ui.label(&channel.name);for route in &mut channel.tracks{changed|=ui.checkbox(route,"").changed();}ui.end_row();}});ui.add_space(16.);note(ui,"Game audio follows automatic capture. Choose other inputs in Sound. Live video recordings use Track 1, including volume and mute. Enable separate tracks in Advanced audio to include Tracks 2–6 in standalone recordings. Monitoring is opt-in in the mixer.");});
+                        card().show(ui,|ui|{ui.strong("Audio tracks");note(ui,"Assign each channel to up to six independent output tracks. Click a track's name to rename it. Track 1 is what your viewers hear.");egui::Grid::new("routing").striped(true).spacing([24.,16.]).show(ui,|ui|{ui.strong("Source");for (n,name) in self.project.preferences.track_names.iter_mut().enumerate(){changed|=ui.add_sized([92.,24.],egui::TextEdit::singleline(name).hint_text(format!("Track {}",n+1)).char_limit(32)).on_hover_text("Click to rename this track").changed();}ui.end_row();for channel in &mut self.project.audio{ui.label(&channel.name);for route in &mut channel.tracks{changed|=ui.checkbox(route,"").changed();}ui.end_row();}});ui.add_space(16.);note(ui,"Game audio follows automatic capture. Choose other inputs in Sound. Live video recordings use Track 1, including volume and mute. Enable separate tracks in Advanced audio to include Tracks 2–6 in standalone recordings. Monitoring is opt-in in the mixer.");});
                     }
                 },
             }
@@ -6692,6 +6997,22 @@ mod local_chat_time_tests {
 
 impl eframe::App for Studio {
     fn raw_input_hook(&mut self, _: &egui::Context, input: &mut egui::RawInput) {
+        if let Some(what) = self.demo_input {
+            let key = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() };
+            // Bottom left, under the Scenes list: away from both canvases and from Layers.
+            let away = input.screen_rect.map_or(egui::pos2(20., 880.), |r| egui::pos2(r.left() + 200., r.bottom() - 70.));
+            let button = |pressed| egui::Event::PointerButton { pos: away, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+            match (what, self.ui_frames) {
+                ("press-delete", 12) => input.events.push(key(egui::Key::Delete)),
+                ("press-f2", 12) => input.events.push(key(egui::Key::F2)),
+                ("copy-scene", 12) => input.events.push(egui::Event::Copy),
+                ("copy-scene", 14) => input.events.push(egui::Event::Paste(String::new())),
+                ("click-away", 11) => input.events.push(egui::Event::PointerMoved(away)),
+                ("click-away", 12) => input.events.push(button(true)),
+                ("click-away", 13) => input.events.push(button(false)),
+                _ => {}
+            }
+        }
         // `--page demo-drag`: press on the Sources tab, then carry it most of the way to the middle and hold.
         let Some(Some(tab)) = self.demo_drag else { return };
         let start = tab.center();
@@ -6709,6 +7030,7 @@ impl eframe::App for Studio {
     }
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
         self.ui_frames += 1;
+        self.selection_input(ctx);
         if ctx.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::S))) {
             self.save();
         }
@@ -6776,6 +7098,7 @@ impl eframe::App for Studio {
         self.continuous_edit = ctx.input(|i| i.pointer.is_decidedly_dragging());
         self.project_tools(ctx);
         self.layer_tools_windows(ctx);
+        self.delete_confirm_ui(ctx);
         self.utility_windows(ctx);
         if !ctx.wants_keyboard_input() {
             let keys = [

@@ -1156,6 +1156,12 @@ impl Default for BackupPolicy {
         Self { hourly: true, on_close: true, keep: 24, restore_on_start: true }
     }
 }
+impl Preferences {
+    /// An audio track's name (0-based): the one given to it, or "Track N".
+    pub fn track_name(&self, track: usize) -> String {
+        self.track_names.get(track).map(|n| n.trim()).filter(|n| !n.is_empty()).map_or_else(|| format!("Track {}", track + 1), str::to_owned)
+    }
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Preferences {
     #[serde(default)]
@@ -1221,6 +1227,9 @@ pub struct Preferences {
     pub recording_encoder: RecordingEncoder,
     #[serde(default)]
     pub multitrack_recording: bool,
+    /// Names for the six audio tracks; empty means "Track N".
+    #[serde(default)]
+    pub track_names: [String; 6],
     #[serde(default)]
     pub monitor_device: String,
     /// The input device chosen for each mixer channel, so it's still chosen next time.
@@ -1419,6 +1428,7 @@ impl Default for Project {
                 windows_capture_cursor: false,
                 recording_directory: String::new(),
                 multitrack_recording: false,
+                track_names: Default::default(),
                 monitor_device: String::new(),
                 // New projects: the Music strip follows music apps on its own.
                 audio_inputs: [(12, "auto:music".to_owned())].into(),

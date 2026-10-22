@@ -90,6 +90,35 @@ fn option(args: &[String], flag: &str) -> Option<String> {
         .cloned()
 }
 
+/// Finds GStreamer's MSVC x86_64 folder. Its MSI installs into `<INSTALLDIR>\1.0\msvc_x86_64` and sets a
+/// machine-wide variable, but a process started before that (such as from the installer's last page)
+/// doesn't see it, so the registry is checked as well, then the default folder.
+#[cfg(windows)]
+fn gstreamer_root() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn RegGetValueW(key: isize, subkey: *const u16, value: *const u16, flags: u32, kind: *mut u32, data: *mut std::ffi::c_void, bytes: *mut u32) -> i32;
+    }
+    const HKEY_LOCAL_MACHINE: isize = 0x8000_0002u32 as i32 as isize;
+    const RRF_RT_REG_SZ: u32 = 0x2;
+    const VAR: &str = "GSTREAMER_1_0_ROOT_MSVC_X86_64";
+    let machine = |key: &str, name: &str| -> Option<PathBuf> {
+        let key: Vec<u16> = key.encode_utf16().chain(Some(0)).collect();
+        let name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+        let mut data = [0u16; 1024];
+        let mut bytes = (data.len() * 2) as u32;
+        let status = unsafe { RegGetValueW(HKEY_LOCAL_MACHINE, key.as_ptr(), name.as_ptr(), RRF_RT_REG_SZ, std::ptr::null_mut(), data.as_mut_ptr().cast(), &mut bytes) };
+        let len = data.iter().position(|&c| c == 0).unwrap_or(data.len());
+        (status == 0 && len > 0).then(|| std::ffi::OsString::from_wide(&data[..len]).into())
+    };
+    let mut candidates: Vec<PathBuf> = std::env::var_os(VAR).map(PathBuf::from).into_iter().collect();
+    candidates.extend(machine(r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment", VAR));
+    candidates.extend(machine(r"SOFTWARE\GStreamer1.0\x86_64", "InstallDir").map(|d| d.join(r"1.0\msvc_x86_64")));
+    candidates.push(PathBuf::from(r"C:\gstreamer\1.0\msvc_x86_64"));
+    candidates.into_iter().find(|g| g.join(r"bin\gstreamer-1.0-0.dll").is_file())
+}
+
 /// Puts GStreamer and the bundled FFmpeg on the search path, so starting rosorah-studio.exe directly
 /// works as well as starting it from the Rosorah launcher. Without GStreamer it explains and stops.
 #[cfg(windows)]
@@ -154,16 +183,13 @@ fn windows_runtime() {
             }
         }
     }
-    let gst = std::env::var_os("GSTREAMER_1_0_ROOT_MSVC_X86_64")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\gstreamer\1.0\msvc_x86_64"));
-    if !gst.join("bin/gstreamer-1.0-0.dll").is_file() {
+    let Some(gst) = gstreamer_root() else {
         let text: Vec<u16> = "Rosorah Studio can't start because its media runtime (GStreamer) is missing.\n\nRun the Rosorah Studio installer again to repair it."
             .encode_utf16().chain(Some(0)).collect();
         let title: Vec<u16> = "Rosorah Studio".encode_utf16().chain(Some(0)).collect();
         unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), title.as_ptr(), 0x10) };
         std::process::exit(1);
-    }
+    };
     let mut paths = vec![gst.join("bin")];
     if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("runtime/ffmpeg-9.0.2-essentials_build/bin"))) {
         paths.push(dir);

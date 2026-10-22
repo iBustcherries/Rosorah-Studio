@@ -9,7 +9,7 @@ impl RewardsUi {
   if !self.open{return None;}let mut link=None;
   if let Some(result)=a.reward_result.take(){match result{Err(e)=>self.notice=e,Ok(v)=>{match v["kind"].as_str(){Some("list")=>{self.rows=v["rewards"].as_array().cloned().unwrap_or_default();self.owned=v["manageable"].as_array().into_iter().flatten().filter_map(|r|r["id"].as_str().map(str::to_string)).collect();self.notice="Rewards refreshed".into();},Some("queue")=>{self.queue=v["data"].as_array().cloned().unwrap_or_default();self.queue_reward=v["reward"].as_str().unwrap_or("").into();self.more=v["more"].as_bool().unwrap_or(false);},Some("resolved")=>{send(a,Request::Queue(self.queue_reward.clone()));},_=>{self.draft=None;self.delete=None;self.notice="Saved to Twitch".into();send(a,Request::List);}}}}}
   let mut open=true;
-  egui::Window::new("Twitch channel-point rewards").open(&mut open).default_width(640.).anchor(egui::Align2::CENTER_CENTER,egui::Vec2::ZERO).show(ctx,|ui|{
+  crate::studio::pop_window(ctx, "Twitch channel-point rewards").open(&mut open).default_width(640.).show(ctx,|ui|{
    ui.label("Manage rewards and connect them to alerts. Changes are saved to Twitch only when you click Save.");
    if !a.connected{ui.label(&a.status);ui.label("Connect or approve Twitch in Settings > Accounts. Your existing rewards are unchanged.");return;}
    ui.small("Twitch only allows this app to edit rewards it created. Other rewards can still trigger automations.");

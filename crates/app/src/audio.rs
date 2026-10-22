@@ -1015,19 +1015,22 @@ fn worker(control: Arc<Mutex<Control>>, view: Arc<Mutex<View>>, stop: Arc<Atomic
             .map(|(id, p)| (*id, p[0].max(p[1])))
             .collect();
         let refs: Vec<_> = pcms.iter().map(|(id, p)| (*id, p.as_slice())).collect();
-        if let Some(outlet) = &c.outlet {
+        // Each output gets the tracks it carries: six for a multitrack recording, Track 1 and the
+        // VOD track for a Twitch stream with VOD audio, otherwise Track 1 alone.
+        for outlet in c.outlet.iter().chain(c.streaming_outlets.iter()) {
             let channels = outlet.channels();
-            let tracks: Vec<_> = (0..outlet.tracks())
-                .map(|t| {
-                    mix_audio(&channels, &refs, t, SAMPLES).unwrap_or_else(|_| vec![0.; SAMPLES])
-                })
+            if let [0] = outlet.track_map() {
+                if let Ok(pcm) = mix_audio(&channels, &refs, 0, SAMPLES) {
+                    outlet.push(block_start, pcm);
+                }
+                continue;
+            }
+            let tracks: Vec<_> = outlet
+                .track_map()
+                .iter()
+                .map(|&t| mix_audio(&channels, &refs, t, SAMPLES).unwrap_or_else(|_| vec![0.; SAMPLES]))
                 .collect();
             outlet.push_tracks(block_start, &tracks);
-        }
-        for outlet in c.streaming_outlets.iter() {
-            if let Ok(pcm) = mix_audio(&outlet.channels(), &refs, 0, SAMPLES) {
-                outlet.push(block_start, pcm);
-            }
         }
         let monitor_on = !c.monitor_device.is_empty() && c.channels.iter().any(|ch| ch.monitor);
         if monitor.as_mut().is_some_and(|m| {

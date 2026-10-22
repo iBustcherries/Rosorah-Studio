@@ -423,13 +423,14 @@ pub(super) fn select_stream(
 pub(super) fn launch_stream(
     canvas: &Canvas,
     codec: &Codecs,
+    titles: &[String],
     nv12: bool,
 ) -> Result<(Encoder, InputWriter, InputWriter)> {
     ensure!(
         codec.stream_kbps.is_some(),
         "Streaming encoder was not checked"
     );
-    launch_target_tracks(canvas, codec, Target::Stream, 1, nv12)
+    launch_target_tracks(canvas, codec, Target::Stream, titles, nv12)
 }
 
 #[cfg(unix)]
@@ -453,7 +454,7 @@ enum Target<'a> {
 }
 /// Sends the canvas to the Linux virtual camera (a v4l2loopback device).
 pub(super) fn launch_camera(canvas: &Canvas, device: &str, nv12: bool) -> Result<(Encoder, InputWriter, InputWriter)> {
-    launch_target_tracks(canvas, &Codecs::software("rawvideo", "pcm_f32le"), Target::Camera(device), 1, nv12)
+    launch_target_tracks(canvas, &Codecs::software("rawvideo", "pcm_f32le"), Target::Camera(device), &[String::new()], nv12)
 }
 #[cfg(test)]
 pub(super) fn launch(
@@ -472,26 +473,28 @@ pub(super) fn launch_tracks(
     canvas: &Canvas,
     codec: &Codecs,
     path: &Path,
-    tracks: usize,
+    titles: &[String],
     nv12: bool,
 ) -> Result<(Encoder, InputWriter, InputWriter)> {
     ensure!(!path.exists(), "Recording already exists");
-    launch_target_tracks(canvas, codec, Target::File(path), tracks, nv12)
+    launch_target_tracks(canvas, codec, Target::File(path), titles, nv12)
 }
 fn launch_target(
     canvas: &Canvas,
     codec: &Codecs,
     target: Target<'_>,
 ) -> Result<(Encoder, InputWriter, InputWriter)> {
-    launch_target_tracks(canvas, codec, target, 1, false)
+    launch_target_tracks(canvas, codec, target, &[String::new()], false)
 }
+/// `titles`: one per audio track the encoder writes, in order (each arrives as two channels).
 fn launch_target_tracks(
     canvas: &Canvas,
     codec: &Codecs,
     target: Target<'_>,
-    tracks: usize,
+    titles: &[String],
     nv12: bool,
 ) -> Result<(Encoder, InputWriter, InputWriter)> {
+    let tracks = titles.len();
     ensure!((1..=6).contains(&tracks), "Invalid recording track count");
     #[cfg(unix)] let (video_read, video_write) = std::io::pipe()?;
     #[cfg(unix)] let (audio_read, audio_write) = std::io::pipe()?;
@@ -584,7 +587,7 @@ fn launch_target_tracks(
                 "-map",
                 &format!("[a{t}]"),
                 &format!("-metadata:s:a:{t}"),
-                &format!("title=Track {}", t + 1),
+                &format!("title={}", titles[t]),
             ]);
         }
     }
@@ -597,9 +600,8 @@ fn launch_target_tracks(
         "1",
         "-metadata",
         "title=Rosorah Studio recording",
-        "-metadata:s:a:0",
-        "title=Track 1 mix",
     ])
+    .args(["-metadata:s:a:0", &format!("title={}", if titles[0].is_empty() { "Track 1 mix" } else { &titles[0] })])
     .stderr(Stdio::piped());
     #[cfg(unix)] cmd.stdin(Stdio::from(video_read));
     #[cfg(windows)] cmd.stdin(Stdio::null());
@@ -938,7 +940,7 @@ mod multitrack_tests {
             scene: 1,
         };
         let (mut encoder, mut video, mut audio) =
-            launch_tracks(&c, &Codecs::software("mpeg4", "flac"), &path, 6, false)?;
+            launch_tracks(&c, &Codecs::software("mpeg4", "flac"), &path, &(1..=6).map(|n| format!("Track {n}")).collect::<Vec<_>>(), false)?;
         let v = thread::spawn(move || video.write_all(&vec![128; 64 * 64 * 4 * 10]));
         let a = thread::spawn(move || {
             let mut bytes = Vec::with_capacity(48000 * 12 * 4);

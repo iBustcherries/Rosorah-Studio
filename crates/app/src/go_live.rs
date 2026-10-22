@@ -132,8 +132,7 @@ impl Studio {
         }
         let mut open = true;
         let mut start = false;
-        egui::Modal::new(egui::Id::new("go-live"))
-            .frame(solid_window(ctx))
+        pop_modal(ctx, egui::Id::new("go-live"))
             .show(ctx, |ui| {
                 ui.set_width(460.);
                 ui.heading("Ready to go live?");
@@ -190,11 +189,10 @@ impl Studio {
             return;
         }
         let mut open = true;
-        egui::Window::new("Check my setup")
+        pop_window(ctx, "Check my setup")
             .frame(solid_window(ctx))
             .open(&mut open)
             .default_width(460.)
-            .anchor(egui::Align2::CENTER_CENTER, [0., 0.])
             .show(ctx, |ui| {
                 self.check_list(ui);
                 ui.separator();
@@ -292,11 +290,10 @@ impl Studio {
             return;
         }
         let mut open = true;
-        egui::Window::new("Report a problem")
+        pop_window(ctx, "Report a problem")
             .frame(solid_window(ctx))
             .open(&mut open)
             .default_width(460.)
-            .anchor(egui::Align2::CENTER_CENTER, [0., 0.])
             .show(ctx, |ui| {
                 ui.label("Copy a report, then paste it to whoever is helping you.");
                 note(ui, "It has technical details only: no chat messages, passwords or stream keys.");

@@ -1,4 +1,15 @@
 // Layer Properties: everything about one layer in one window, opened by double-clicking it in Layers.
+/// One part of Layer Properties, drawn when its tab is open; `title` heads a part that shares a tab.
+fn section<R>(ui: &mut egui::Ui, show: bool, title: Option<&str>, add: impl FnOnce(&mut egui::Ui) -> R) {
+    if !show {
+        return;
+    }
+    if let Some(title) = title {
+        ui.add_space(6.);
+        ui.strong(title);
+    }
+    add(ui);
+}
 impl Studio {
     fn layer_properties_window(&mut self, ctx: &egui::Context) {
         let Some((scene, index)) = self.layer_properties else { return };
@@ -10,19 +21,35 @@ impl Studio {
             self.layer_properties = None;
             return;
         };
-        let title = format!("{} · Properties", source.name);
+        let title = source.name.clone();
+        let scene_name = self.project.scenes[si].name.clone();
         let mut open = true;
-        egui::Window::new(title)
+        // Front and center, standing out from the studio; it can still be moved.
+        let shown = egui::Window::new(title)
             .id(egui::Id::new("layer_properties"))
             .open(&mut open)
-            .default_width(400.)
-            .default_pos(egui::pos2(60., 110.))
+            .frame(prominent_window(ctx, self.accent()))
+            .collapsible(false)
+            .default_width(460.)
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
+                note(ui, format!("Layer in {scene_name} · changes apply right away · Esc closes"));
+                ui.add_space(4.);
+                ui.horizontal(|ui| {
+                    for (tab, label) in [(PropertiesTab::Source, "Source"), (PropertiesTab::Position, "Position & size"), (PropertiesTab::Appearance, "Appearance"), (PropertiesTab::Effects, "Effects")] {
+                        ui.selectable_value(&mut self.properties_tab, tab, label);
+                    }
+                });
+                ui.separator();
                 egui::ScrollArea::vertical()
-                    .max_height(ctx.content_rect().height() * 0.75)
+                    .max_height(ctx.content_rect().height() * 0.7)
                     .show(ui, |ui| self.layer_properties_body(ui, si, index));
             });
-        if !open {
+        if let Some(shown) = shown {
+            self.keep_selection.push(shown.response.rect);
+        }
+        if !open || (!ctx.wants_keyboard_input() && ctx.input(|i| i.key_pressed(egui::Key::Escape))) {
             self.layer_properties = None;
         }
     }
@@ -148,12 +175,13 @@ impl Studio {
     }
     fn layer_properties_body(&mut self, ui: &mut egui::Ui, si: usize, i: usize) {
         let mut changed = false;
+        let tab = self.properties_tab;
         let id = self.project.scenes[si].layers[i].source;
         let locked = self.project.scenes[si].layers[i].locked;
         if locked {
             note(ui, "This layer is locked. Unlock it from its right-click menu to move or resize it.");
         }
-        egui::CollapsingHeader::new("Source").default_open(true).show(ui, |ui| {
+        section(ui, tab == PropertiesTab::Source, None, |ui| {
             if let Some(source) = self.project.sources.iter_mut().find(|s| s.id == id) {
                 ui.horizontal(|ui| {
                     ui.label("Name");
@@ -188,7 +216,7 @@ impl Studio {
             self.browser_source_ui(ui, id);
             self.folder_source_controls(ui, id);
         });
-        egui::CollapsingHeader::new("Position & size").default_open(true).show(ui, |ui| {
+        section(ui, tab == PropertiesTab::Position, None, |ui| {
             ui.add_enabled_ui(!locked, |ui| {
                 let layer = &mut self.project.scenes[si].layers[i];
                 ui.checkbox(&mut self.keep_aspect, "Keep aspect ratio");
@@ -249,7 +277,7 @@ impl Studio {
                 self.restore_layer_proportions(si, i);
             }
         });
-        egui::CollapsingHeader::new("Appearance").default_open(true).show(ui, |ui| {
+        section(ui, tab == PropertiesTab::Appearance, None, |ui| {
             ui.add_enabled_ui(!locked, |ui| {
                 changed |= ui.add(egui::Slider::new(&mut self.project.scenes[si].layers[i].opacity, 0.0..=1.0).text("Opacity")).changed();
                 // The frame this layer is drawn in: square, rounded or a circle, with edges that can fade out.
@@ -305,7 +333,7 @@ impl Studio {
             let mut pick = None;
             let look = &mut self.project.scenes[si].layers[i].look;
             let before = look.clone();
-            egui::CollapsingHeader::new("Transform").default_open(look.rotation != 0. || look.flip_horizontal || look.flip_vertical || look.blend != auroracast_core::BlendMode::Normal).show(ui, |ui| {
+            section(ui, tab == PropertiesTab::Effects, Some("Transform"), |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Rotate");
                     ui.add(egui::DragValue::new(&mut look.rotation).range(-360.0..=360.0).suffix("°").speed(0.5));
@@ -326,7 +354,7 @@ impl Studio {
                     }
                 });
             });
-            egui::CollapsingHeader::new("Filters").default_open(look.colour_adjusted() || !look.lut.is_empty() || look.sharpen > 0. || look.scroll != [0., 0.] || !look.mask.is_empty() || look.luma_key || look.delay_ms > 0).show(ui, |ui| {
+            section(ui, tab == PropertiesTab::Effects, Some("Filters"), |ui| {
                 // Each filter shows its settings only when it's in use.
                 let mut colour = look.colour_adjusted();
                 if ui.checkbox(&mut colour, "Colour correction").changed() && !colour {
@@ -401,7 +429,7 @@ impl Studio {
                     }
                 }).response.on_hover_text("Shows this source late, e.g. to line a camera up with your microphone");
             });
-            egui::CollapsingHeader::new("Show and hide").default_open(look.show != auroracast_core::LayerTransition::None || look.hide != auroracast_core::LayerTransition::None).show(ui, |ui| {
+            section(ui, tab == PropertiesTab::Effects, Some("Show and hide"), |ui| {
                 for (label, value) in [("When shown", &mut look.show), ("When hidden", &mut look.hide)] {
                     ui.horizontal(|ui| {
                         ui.label(label);

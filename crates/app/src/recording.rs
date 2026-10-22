@@ -74,6 +74,11 @@ struct Shared {
     render_ns:AtomicU64,missed_frames:AtomicU64,queue_drops:AtomicU64,
     fps: u32,
     audio_channels: usize,
+    /// The mixer tracks this output carries, in order (two channels each): Track 1 alone, all
+    /// six for a multitrack recording, or Track 1 and Twitch's VOD track for a stream.
+    track_map: Vec<usize>,
+    /// Each carried track's name, for the file's track titles.
+    track_titles: Vec<String>,
     video_capacity: usize,
 }
 impl Shared {
@@ -177,6 +182,10 @@ impl AudioOutlet {
 
     pub fn tracks(&self) -> usize {
         self.0.audio_channels / 2
+    }
+    /// The mixer track behind each of this output's tracks.
+    pub fn track_map(&self) -> &[usize] {
+        &self.0.track_map
     }
     pub fn push_tracks(&self, at: Instant, tracks: &[Vec<f32>]) {
         let count = self.tracks();
@@ -358,6 +367,11 @@ impl Recording {
             "Output requires even canvas width and height (Settings > Video & recording)"
         );
         let path = output.path();
+        let track_map: Vec<usize> = match &output {
+            Output::Recording(_) if project.preferences.multitrack_recording => (0..6).collect(),
+            Output::Streaming(setup) => std::iter::once(0).chain(setup.vod_track).collect(),
+            _ => vec![0],
+        };
         let shared = Arc::new(Shared {
             clock: Mutex::new(None),
             end: Mutex::new(None),
@@ -377,13 +391,9 @@ impl Recording {
             }),
             render_ns:AtomicU64::new(0),missed_frames:AtomicU64::new(0),queue_drops:AtomicU64::new(0),
             fps: canvas.fps,
-            audio_channels: if matches!(&output, Output::Recording(_))
-                && project.preferences.multitrack_recording
-            {
-                12
-            } else {
-                2
-            },
+            audio_channels: track_map.len() * 2,
+            track_titles: track_map.iter().map(|&t| project.preferences.track_name(t)).collect(),
+            track_map,
             video_capacity: video_capacity(&canvas),
         });
         let project = Arc::new(Mutex::new((0, project.clone())));
@@ -672,9 +682,9 @@ fn run(
     }
     let (mut encoder, video_pipe, audio_pipe) = match output {
         Output::Recording(path) => {
-            encoding::launch_tracks(&canvas, &codec, path, s.audio_channels / 2, nv12)
+            encoding::launch_tracks(&canvas, &codec, path, &s.track_titles, nv12)
         }
-        Output::Streaming(_) => encoding::launch_stream(&canvas, &codec, nv12),
+        Output::Streaming(_) => encoding::launch_stream(&canvas, &codec, &s.track_titles, nv12),
         Output::Camera(device) => encoding::launch_camera(&canvas, device, nv12),
         #[cfg(windows)]
         Output::WindowsCamera(_) => unreachable!(),
@@ -953,6 +963,92 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         output.stdout
+    }
+    #[test]
+    #[ignore = "Requires FFmpeg 8+ and Vulkan; streams to local RTMP receivers"]
+    fn twitch_gets_the_vod_track_and_other_destinations_only_the_stream_mix() -> Result<()> {
+        use crate::streaming::{Config, Destination, Stream};
+        use std::process::Stdio;
+        struct Listener(std::process::Child);
+        impl Drop for Listener {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let receiver = |url: &str, path: &Path| -> Result<Listener> {
+            Ok(Listener(
+                Command::new("ffmpeg")
+                    .args(["-nostdin", "-loglevel", "error", "-listen", "1", "-i", url, "-map", "0:a", "-c", "copy", "-f", "matroska", "-y"])
+                    .arg(path)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()?,
+            ))
+        };
+        let port = || -> Result<u16> { Ok(std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port()) };
+        while crate::streaming::multitrack_flv().is_none() {
+            thread::sleep(Duration::from_millis(50));
+        }
+        ensure!(crate::streaming::multitrack_flv() == Some(true), "this FFmpeg can't write multitrack FLV");
+        let folder = output_dir();
+        std::fs::create_dir_all(&folder)?;
+        let (twitch, youtube) = (format!("rtmp://127.0.0.1:{}/live", port()?), format!("rtmp://127.0.0.1:{}/live", port()?));
+        let (twitch_file, youtube_file) = (folder.join("vod-twitch.mkv"), folder.join("vod-youtube.mkv"));
+        let a = receiver(&format!("{twitch}/vod-test-a"), &twitch_file)?;
+        let b = receiver(&format!("{youtube}/vod-test-b"), &youtube_file)?;
+        thread::sleep(Duration::from_millis(150));
+        let config = Config {
+            twitch: Destination { enabled: true, server: twitch, key: "vod-test-a".into(), ..Default::default() },
+            twitch_vod_track: Some(1),
+            youtube: Destination { enabled: true, server: youtube, key: "vod-test-b".into(), ..Default::default() },
+            bitrate: 1000,
+            ..Default::default()
+        };
+        let mut project = Project::default();
+        project.preferences.recording_encoder = auroracast_core::RecordingEncoder::Software;
+        project.sources[0].kind = auroracast_core::SourceKind::ScreenCapture;
+        project.scenes[0].layers.retain(|l| l.source == 1);
+        (project.canvases[0].width, project.canvases[0].height) = (320, 180);
+        let mut engine = rosorah_capture::Engine::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        engine.start(1, Box::new(Controlled(tx)), rosorah_capture::Options::default())?;
+        let source = rx.recv_timeout(Duration::from_secs(2))?;
+        source.publish(Frame { width: 1, height: 1, rgba: vec![0, 0, 180, 255] })?;
+        let stream = Stream::start(&project, 0, engine.reader(), &config, &folder)?;
+        let start = wait_ready(&stream.engine);
+        let outlet = stream.engine.outlet();
+        assert_eq!(outlet.track_map(), [0, 1]);
+        let tone = |hz: f32, block: u64| -> Vec<f32> { (0..BLOCK).flat_map(|n| { let v = (std::f32::consts::TAU * hz * (block * BLOCK + n) as f32 / RATE as f32).sin() * 0.5; [v, v] }).collect() };
+        for block in 0..500u64 {
+            let at = start + Duration::from_millis(block * 10);
+            if let Some(wait) = at.checked_duration_since(Instant::now()) {
+                thread::sleep(wait);
+            }
+            outlet.push_tracks(at, &[tone(440., block), tone(880., block)]);
+            let _ = engine.drain();
+        }
+        stream.stop();
+        finish(&stream.engine);
+        thread::sleep(Duration::from_millis(500));
+        drop((a, b));
+        let audio_streams = |path: &Path| -> usize {
+            let out = Command::new("ffprobe").args(["-v", "error", "-select_streams", "a", "-show_entries", "stream=index", "-of", "csv=p=0"]).arg(path).output().unwrap();
+            String::from_utf8_lossy(&out.stdout).lines().filter(|l| !l.trim().is_empty()).count()
+        };
+        // The tone's pitch from its zero crossings, over the second second.
+        let pitch = |path: &Path, track: usize| -> f32 {
+            let pcm = ffmpeg_decode(path, &["-map", &format!("0:a:{track}"), "-ss", "1", "-t", "1", "-ac", "1", "-ar", "48000", "-f", "f32le", "pipe:1"]);
+            let samples: Vec<f32> = pcm.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+            samples.windows(2).filter(|w| w[0] <= 0. && w[1] > 0.).count() as f32 * 48000. / samples.len().max(1) as f32
+        };
+        assert_eq!(audio_streams(&twitch_file), 2, "Twitch gets the stream mix and the VOD track");
+        assert_eq!(audio_streams(&youtube_file), 1, "YouTube gets the stream mix only");
+        assert!((pitch(&twitch_file, 0) - 440.).abs() < 15., "stream mix {}", pitch(&twitch_file, 0));
+        assert!((pitch(&twitch_file, 1) - 880.).abs() < 15., "VOD track {}", pitch(&twitch_file, 1));
+        assert!((pitch(&youtube_file, 0) - 440.).abs() < 15., "YouTube {}", pitch(&youtube_file, 0));
+        Ok(())
     }
     #[test]
     #[ignore = "Requires FFmpeg/ffprobe and Vulkan; exercises the real background compositor and muxer"]

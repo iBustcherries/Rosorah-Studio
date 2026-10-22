@@ -17,7 +17,7 @@ impl Guide {
  pub fn ui(&mut self,ctx:&egui::Context,p:&mut Project,connected:&[Platform])->Option<(Id,bool)>{
   if !self.open{return None;} if let Some((sound,rx))=&self.picker&& let Ok(path)=rx.try_recv(){if let Some(path)=path {if *sound{self.sound=path.to_string_lossy().into()}else{self.media=path.to_string_lossy().into()}}self.picker=None;}
   let mut open=true;let mut result=None;
-  egui::Window::new("Create alert or automation").open(&mut open).default_width(570.).anchor(egui::Align2::CENTER_CENTER,egui::Vec2::ZERO).resizable(true).show(ctx,|ui|{
+  crate::studio::pop_window(ctx, "Create alert or automation").open(&mut open).default_width(570.).resizable(true).show(ctx,|ui|{
    ui.horizontal(|ui|{for (i,label) in ["1  When","2  Do","3  Preview & finish"].iter().enumerate(){ui.selectable_value(&mut self.step,i,*label);}});ui.separator();
    egui::ScrollArea::vertical().max_height(550.).show(ui,|ui|{
    match self.step {
