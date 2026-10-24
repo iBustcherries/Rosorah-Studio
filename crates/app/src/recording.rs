@@ -382,7 +382,7 @@ impl Recording {
         let path = output.path();
         let track_map: Vec<usize> = match &output {
             Output::Recording(_) if project.preferences.multitrack_recording => (0..6).collect(),
-            Output::Streaming(setup) => std::iter::once(0).chain(setup.vod_track).collect(),
+            Output::Streaming(setup) => setup.tracks.clone(),
             _ => vec![0],
         };
         let shared = Arc::new(Shared {
@@ -1035,7 +1035,7 @@ mod tests {
     }
     #[test]
     #[ignore = "Requires FFmpeg 8+ and Vulkan; streams to local RTMP receivers"]
-    fn twitch_gets_the_vod_track_and_other_destinations_only_the_stream_mix() -> Result<()> {
+    fn each_destination_hears_its_own_track_and_twitch_its_vod_track() -> Result<()> {
         use crate::streaming::{Config, Destination, Stream};
         use std::process::Stdio;
         struct Listener(std::process::Child);
@@ -1070,8 +1070,9 @@ mod tests {
         thread::sleep(Duration::from_millis(150));
         let config = Config {
             twitch: Destination { enabled: true, server: twitch, key: "vod-test-a".into(), ..Default::default() },
-            twitch_vod_track: Some(1),
-            youtube: Destination { enabled: true, server: youtube, key: "vod-test-b".into(), ..Default::default() },
+            // Twitch: Track 1 live and Track 3 as VOD audio; YouTube: Track 2 only.
+            twitch_vod_track: Some(2),
+            youtube: Destination { enabled: true, server: youtube, key: "vod-test-b".into(), audio_track: Some(1), ..Default::default() },
             bitrate: 1000,
             ..Default::default()
         };
@@ -1088,14 +1089,14 @@ mod tests {
         let stream = Stream::start(&project, 0, engine.reader(), &config, &folder)?;
         let start = wait_ready(&stream.engine);
         let outlet = stream.engine.outlet();
-        assert_eq!(outlet.track_map(), [0, 1]);
+        assert_eq!(outlet.track_map(), [0, 1, 2]);
         let tone = |hz: f32, block: u64| -> Vec<f32> { (0..BLOCK).flat_map(|n| { let v = (std::f32::consts::TAU * hz * (block * BLOCK + n) as f32 / RATE as f32).sin() * 0.5; [v, v] }).collect() };
         for block in 0..500u64 {
             let at = start + Duration::from_millis(block * 10);
             if let Some(wait) = at.checked_duration_since(Instant::now()) {
                 thread::sleep(wait);
             }
-            outlet.push_tracks(at, &[tone(440., block), tone(880., block)]);
+            outlet.push_tracks(at, &[tone(440., block), tone(660., block), tone(880., block)]);
             let _ = engine.drain();
         }
         stream.stop();
@@ -1112,11 +1113,11 @@ mod tests {
             let samples: Vec<f32> = pcm.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
             samples.windows(2).filter(|w| w[0] <= 0. && w[1] > 0.).count() as f32 * 48000. / samples.len().max(1) as f32
         };
-        assert_eq!(audio_streams(&twitch_file), 2, "Twitch gets the stream mix and the VOD track");
-        assert_eq!(audio_streams(&youtube_file), 1, "YouTube gets the stream mix only");
-        assert!((pitch(&twitch_file, 0) - 440.).abs() < 15., "stream mix {}", pitch(&twitch_file, 0));
-        assert!((pitch(&twitch_file, 1) - 880.).abs() < 15., "VOD track {}", pitch(&twitch_file, 1));
-        assert!((pitch(&youtube_file, 0) - 440.).abs() < 15., "YouTube {}", pitch(&youtube_file, 0));
+        assert_eq!(audio_streams(&twitch_file), 2, "Twitch gets its track and the VOD track");
+        assert_eq!(audio_streams(&youtube_file), 1, "YouTube gets its own track only");
+        assert!((pitch(&twitch_file, 0) - 440.).abs() < 15., "Twitch's Track 1 {}", pitch(&twitch_file, 0));
+        assert!((pitch(&twitch_file, 1) - 880.).abs() < 15., "Twitch's VOD track {}", pitch(&twitch_file, 1));
+        assert!((pitch(&youtube_file, 0) - 660.).abs() < 15., "YouTube's Track 2 {}", pitch(&youtube_file, 0));
         Ok(())
     }
     #[test]

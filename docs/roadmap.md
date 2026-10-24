@@ -1,6 +1,6 @@
 # Rosorah Studio roadmap
 
-Updated for 0.51.0 (October 2026). Rosorah Studio is original code built on
+Updated for 0.52.0 (October 2026). Rosorah Studio is original code built on
 independent libraries (Rust, egui/wgpu, GStreamer, Qt WebEngine). It aims to be an easier
 all-in-one alternative to running OBS, a chat bot and an alert service side by side,
 not a feature-for-feature copy of OBS.

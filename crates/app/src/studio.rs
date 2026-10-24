@@ -843,6 +843,7 @@ impl Studio {
         project.prepare_workspace();
         project.merge_alert_boxes();
         project.drop_hidden_alert_layers();
+        project.fill_drm_free_track();
         let mut every_scene_last = Default::default();
         project.sync_every_scene(&mut every_scene_last);
         if project.preferences.accent == [141, 101, 255] {
@@ -1492,6 +1493,7 @@ impl Studio {
         project.ensure_alert_channels();
         project.merge_alert_boxes();
         project.drop_hidden_alert_layers();
+        project.fill_drm_free_track();
         self.every_scene_last.clear();
         project.sync_every_scene(&mut self.every_scene_last);
         self.project = project;
@@ -2109,7 +2111,7 @@ impl Studio {
                     for d in view.devices.iter().filter(|d| d.kind == "Audio/Sink") {
                         if ui.button(&d.label).clicked() {
                             let id = self.project.id();
-                            self.project.audio.push(auroracast_core::AudioChannel { monitor_only: false, id, name: "Desktop audio".into(), gain_db: 0., muted: false, tracks: [true, false, false, false, false, false], delay_ms: 0, monitor: false, noise_suppression: Default::default(), media_source: None });
+                            self.project.audio.push(auroracast_core::AudioChannel { monitor_only: false, id, name: "Desktop audio".into(), gain_db: 0., muted: false, tracks: auroracast_core::new_tracks(false), delay_ms: 0, monitor: false, noise_suppression: Default::default(), media_source: None });
                             self.audio.selected.insert(id, d.serial.clone());
                             self.audio.enabled.insert(id, true);
                             self.changed();
@@ -2137,7 +2139,8 @@ impl Studio {
                 for (app, name) in apps {
                     if ui.button(&name).clicked() {
                         let id = self.project.id();
-                        self.project.audio.push(auroracast_core::AudioChannel { monitor_only: false, id, name, gain_db: 0., muted: false, tracks: [true, false, false, false, false, false], delay_ms: 0, monitor: false, noise_suppression: Default::default(), media_source: None });
+                        let tracks = auroracast_core::new_tracks(auroracast_core::music_name(&name));
+                        self.project.audio.push(auroracast_core::AudioChannel { monitor_only: false, id, name, gain_db: 0., muted: false, tracks, delay_ms: 0, monitor: false, noise_suppression: Default::default(), media_source: None });
                         self.audio.selected.insert(id, crate::app_audio::app_target(&app));
                         self.audio.enabled.insert(id, true);
                         self.changed();
@@ -4730,11 +4733,7 @@ impl Studio {
                                 Some(true)=>{
                                     note(ui,format!("Viewers hear {} live; your VODs get {} instead. Leave music off {}.",names[0],names[t],names[t]));
                                     if ui.button(format!("Put everything except music on {}",names[t])).on_hover_text("Every sound goes on this track except the Music strip and music apps").clicked(){
-                                        let inputs=self.project.preferences.audio_inputs.clone();
-                                        for channel in &mut self.project.audio {
-                                            let music=inputs.get(&channel.id).is_some_and(|i|i=="auto:music")||channel.name.to_lowercase().contains("music");
-                                            channel.tracks[t]=!music;
-                                        }
+                                        self.project.all_but_music_on(t);
                                         self.changed();
                                     }
                                 }
@@ -7248,7 +7247,7 @@ if changed{self.changed();}
             name: "Read aloud".into(),
             gain_db: 0.,
             muted: false,
-            tracks: [true, false, false, false, false, false],
+            tracks: auroracast_core::new_tracks(false),
             delay_ms: 0,
             monitor: true,
             monitor_only: false,

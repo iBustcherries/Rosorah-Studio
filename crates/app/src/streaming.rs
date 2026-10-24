@@ -32,6 +32,9 @@ pub struct Destination {
     pub canvas: Option<auroracast_core::Id>,
     /// This destination's own video bitrate; None uses the shared Output bitrate.
     pub bitrate: Option<u32>,
+    /// The audio track (0-based, Track 1 to 6) this destination hears; None is the platform's
+    /// default (see Config::audio_track).
+    pub audio_track: Option<usize>,
 }
 #[derive(Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Provider {
@@ -123,7 +126,7 @@ impl Default for Config {
                 server: "rtmps://a.rtmps.youtube.com:443/live2".into(),
                 ..Default::default()
             },
-            twitch_vod_track: None,
+            twitch_vod_track: Some(auroracast_core::DRM_FREE),
             services: Vec::new(),
             bitrate: 6000,
             record: false,
@@ -184,6 +187,18 @@ mod application_path_tests {
     }
 }
 impl Config {
+    /// The audio track a connection hears: the one chosen for it, or by default DRM free (Track 2)
+    /// for YouTube, which takes down streams with copyrighted music, and Track 1 elsewhere.
+    pub fn audio_track(&self, slot: usize) -> usize {
+        let default = if matches!(slot, 1 | 2) { auroracast_core::DRM_FREE } else { 0 };
+        let chosen = match slot {
+            0 => self.twitch.audio_track,
+            1 => self.youtube.audio_track,
+            2 => self.youtube_vertical.audio_track,
+            _ => self.services.get(slot - 3).and_then(|s| s.destination.audio_track),
+        };
+        chosen.unwrap_or(default)
+    }
     pub fn connection_name(&self, slot: usize) -> String {
         if slot < 3 {
             self.connection_names[slot].clone()
@@ -438,12 +453,17 @@ impl Config {
                         .all(|b| b.is_ascii_alphanumeric() || b":/.-_[]".contains(&b)),
                 "Invalid {name} server address"
             );
+            let track = self.audio_track(index);
+            ensure!(track < 6, "Choose an audio track for {name}");
             targets.push(Target {
                 name,
                 destination: Location::Network(format!("{server}/{key}")),
                 secret: key.into(),
+                track,
+                default_track: dest.audio_track.is_none(),
                 // Twitch is the first entry; it alone takes the VOD track.
                 vod: index == 0 && self.twitch_vod_track.is_some(),
+                audio: Vec::new(),
             });
         }
         ensure!(
@@ -544,8 +564,14 @@ pub(super) struct Target {
     pub name: String,
     pub destination: Location,
     pub secret: String,
-    /// Also sends the encoder's second audio track (Twitch's VOD audio).
+    /// The audio track this destination hears (0-based).
+    pub track: usize,
+    /// The track is the platform's default rather than one the streamer chose.
+    pub default_track: bool,
+    /// Also sends Twitch's VOD audio track.
     pub vod: bool,
+    /// Which of the encoder's audio tracks it sends, in order (filled in by Setup::new).
+    pub audio: Vec<usize>,
 }
 impl Target {
     fn redact(&self, text: &str) -> String {
@@ -605,8 +631,9 @@ impl State {
 #[derive(Clone)]
 pub struct Setup {
     pub(super) targets: Vec<Target>,
-    /// The track sent as Twitch's VOD audio alongside the stream mix (Track 1).
-    pub vod_track: Option<usize>,
+    /// The audio tracks (0-based) the encoder makes, in order: each one a destination hears, and
+    /// Twitch's VOD audio. Track 1 comes first when it's used.
+    pub tracks: Vec<usize>,
     pub bitrate: u32,
     pub state: Arc<State>,
     pub recording: Option<PathBuf>,
@@ -622,7 +649,10 @@ impl Setup {
                 name: "Recording".into(),
                 destination: Location::File(path.clone()),
                 secret: String::new(),
+                track: 0,
+                default_track: true,
                 vod: false,
+                audio: Vec::new(),
             });
             Some(path)
         } else {
@@ -642,14 +672,10 @@ impl Setup {
                 },
             })
             .collect();
-        // The VOD track needs an FFmpeg that writes two audio tracks to FLV (8.0 or newer).
-        let vod_track = config.twitch_vod_track.filter(|t| (1..6).contains(t) && targets.iter().any(|t| t.vod) && multitrack_flv() == Some(true));
-        if vod_track.is_none() {
-            targets.iter_mut().for_each(|t| t.vod = false);
-        }
+        let tracks = audio_tracks(&mut targets, config.twitch_vod_track, multitrack_flv() == Some(true))?;
         Ok(Self {
             targets,
-            vod_track,
+            tracks,
             bitrate: config.bitrate,
             state: Arc::new(State {
                 destinations: Mutex::new(destinations),
@@ -660,6 +686,49 @@ impl Setup {
             replay: false,
         })
     }
+}
+/// Works out the audio tracks to encode and which of them each destination sends. More than one
+/// track needs an FFmpeg that writes several audio tracks to FLV (8.0 or newer); without one, the
+/// VOD track is left out, and different tracks for different destinations can't be streamed.
+fn audio_tracks(targets: &mut [Target], vod: Option<usize>, multitrack: bool) -> Result<Vec<usize>> {
+    // Without one, platforms only on their default track (YouTube's DRM free) hear Track 1.
+    if !multitrack {
+        let chosen: Vec<usize> = targets.iter().filter(|t| !t.default_track).map(|t| t.track).collect();
+        let track = chosen.first().copied().unwrap_or(0);
+        if targets.iter().any(|t| t.track != track) {
+            for t in targets.iter_mut().filter(|t| t.default_track) {
+                t.track = track;
+            }
+        }
+    }
+    let mut tracks: Vec<usize> = targets.iter().map(|t| t.track).collect();
+    tracks.sort_unstable();
+    tracks.dedup();
+    if tracks.is_empty() {
+        tracks.push(0);
+    }
+    ensure!(
+        tracks.len() == 1 || multitrack,
+        "Sending different audio tracks to different platforms needs FFmpeg 8 or newer. Choose the same track for each platform in Settings > Streaming platforms, or update FFmpeg."
+    );
+    let vod = vod.filter(|v| (1..6).contains(v) && multitrack && targets.iter().any(|t| t.vod && t.track != *v));
+    if let Some(v) = vod
+        && !tracks.contains(&v)
+    {
+        tracks.push(v);
+    }
+    let at = |track: usize| tracks.iter().position(|t| *t == track).unwrap();
+    for target in targets.iter_mut() {
+        target.audio = vec![at(target.track)];
+        if target.vod
+            && let Some(v) = vod
+            && v != target.track
+        {
+            target.audio.push(at(v));
+        }
+        target.vod = target.audio.len() > 1;
+    }
+    Ok(tracks)
 }
 pub struct Stream {
     pub engine: crate::recording::Recording,
@@ -691,7 +760,7 @@ impl Stream {
     pub fn start_replay_only(project: &Project, canvas: usize, frames: FrameReader, bitrate: u32) -> Result<Self> {
         let setup = Setup {
             targets: Vec::new(),
-            vod_track: None,
+            tracks: vec![0],
             bitrate,
             state: Arc::new(State { destinations: Mutex::new(Vec::new()), stopping: AtomicBool::new(false), retry_now: Mutex::default() }),
             recording: None,
@@ -830,6 +899,42 @@ impl Drop for Stream {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn target(track: usize, vod: bool) -> Target {
+        Target { name: String::new(), destination: Location::Network(String::new()), secret: String::new(), track, default_track: false, vod, audio: Vec::new() }
+    }
+    #[test]
+    fn youtube_and_twitch_vods_get_the_drm_free_track_by_default() {
+        let on = |key: &str| Destination { enabled: true, server: "rtmp://example.com/live".into(), key: key.into(), ..Default::default() };
+        let config = Config { twitch: on("a"), youtube: on("b"), ..Default::default() };
+        let mut targets = config.targets().unwrap();
+        // Twitch live hears Track 1 and keeps DRM free as its VOD audio; YouTube hears DRM free.
+        assert_eq!(audio_tracks(&mut targets, config.twitch_vod_track, true).unwrap(), [0, 1]);
+        assert_eq!(targets.iter().map(|t| t.audio.clone()).collect::<Vec<_>>(), [vec![0, 1], vec![1]]);
+        // With an FFmpeg older than 8, YouTube's default falls back to Track 1 instead of failing.
+        let mut targets = config.targets().unwrap();
+        assert_eq!(audio_tracks(&mut targets, config.twitch_vod_track, false).unwrap(), [0]);
+        assert_eq!(targets.iter().map(|t| t.audio.clone()).collect::<Vec<_>>(), [vec![0], vec![0]]);
+    }
+    #[test]
+    fn each_destination_gets_its_own_audio_track() {
+        // Twitch on Track 1 with Track 3 as VOD audio, YouTube on Track 2, a recording on Track 1.
+        let mut targets = [target(0, true), target(1, false), target(0, false)];
+        assert_eq!(audio_tracks(&mut targets, Some(2), true).unwrap(), [0, 1, 2]);
+        assert_eq!(targets.iter().map(|t| t.audio.clone()).collect::<Vec<_>>(), [vec![0, 2], vec![1], vec![0]]);
+        // Only YouTube, on Track 2: just that track is made.
+        let mut targets = [target(1, false)];
+        assert_eq!(audio_tracks(&mut targets, None, false).unwrap(), [1]);
+        assert_eq!(targets[0].audio, [0]);
+        // A VOD track that's Twitch's own track isn't sent twice.
+        let mut targets = [target(2, true)];
+        assert_eq!(audio_tracks(&mut targets, Some(2), true).unwrap(), [2]);
+        assert_eq!((targets[0].audio.clone(), targets[0].vod), (vec![0], false));
+        // An older FFmpeg: the VOD track is left out, and different tracks can't be streamed.
+        let mut targets = [target(0, true)];
+        assert_eq!(audio_tracks(&mut targets, Some(2), false).unwrap(), [0]);
+        assert!(!targets[0].vod);
+        assert!(audio_tracks(&mut [target(0, false), target(1, false)], None, false).is_err());
+    }
     #[test]
     fn validates_destinations_and_keeps_secrets_out_of_diagnostics() {
         let mut c = Config::default();

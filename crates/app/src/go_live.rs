@@ -34,15 +34,22 @@ impl Studio {
             (config.connection_name(2), &config.youtube_vertical),
         ];
         destinations.extend(config.services.iter().map(|s| (s.name.clone(), &s.destination)));
-        let enabled: Vec<_> = destinations.into_iter().filter(|(_, d)| d.enabled).collect();
+        // With each one's slot, for the audio track it hears.
+        let enabled: Vec<_> = destinations.into_iter().enumerate().filter(|(_, (_, d))| d.enabled).map(|(slot, (name, d))| (name, d, config.audio_track(slot))).collect();
         if enabled.is_empty() {
             add(Level::Block, "Choose where to stream (Twitch, YouTube, Kick…)".into(), Some(("Choose", Fix::Accounts)));
         }
-        for (name, dest) in enabled {
+        let mixed = enabled.iter().any(|(_, _, t)| *t != enabled[0].2);
+        for (name, dest, track) in enabled {
             if dest.key.trim().is_empty() || dest.server.trim().is_empty() {
                 add(Level::Block, format!("{name}: sign in, or add its stream key"), Some(("Set up", Fix::Accounts)));
             } else if dest.canvas.is_some_and(|id| !self.project.canvases.iter().any(|c| c.id == id)) {
                 add(Level::Block, format!("{name}: choose which video to send"), Some(("Set up", Fix::Accounts)));
+            } else if track > 0 && mixed && dest.audio_track.is_none() && crate::streaming::multitrack_flv() == Some(false) {
+                add(Level::Warn, format!("{name} hears {} (your FFmpeg is older than 8.0, so it can't have {} on its own)", self.project.preferences.track_name(0), self.project.preferences.track_name(track)), None);
+            } else if track > 0 && !self.project.audio.iter().any(|c| c.tracks.get(track).copied().unwrap_or(false)) {
+                // A platform on its own track only hears the sounds ticked for that track.
+                add(Level::Warn, format!("{name} hears {}, which has no sounds on it", self.project.preferences.track_name(track)), Some(("Set up", Fix::Studio)));
             } else {
                 add(Level::Good, format!("{name} is ready"), None);
             }

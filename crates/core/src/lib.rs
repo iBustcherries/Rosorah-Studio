@@ -1188,10 +1188,26 @@ impl Default for BackupPolicy {
     }
 }
 impl Preferences {
-    /// An audio track's name (0-based): the one given to it, or "Track N".
+    /// An audio track's name (0-based): the one given to it, or "Track N" ("DRM free" for Track 2,
+    /// which holds everything but music unless changed).
     pub fn track_name(&self, track: usize) -> String {
-        self.track_names.get(track).map(|n| n.trim()).filter(|n| !n.is_empty()).map_or_else(|| format!("Track {}", track + 1), str::to_owned)
+        self.track_names.get(track).map(|n| n.trim()).filter(|n| !n.is_empty()).map_or_else(
+            || if track == DRM_FREE { "DRM free".to_owned() } else { format!("Track {}", track + 1) },
+            str::to_owned,
+        )
     }
+}
+/// Track 2 (0-based 1): everything except music, so it can go where music mustn't, such as
+/// YouTube and Twitch VODs.
+pub const DRM_FREE: usize = 1;
+/// Whether a mixer strip's name says it's music.
+pub fn music_name(name: &str) -> bool {
+    let name = name.to_lowercase();
+    name.contains("music") || name.contains("spotify")
+}
+/// The tracks a new mixer strip starts on: Track 1, and DRM free unless it's music.
+pub fn new_tracks(music: bool) -> [bool; 6] {
+    [true, !music, false, false, false, false]
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Preferences {
@@ -1497,10 +1513,10 @@ impl Project {
     pub fn source(&self, id: Id) -> Option<&Source> {
         self.sources.iter().find(|s| s.id == id)
     }
-    /// Adds a mixer channel (on track 1) for a media source's sound and returns it.
+    /// Adds a mixer channel (on Track 1, and DRM free) for a media source's sound and returns it.
     pub fn add_media_audio(&mut self, source: Id, name: String) -> &mut AudioChannel {
         let id = self.id();
-        self.audio.push(AudioChannel { id, name, gain_db: 0., muted: false, tracks: [true, false, false, false, false, false], delay_ms: 0, monitor: false, monitor_only: false, noise_suppression: Default::default(), media_source: Some(source) });
+        self.audio.push(AudioChannel { id, name, gain_db: 0., muted: false, tracks: new_tracks(false), delay_ms: 0, monitor: false, monitor_only: false, noise_suppression: Default::default(), media_source: Some(source) });
         self.audio.last_mut().unwrap()
     }
     /// Gives every alert sound or video with audio its own mixer channel, so it can be heard.
@@ -1535,6 +1551,25 @@ impl Project {
     /// Merges alert boxes that are copies of one another (the same settings) into one, so every scene
     /// shows the box alerts are sent to: pasting a layer used to give the box a source of its own.
     /// The box the most alert steps use is kept. Returns whether any were merged.
+    /// Fills the DRM free track (Track 2) in a project that has never used it: every sound on
+    /// Track 1 except music. Returns whether it changed anything.
+    pub fn fill_drm_free_track(&mut self) -> bool {
+        let named = self.preferences.track_names.get(DRM_FREE).is_some_and(|n| !n.trim().is_empty());
+        if named || self.audio.iter().any(|c| c.tracks[DRM_FREE]) {
+            return false;
+        }
+        self.all_but_music_on(DRM_FREE)
+    }
+    /// Puts every sound on Track 1 except music (the Music strip, music apps) on `track`, and
+    /// takes the rest off it. Returns whether the track has any sound on it now.
+    pub fn all_but_music_on(&mut self, track: usize) -> bool {
+        let inputs = &self.preferences.audio_inputs;
+        for c in &mut self.audio {
+            let music = inputs.get(&c.id).is_some_and(|i| i == "auto:music") || music_name(&c.name);
+            c.tracks[track] = c.tracks[0] && !music;
+        }
+        self.audio.iter().any(|c| c.tracks[track])
+    }
     pub fn merge_alert_boxes(&mut self) -> bool {
         let boxes: Vec<(Id, widgets::Settings)> = self.sources.iter().filter_map(|s| match &s.kind {
             SourceKind::Widget(w) if w.kind == widgets::Kind::AlertBox => Some((s.id, widgets::Settings { layout_width: 0, layout_height: 0, ..w.clone() })),
@@ -2247,6 +2282,21 @@ mod windows_monitor_preferences_tests {
 #[cfg(test)]
 mod transition_media_tests {
     use super::*;
+    #[test]
+    fn drm_free_track_is_filled_once_without_music() {
+        let mut p = Project::default();
+        assert_eq!(p.preferences.track_name(DRM_FREE), "DRM free");
+        for c in &mut p.audio {
+            c.tracks[DRM_FREE] = false;
+        }
+        assert!(p.fill_drm_free_track());
+        let on: Vec<_> = p.audio.iter().filter(|c| c.tracks[DRM_FREE]).map(|c| c.name.as_str()).collect();
+        assert_eq!(on, ["Game audio", "Microphone"]);
+        // Once it's in use (or named), it's left as the streamer set it.
+        p.audio[0].tracks[DRM_FREE] = false;
+        assert!(!p.fill_drm_free_track());
+        assert!(!p.audio[0].tracks[DRM_FREE]);
+    }
     #[test]
     fn alert_bus_controls_alert_sounds_but_not_the_stinger() {
         let mut p = Project::default();

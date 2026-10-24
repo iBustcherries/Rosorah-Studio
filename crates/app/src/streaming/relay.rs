@@ -33,21 +33,23 @@ struct Headers {
     metadata: Option<Tag>,
     video: Option<Tag>,
     audio: Option<Tag>,
-    /// The second audio track's headers (Twitch's VOD audio), in Enhanced RTMP multitrack form.
+    /// Further audio tracks' headers (other destinations' tracks, Twitch's VOD audio), in Enhanced
+    /// RTMP multitrack form.
     extra_audio: Vec<Tag>,
 }
-/// An Enhanced RTMP multitrack audio tag (0x95): Rosorah's second track, Twitch's VOD audio.
+/// An Enhanced RTMP multitrack audio tag (0x95): Rosorah's second and later audio tracks.
 fn multitrack_audio(d: &[u8]) -> bool {
-    d[0] == 8 && d.len() >= 17 && d[11] == 0x95
+    d[0] == 8 && d.len() >= 18 && d[11] == 0x95
 }
 /// A tag that sets a stream up rather than carrying media: metadata, the H.264 and AAC sequence
-/// headers, and any second-track header (every multitrack packet type except coded frames).
-fn header_kind(d: &[u8]) -> Option<u8> {
+/// headers, and each further track's headers (every multitrack packet type except coded frames),
+/// told apart by their track number.
+fn header_kind(d: &[u8]) -> Option<u16> {
     match d[0] {
         18 => Some(0),
         9 if d.len() >= 17 && d[11] & 15 == 7 && d[12] == 0 => Some(1),
         8 if d.len() >= 17 && d[11] >> 4 == 10 && d[12] == 0 => Some(2),
-        8 if multitrack_audio(d) && d[12] & 15 != 1 => Some(3 + (d[12] & 15)),
+        8 if multitrack_audio(d) && d[12] & 15 != 1 => Some(16 + u16::from(d[17]) * 16 + u16::from(d[12] & 15)),
         _ => None,
     }
 }
@@ -266,6 +268,8 @@ fn dispatch(
         } else if let Some(kind) = kind {
             h.extra_audio.retain(|t| header_kind(&t.data) != Some(kind));
             h.extra_audio.push(tag.clone());
+            // In track order, so a destination joining later finds its tracks where the rest did.
+            h.extra_audio.sort_by_key(|t| header_kind(&t.data));
         } else {
             drop(h);
             for q in queues {
@@ -520,12 +524,13 @@ fn connection(
         &input,
         "-map",
         "0:v:0",
-        "-map",
-        "0:a:0",
     ]);
-    // Twitch takes the second audio track as its VOD audio; other destinations get the stream mix only.
-    if target.vod {
-        cmd.args(["-map", "0:a:1?"]);
+    // Each destination hears its own audio track; Twitch can add its VOD audio as a second one.
+    for (n, track) in target.audio.iter().enumerate() {
+        cmd.args(["-map", &format!("0:a:{track}{}", if n > 0 { "?" } else { "" })]);
+    }
+    if target.audio.is_empty() {
+        cmd.args(["-map", "0:a:0"]);
     }
     cmd.args([
         "-c",
@@ -792,7 +797,10 @@ mod tests {
             name: "Test".into(),
             destination: Location::Network("rtmps://example/app/key-secret".into()),
             secret: "key-secret".into(),
+            track: 0,
+            default_track: true,
             vod: false,
+            audio: vec![0],
         };
         let text = format!(
             "{}rtmps://example/app/key-secret key-secret\n{}key-secret\n",

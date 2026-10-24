@@ -327,6 +327,12 @@ impl Studio {
         let canvases = self.project.canvases.clone();
         let advanced = self.advanced();
         let several_videos = canvases.len() > 1 && (advanced || self.project.preferences.workspace.vertical_video);
+        let tracks: Vec<String> = (0..6).map(|t| self.project.preferences.track_name(t)).collect();
+        let mut track = self.stream_config.audio_track(slot);
+        // Twitch only: VODs keep the DRM free track, so music heard live stays out of them.
+        let drm_free = auroracast_core::DRM_FREE;
+        let mut vod = self.stream_config.twitch_vod_track == Some(drm_free);
+        let vod_before = vod;
         let Some(dest) = self.stream_config.destination_mut(slot) else { return false };
         let mut changed = false;
         ui.horizontal_wrapped(|ui| {
@@ -350,6 +356,25 @@ impl Studio {
                 "stream key added ✓"
             };
             ui.small(if several_videos { format!("{canvas} · {key}") } else { key.to_owned() });
+            // What this platform hears; sounds join a track with the track boxes in the Sound mixer.
+            let before = track;
+            egui::ComboBox::from_id_salt(("audio_track", slot))
+                .selected_text(RichText::new(format!("Audio: {}", tracks.get(track).map_or("", String::as_str))).small())
+                .show_ui(ui, |ui| {
+                    for (t, name) in tracks.iter().enumerate() {
+                        ui.selectable_value(&mut track, t, name);
+                    }
+                })
+                .response
+                .on_hover_text("Which audio track this platform hears. Choose the sounds on each track with the track boxes in the Sound mixer.");
+            if track != before {
+                dest.audio_track = Some(track);
+                changed = true;
+            }
+            if slot == 0 {
+                ui.checkbox(&mut vod, RichText::new(format!("VOD: {}", tracks[drm_free])).small())
+                    .on_hover_text(format!("Twitch keeps {} in your VODs instead of what viewers hear live, so music stays out of them. Viewers still hear everything live.", tracks[drm_free]));
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let label = if dest.managed_by_account { "Stream key & server…" } else { "Or connect manually…" };
                 if (advanced || !dest.managed_by_account) && ui.small_button(label).clicked() {
@@ -357,6 +382,14 @@ impl Studio {
                 }
             });
         });
+        if vod != vod_before {
+            self.stream_config.twitch_vod_track = vod.then_some(drm_free);
+            // Turned on with nothing on the DRM free track yet: everything but music goes on it.
+            if vod && !self.project.audio.iter().any(|c| c.tracks[drm_free]) && self.project.all_but_music_on(drm_free) {
+                self.changed();
+            }
+            changed = true;
+        }
         changed
     }
 }
