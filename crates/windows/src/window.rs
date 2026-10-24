@@ -172,7 +172,33 @@ struct Session {
     size: windows::Graphics::SizeInt32,
     staging: Option<ID3D11Texture2D>,
     closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set by Windows' FrameArrived callback, so the capture loop wakes as a frame is ready.
+    arrived: std::sync::Arc<Arrived>,
     _item: GraphicsCaptureItem,
+}
+/// "A new frame is waiting", from Windows' capture thread to the capture loop.
+#[derive(Default)]
+struct Arrived {
+    ready: std::sync::Mutex<bool>,
+    signal: std::sync::Condvar,
+}
+impl Arrived {
+    fn notify(&self) {
+        *self.ready.lock().unwrap() = true;
+        self.signal.notify_one();
+    }
+    /// Waits up to `limit` for a frame; true when one arrived.
+    fn wait(&self, limit: Duration) -> bool {
+        let ready = self.ready.lock().unwrap();
+        let (mut ready, _) = self.signal.wait_timeout_while(ready, limit, |r| !*r).unwrap();
+        std::mem::take(&mut *ready)
+    }
+}
+/// Frames are taken as soon as Windows delivers them (no waiting for a timer), at most twice the
+/// capture rate: the preview and the output clock then always get the newest picture, and a frame
+/// never waits a whole interval for the next poll.
+fn min_gap(fps: u32) -> Duration {
+    Duration::from_secs_f64(0.5 / fps.max(1) as f64)
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -236,6 +262,12 @@ impl Session {
                 2,
                 size,
             )?;
+            let arrived = std::sync::Arc::new(Arrived::default());
+            let wake = arrived.clone();
+            pool.FrameArrived(&TypedEventHandler::new(move |_, _| {
+                wake.notify();
+                Ok(())
+            }))?;
             let session = pool.CreateCaptureSession(&item)?;
             session
                 .SetIsCursorCaptureEnabled(cursor)
@@ -256,6 +288,7 @@ impl Session {
                 size,
                 staging: None,
                 closed,
+                arrived,
                 _item: item,
             })
         }
@@ -394,13 +427,12 @@ impl Backend for WindowBackend {
         let mut selected = self.window.clone();
         let mut session: Option<Session> = None;
         let mut checked = Instant::now() - Duration::from_secs(1);
-        let interval = Duration::from_secs_f64(1. / options.fps.max(1) as f64);
+        let gap = min_gap(options.fps);
         let mut last_frame = Instant::now();
         let mut received = false;
         let mut notice = Instant::now();
         output.connecting();
         while !*cancel.borrow() && cancel.has_changed().is_ok() {
-            let start = Instant::now();
             if auto && checked.elapsed() >= Duration::from_millis(500) {
                 checked = Instant::now();
                 if let Some(w) = automatic() {
@@ -437,11 +469,14 @@ impl Backend for WindowBackend {
                     output.game(Some(w.process.clone()));
                     last_frame = Instant::now();
                 }
-                if let Some(frame) = session
-                    .as_mut()
-                    .unwrap()
-                    .next(options.resolution, &cancel)?
-                {
+                let s = session.as_mut().unwrap();
+                // Sleep until Windows has a frame (or 50 ms, to look after the window), keeping
+                // at least `gap` since the last one.
+                if let Some(wait) = gap.checked_sub(last_frame.elapsed()) {
+                    std::thread::sleep(wait);
+                }
+                s.arrived.wait(Duration::from_millis(50));
+                if let Some(frame) = s.next(options.resolution, &cancel)? {
                     last_frame = Instant::now();
                     received = true;
                     output.publish_with_detail(
@@ -466,9 +501,7 @@ impl Backend for WindowBackend {
                 }
             } else {
                 output.waiting("Waiting for a fullscreen graphics application. Window capture is also available.");
-            }
-            if let Some(wait) = interval.checked_sub(start.elapsed()) {
-                std::thread::sleep(wait.min(Duration::from_millis(50)));
+                std::thread::sleep(Duration::from_millis(50));
             }
         }
         output.game(None);
@@ -491,22 +524,24 @@ impl Backend for MonitorBackend {
         }
         let _apartment = Apartment;
         let mut session = Session::open_monitor(&self.id, options.cursor)?;
-        let interval = Duration::from_secs_f64(1. / options.fps.max(1) as f64);
+        let gap = min_gap(options.fps);
+        let mut last = Instant::now() - gap;
         output.connecting();
         while !*cancel.borrow() && cancel.has_changed().is_ok() {
-            let start = Instant::now();
             ensure!(
                 !session.closed.load(std::sync::atomic::Ordering::Relaxed),
                 "Selected monitor disconnected"
             );
+            if let Some(wait) = gap.checked_sub(last.elapsed()) {
+                std::thread::sleep(wait);
+            }
+            session.arrived.wait(Duration::from_millis(50));
             if let Some(frame) = session.next(options.resolution, &cancel)? {
+                last = Instant::now();
                 output.publish_with_detail(
                     frame,
                     Some("Live · Windows monitor capture · cursor enabled"),
                 )?;
-            }
-            if let Some(wait) = interval.checked_sub(start.elapsed()) {
-                std::thread::sleep(wait);
             }
         }
         Ok(())

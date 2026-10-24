@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Isolated canvas browser. Binary packets to parent; no listening server."""
-import os, sys, json, struct, threading, subprocess, signal, time
+import os, sys, json, struct, threading, subprocess, signal
 from collections import deque
 from urllib.parse import urlsplit
 

@@ -13,6 +13,7 @@ mod alert_samples;
 mod announce;
 mod app_audio;
 mod appearance;
+mod themes;
 mod fonts;
 mod rewards_ui;
 mod browser_chat;

@@ -320,9 +320,6 @@ impl Engine {
     pub fn running(&self, id: SourceId) -> bool {
         self.snapshot(id).is_some_and(|s| s.phase.running())
     }
-    pub fn any_running(&self) -> bool {
-        self.workers.keys().any(|id| self.running(*id))
-    }
     /// Drains at most one frame/clear per source. Canvas count never creates
     /// additional backend sessions or duplicate uploads.
     pub fn drain(&self) -> Vec<(SourceId, Option<Arc<Frame>>)> {

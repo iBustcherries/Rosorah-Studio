@@ -12,6 +12,7 @@ anyhow.workspace = true
 serde_json.workspace = true
 eframe.workspace = true
 pollster.workspace = true
+arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 
 
@@ -34,6 +35,8 @@ sha2 = "0.10"
 # Lua 5.4 for user scripts, compiled into Rosorah (MIT).
 mlua = { version = "0.10", features = ["lua54", "vendored"] }
 base64 = "0.22"
+# Theme files.
+toml = "1"
 getrandom = "0.3"
 
 libloading = "0.8.9"

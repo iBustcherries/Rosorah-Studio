@@ -3,6 +3,7 @@
 # It compiles inside an Ubuntu 24.04 container (podman), because a program built on a newer
 # distribution needs a newer C library than Ubuntu and Debian have.
 # Run from anywhere:  packaging/deb/build-deb.sh
+# A rebuild of the same version needs a new revision: DEB_REVISION=2 packaging/deb/build-deb.sh
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
@@ -14,6 +15,7 @@ rm -rf "$bridge" && mkdir -p "$bridge"
 bash "$here/../spout-bridge/build-bridge.sh" "$bridge" || echo "WARNING: the Spout bridge was not built. The package will work, but without Spout." >&2
 # Build tools and the compiled output are kept in podman volumes, so later builds are quicker.
 podman run --rm \
+    -e DEB_REVISION="${DEB_REVISION:-1}" \
     -v "$root:/src:ro,z" \
     -v "$root/dist:/dist:z" \
     -v "$bridge:/bridge:ro,z" \

@@ -318,7 +318,7 @@ impl Studio {
             let key = self.project.preferences.chroma_keys.entry(id).or_default();
             ui.horizontal(|ui| {
                 changed |= ui.checkbox(&mut key.enabled, "Green screen · remove a background colour").changed();
-                ui.label(RichText::new("EXPERIMENTAL").small().strong().color(Color32::from_rgb(230, 190, 90)));
+                ui.label(RichText::new("EXPERIMENTAL").small().strong().color(crate::appearance::current().warning));
             });
             if key.enabled {
                 ui.horizontal(|ui| {
@@ -680,7 +680,7 @@ mod tests {
         let ctx = egui::Context::default();
         let pos = egui::pos2(100., 100.);
         let mut width = 0f32;
-        let mut frame = |events: Vec<egui::Event>, long: bool, width: &mut f32| {
+        let frame = |events: Vec<egui::Event>, long: bool, width: &mut f32| {
             let input = egui::RawInput { events, screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800., 600.))), ..Default::default() };
             let _ = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {

@@ -315,6 +315,9 @@ enum SoundAction {
 }
 /// Text that reads on the accent colour: black, or white when the accent is (nearly) black.
 fn on_accent(accent: Color32) -> Color32 {
+    if let Some(ink) = crate::appearance::current().on_accent {
+        return ink;
+    }
     let brightness = (0.2126 * accent.r() as f32 + 0.7152 * accent.g() as f32 + 0.0722 * accent.b() as f32) / 255.;
     if brightness < 0.18 { Color32::WHITE } else { Color32::BLACK }
 }
@@ -508,7 +511,7 @@ fn sortable_rows(
 fn card() -> egui::Frame {
     egui::Frame::new()
         .fill(panel())
-        .corner_radius(16)
+        .corner_radius(crate::appearance::current().panel_corners)
         .inner_margin(12)
 }
 fn note(ui: &mut egui::Ui, text: impl Into<String>) {
@@ -560,9 +563,20 @@ pub struct Studio {
     layer_properties:Option<(Id,usize)>,
     /// TikTok is selected in the chat composer's "Send to" row (when sending is enabled).
     tiktok_chat: bool,
+    /// Co-streaming: the shared chat last announced, and the invite under Chat (kept while it slides away).
+    shared_chat_seen: Vec<(String, String)>,
+    invite_shown: Option<crate::browser_chat::Invite>,
+    /// When the invite card finished sliding in, for its one yellow flash.
+    invite_flash: Option<f64>,
+    signin_hinted: bool,
+    invite_told: String,
+    /// Chat panel message heights for the layout (width, text size) they were measured at.
+    chat_heights: ((i32, u32), std::collections::HashMap<(Platform, String), f32>),
     tiktok_diagnostic_wanted: bool,
     appearance: crate::appearance::Renderer,
     appearance_picker: Option<mpsc::Receiver<Option<PathBuf>>>,
+    /// The file chosen with Settings > Look & feel > Import theme…
+    theme_import: Option<mpsc::Receiver<Option<PathBuf>>>,
     scene_transition: Option<ActiveTransition>,
     transition_picker: Option<(bool, mpsc::Receiver<Option<PathBuf>>)>,
     edit_history: crate::edit_history::History,
@@ -655,8 +669,10 @@ pub struct Studio {
     announce_thumb: Option<(String, Option<egui::TextureHandle>)>,
     /// Whether this stream has been announced yet.
     announced: bool,
+    /// This stream's YouTube broadcast has been made public (or didn't need to be).
+    made_public: bool,
     /// Announcements switched off in the Go live checklist, for this stream only ([Discord, Bluesky]).
-    announce_skip: [bool; 3],
+    announce_skip: [bool; 4],
     updates: crate::updates::Updates,
     update_window: bool,
     update_checked: bool,
@@ -729,9 +745,6 @@ pub struct Studio {
     emote_picker: crate::emote_picker::Picker,
     /// Rosorah draws the title bar itself (GNOME); the window frame is off.
     custom_title_bar: bool,
-    event_relayed: std::collections::VecDeque<String>,
-    event_ids: std::collections::HashSet<String>,
-    event_revision: u64,
     audio_scene: Option<Id>,
     events_only: bool,
     thumbnail_picker: Option<mpsc::Receiver<Option<PathBuf>>>,
@@ -749,7 +762,6 @@ pub struct Studio {
     rewards_ui:crate::rewards_ui::RewardsUi,
     automation_queue: crate::automations::Scheduler,
     chat_session: alert_filters::ChatSession,
-    chat_alert_revision: u64,
     was_streaming: bool,
     donation_save_due: Option<Instant>,
     donations: crate::donations_live::Hub,
@@ -1046,7 +1058,7 @@ impl Studio {
         }
         Self {
             tools,
-            selections:project.canvases.first().and_then(|c|selected.map(|i|(c.scene,vec![i]))).into_iter().collect(),crop_layer:None,pending_layer_delete:None,layer_rename:None,layer_properties:(page=="properties").then_some((scene_for_naming,0)),tiktok_chat:true,tiktok_diagnostic_wanted:false,appearance:Default::default(),appearance_picker:None,scene_transition:None,transition_picker:None,
+            selections:project.canvases.first().and_then(|c|selected.map(|i|(c.scene,vec![i]))).into_iter().collect(),crop_layer:None,pending_layer_delete:None,layer_rename:None,layer_properties:(page=="properties").then_some((scene_for_naming,0)),tiktok_chat:true,shared_chat_seen:Vec::new(),invite_shown:None,invite_flash:None,signin_hinted:false,invite_told:String::new(),chat_heights:Default::default(),tiktok_diagnostic_wanted:false,appearance:Default::default(),appearance_picker:None,theme_import:None,scene_transition:None,transition_picker:None,
             widget_editor,
             edit_history,
             continuous_edit: false,
@@ -1151,7 +1163,8 @@ impl Studio {
             announce_picker: None,
             announce_thumb: None,
             announced: false,
-            announce_skip: [false; 3],
+            made_public: false,
+            announce_skip: [false; 4],
             updates: Default::default(),
             // `--page update` (with --screenshot) shows the update window, checking as an old version.
             update_window: page == "update",
@@ -1196,9 +1209,6 @@ impl Studio {
             account_config,
             browser_chat: crate::browser_chat::BrowserChat::default(),
             emote_picker: Default::default(),
-            event_relayed: Default::default(),
-            event_ids: Default::default(),
-            event_revision: 0,
             audio_scene: None,
             events_only: false,
             thumbnail_picker: None,
@@ -1220,7 +1230,6 @@ impl Studio {
                 session.start(now_ms());
                 session
             },
-            chat_alert_revision: u64::MAX,
             was_streaming: false,
             donation_save_due: None,
             donations: crate::donations_live::Hub::new(),
@@ -1269,7 +1278,7 @@ impl Studio {
             demo,
             demo_add,
             demo_drag,
-            demo_input: ["press-delete", "press-f2", "click-away", "copy-scene"].into_iter().find(|p| *p == page),
+            demo_input: ["press-delete", "press-f2", "click-away", "copy-scene", "costream"].into_iter().find(|p| *p == page),
         }
     }
     fn remember_capture_mode(&mut self, id: Id) {
@@ -1316,9 +1325,10 @@ impl Studio {
             output.update_project(&self.project);
         }
     }
+    /// The accent colour: the theme's, if it sets one, otherwise the one chosen in Settings.
     fn accent(&self) -> Color32 {
         let [r, g, b] = self.project.preferences.accent;
-        Color32::from_rgb(r, g, b)
+        crate::appearance::current().accent.unwrap_or(Color32::from_rgb(r, g, b))
     }
     fn checkpoint_widgets(&mut self) {
         let periods = self
@@ -1735,11 +1745,11 @@ impl Studio {
             // Just the timer up here; where it's going is in the hover (and the Stream panel).
             let failed = destinations.iter().filter(|d| d.ends_with('✕')).count();
             let (text, color) = if view.phase == Phase::Starting {
-                ("● STARTING…".to_owned(), Color32::from_rgb(230, 190, 90))
+                ("● STARTING…".to_owned(), crate::appearance::current().warning)
             } else if failed > 0 {
-                (format!("● LIVE {} · {failed} {} attention", clock(view.elapsed), if failed == 1 { "needs" } else { "need" }), Color32::from_rgb(255, 92, 92))
+                (format!("● LIVE {} · {failed} {} attention", clock(view.elapsed), if failed == 1 { "needs" } else { "need" }), crate::appearance::current().live)
             } else {
-                (format!("● LIVE {}", clock(view.elapsed)), Color32::from_rgb(255, 92, 92))
+                (format!("● LIVE {}", clock(view.elapsed)), crate::appearance::current().live)
             };
             ui.label(RichText::new(text).strong().color(color)).on_hover_text(format!(
                 "{}\n\n✓ sending · … connecting · ✕ needs attention. Check your platform's dashboard to see what viewers get.",
@@ -1761,7 +1771,7 @@ impl Studio {
             {
                 r.stop();
             }
-            ui.label(RichText::new("● REC").strong().color(Color32::from_rgb(255, 92, 92)));
+            ui.label(RichText::new("● REC").strong().color(crate::appearance::current().live));
         } else if shared {
             ui.label(RichText::new("● Recording the stream").small().color(muted()));
         } else if ui.add(self.primary_button("Record")).on_hover_text("Records the main video to your computer").clicked() {
@@ -2189,7 +2199,7 @@ impl Studio {
             let temperature = |ui: &mut egui::Ui, t: Option<crate::system_monitor::Temperature>, what: &str| {
                 if let Some(t) = t {
                     let text = RichText::new(format!("{:.0}°C", t.celsius)).small();
-                    let text = if t.too_hot() { text.strong().color(Color32::from_rgb(255, 92, 92)) } else { text.weak() };
+                    let text = if t.too_hot() { text.strong().color(crate::appearance::current().live) } else { text.weak() };
                     ui.label(text).on_hover_text(format!("{what} temperature. Red from {:.0}°C, close to its limit.", t.hot));
                 }
             };
@@ -2326,7 +2336,6 @@ impl Studio {
             let id = ids[p];
             let name = self.project.scene(id).map(|s| s.name.clone()).unwrap_or_default();
             let on_air = live && active == id;
-            let hovered = ui.rect_contains_pointer(ui.max_rect());
             if let Some((naming, text, focused)) = &mut self.naming_scene
                 && *naming == id
             {
@@ -2373,26 +2382,20 @@ impl Studio {
                 // In Studio Mode the scene being prepared is marked too.
                 let preparing = self.project.preferences.workspace.studio_mode && self.studio_preview == Some(id) && active != id;
                 let text = if on_air {
-                    RichText::new(format!("● LIVE  {name}")).color(Color32::from_rgb(255, 92, 92)).strong()
+                    RichText::new(format!("● LIVE  {name}")).color(crate::appearance::current().live).strong()
                 } else if preparing {
                     RichText::new(format!("◐ {name}")).strong()
                 } else {
                     RichText::new(name)
                 };
                 let response = ui
-                    .add_sized([(ui.available_width() - 34.).max(30.), 30.], egui::Button::new(text).selected(active == id).truncate().sense(egui::Sense::click_and_drag()))
+                    .add_sized([ui.available_width().max(30.), 30.], egui::Button::new(text).selected(active == id).truncate().sense(egui::Sense::click_and_drag()))
                     .on_hover_text("Click to switch · drag to reorder · right-click for more")
                     .on_hover_cursor(grab_cursor());
                 if response.clicked() {
                     self.request_scene(canvas, id);
                 }
                 response.context_menu(|ui| self.scene_context(ui, canvas, id));
-                ui.scope(|ui| {
-                    if !hovered && !egui::Popup::is_any_open(ui.ctx()) {
-                        ui.multiply_opacity(0.);
-                    }
-                    ui.menu_button("…", |ui| self.scene_context(ui, canvas, id));
-                });
                 response
             })
             .inner
@@ -2622,7 +2625,7 @@ impl Studio {
                 }
                 ui.vertical(|ui| {
                     if a.image.is_empty() {
-                        note(ui, "A picture posted with the announcement: attached on Discord, and the link card's thumbnail on Bluesky.");
+                        note(ui, "A picture posted with the announcement: attached on Discord, the link card's thumbnail on Bluesky, and copied for pasting on X.");
                     } else {
                         note(ui, std::path::Path::new(&a.image).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
                     }
@@ -2659,6 +2662,10 @@ impl Studio {
             if threads > crate::announce::THREADS_LIMIT {
                 ui.colored_label(ui.visuals().warn_fg_color, format!("{threads} characters as Threads counts them (emoji count as several): Threads allows {}.", crate::announce::THREADS_LIMIT));
             }
+            let x = crate::announce::x_length(&text);
+            if a.x && x > crate::announce::X_LIMIT {
+                ui.colored_label(ui.visuals().warn_fg_color, format!("{x} characters as X counts them (links count as 23): X allows {}, so you'd need to shorten it there before posting.", crate::announce::X_LIMIT));
+            }
         });
         ui.add_space(12.);
         card().show(ui, |ui| {
@@ -2672,7 +2679,7 @@ impl Studio {
                 ui.colored_label(ui.visuals().warn_fg_color, "That doesn't look like a Discord webhook address.");
             }
             if ui.add_enabled(crate::announce::valid_webhook(&a.discord_webhook), egui::Button::new("Send test")).on_hover_text("Posts the message to Discord now").clicked() {
-                test = Some([true, false, false]);
+                test = Some([true, false, false, false]);
             }
         });
         ui.add_space(12.);
@@ -2692,7 +2699,7 @@ impl Studio {
             });
             let ready = !a.bluesky_handle.trim().is_empty() && !a.bluesky_password.trim().is_empty();
             if ui.add_enabled(ready, egui::Button::new("Send test")).on_hover_text("Posts the message to Bluesky now").clicked() {
-                test = Some([false, true, false]);
+                test = Some([false, true, false, false]);
             }
         });
         ui.add_space(12.);
@@ -2730,7 +2737,17 @@ impl Studio {
                 }
             }
             if ui.add_enabled(!a.threads_token.trim().is_empty(), egui::Button::new("Send test")).on_hover_text("Posts the message to Threads now").clicked() {
-                test = Some([false, false, true]);
+                test = Some([false, false, true, false]);
+            }
+        });
+        ui.add_space(12.);
+        card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("X").heading());
+            ui.checkbox(&mut a.x, "Open a post on X");
+            note(ui, "X charges for posting through its API, so Rosorah opens the post in your browser instead, ready to send: you press Post. Sign in to X in your browser once. If you've chosen an image, it's copied too: press Ctrl+V in the post to add it.");
+            if ui.button("Try it").on_hover_text("Opens the post on X in your browser now; nothing is posted until you press Post").clicked() {
+                test = Some([false, false, false, true]);
             }
         });
         note(ui, "The webhook address, app password and Threads token are kept in your system's keyring with your stream keys.");
@@ -3009,7 +3026,7 @@ impl Studio {
         let mut chosen = None;
         match &self.shared_senders[&ndi].1 {
             Err(e) => {
-                ui.colored_label(egui::Color32::LIGHT_RED, e);
+                ui.colored_label(crate::appearance::current().error, e);
                 if ndi {
                     ui.hyperlink_to("Get NDI Tools (free)", crate::ndi::GET_NDI);
                 }
@@ -3116,7 +3133,7 @@ impl Studio {
     fn program_view(&mut self, ui: &mut egui::Ui) {
         let Some(canvas) = self.project.canvases.first().cloned() else { return };
         ui.horizontal(|ui| {
-            ui.label(RichText::new("● PROGRAM").small().strong().color(Color32::from_rgb(255, 92, 92)));
+            ui.label(RichText::new("● PROGRAM").small().strong().color(crate::appearance::current().live));
             let ready = self.studio_preview.is_some_and(|s| s != canvas.scene);
             if ui.add_enabled(ready, self.primary_button("Transition ▶")).on_hover_text("Send the preview live").on_disabled_hover_text("Pick another scene to prepare it first").clicked() {
                 self.studio_transition();
@@ -3142,7 +3159,7 @@ impl Studio {
         let target = egui::Rect::from_center_size(rect.center(), size);
         if let Some(texture) = self.program_texture {
             ui.painter().image(texture, target, egui::Rect::from_min_max(egui::pos2(0., 0.), egui::pos2(1., 1.)), Color32::WHITE);
-            ui.painter().rect_stroke(target, 2., egui::Stroke::new(2.0_f32, Color32::from_rgb(255, 92, 92)), egui::StrokeKind::Outside);
+            ui.painter().rect_stroke(target, 2., egui::Stroke::new(2.0_f32, crate::appearance::current().live), egui::StrokeKind::Outside);
         }
         ui.ctx().request_repaint_after(Duration::from_millis(66));
     }
@@ -3315,7 +3332,6 @@ impl Studio {
             let layer = &self.project.scenes[si].layers[i];
             let (visible, locked) = (layer.visible, layer.locked);
             let name = self.project.source(layer.source).map(|s| s.name.clone()).unwrap_or_default();
-            let hovered = ui.rect_contains_pointer(ui.max_rect());
             ui.spacing_mut().button_padding = egui::vec2(5., 3.);
             ui.spacing_mut().item_spacing = egui::vec2(4., 2.);
             ui.horizontal(|ui| {
@@ -3336,13 +3352,13 @@ impl Studio {
                 };
                 let response = ui
                     .add_sized(
-                        [(ui.available_width() - 28.).max(30.), 26.],
+                        [ui.available_width().max(30.), 26.],
                         egui::Button::new(RichText::new(label).color(color))
                             .sense(if locked { egui::Sense::click() } else { egui::Sense::click_and_drag() })
                             .selected(selected)
                             .truncate(),
                     )
-                    .on_hover_text(if locked { "Locked · right-click to unlock" } else { "Drag to reorder (top appears in front) · double-click to change" });
+                    .on_hover_text(if locked { "Locked · right-click to unlock" } else { "Drag to reorder (top appears in front) · double-click to change · right-click for more" });
                 if !locked {
                     response.clone().on_hover_cursor(grab_cursor());
                 }
@@ -3352,12 +3368,6 @@ impl Studio {
                     self.layer_properties = Some((active, i));
                 }
                 response.context_menu(|ui| self.layer_menu(ui, si, i, &name, &mut dropped));
-                ui.scope(|ui| {
-                    if !hovered && !egui::Popup::is_any_open(ui.ctx()) {
-                        ui.multiply_opacity(0.);
-                    }
-                    ui.menu_button("…", |ui| self.layer_menu(ui, si, i, &name, &mut dropped));
-                });
                 response
             })
             .inner
@@ -4374,7 +4384,7 @@ impl Studio {
                 };
                 let color = match dest.phase {
                     crate::streaming::Phase::Sending => Color32::LIGHT_GREEN,
-                    crate::streaming::Phase::Failed => Color32::LIGHT_RED,
+                    crate::streaming::Phase::Failed => crate::appearance::current().error,
                     _ => muted(),
                 };
                 ui.colored_label(
@@ -4459,13 +4469,25 @@ impl Studio {
         }
         let Some(stream) = &self.live_stream else {
             self.announced = false;
-            self.announce_skip = [false; 3];
+            self.announce_skip = [false; 4];
+            self.made_public = false;
+            return;
+        };
+        // Once video is going to YouTube, that broadcast is made public (if chosen).
+        let youtube = self.stream_config.connection_name(1);
+        if !self.made_public && stream.destinations().iter().any(|d| d.path.is_none() && d.name == youtube && d.phase == crate::streaming::Phase::Sending) {
+            self.made_public = true;
+            if self.stream_config.youtube_public && self.accounts[1].connected {
+                self.accounts[1].send(crate::accounts::Command::MakePublic);
+            }
+        }
+        let Some(stream) = &self.live_stream else {
             return;
         };
         if !self.announced && stream.destinations().iter().any(|d| d.path.is_none() && d.phase == crate::streaming::Phase::Sending) {
             self.announced = true;
             let a = &self.stream_config.announce;
-            let which = [a.discord_ready() && !self.announce_skip[0], a.bluesky_ready() && !self.announce_skip[1], a.threads_ready() && !self.announce_skip[2]];
+            let which = [a.discord_ready() && !self.announce_skip[0], a.bluesky_ready() && !self.announce_skip[1], a.threads_ready() && !self.announce_skip[2], a.x_ready() && !self.announce_skip[3]];
             if which.iter().any(|w| *w) {
                 self.announcer.send(a, self.announce_stream(), which, ctx);
             }
@@ -4563,9 +4585,9 @@ impl Studio {
                     ui.horizontal(|ui| {
                         ui.checkbox(&mut dest.enabled, "").on_hover_text("Include when you go live");
                         let (dot, status, color) = if !dest.key.is_empty() {
-                            ("●", "ready", Color32::from_rgb(110, 210, 140))
+                            ("●", "ready", crate::appearance::current().good)
                         } else if connected {
-                            ("◌", "getting stream key…", Color32::from_rgb(230, 190, 90))
+                            ("◌", "getting stream key…", crate::appearance::current().warning)
                         } else {
                             ("○", "sign in", muted())
                         };
@@ -5142,6 +5164,7 @@ impl Studio {
     }
 
     fn stream_details(&mut self, ui: &mut egui::Ui) {
+        let mut youtube_public = self.stream_config.youtube_public;
         ui.strong("Broadcast information");
         if ui.button("Connections").clicked() {
             self.page = Page::Settings;
@@ -5161,6 +5184,7 @@ impl Studio {
                         let mut selected=None;
                         egui::ComboBox::from_id_salt("broadcast").selected_text(account.broadcasts.iter().find(|b|b.id==account.broadcast).map(|b|b.name.as_str()).unwrap_or(if account.broadcast.is_empty(){"Waiting for your broadcast…"}else{"Newly created broadcast"})).show_ui(ui,|ui|{for b in &account.broadcasts {if ui.selectable_label(b.id==account.broadcast,&b.name).clicked(){selected=Some(b.id.clone());}}});
                         if let Some(id)=selected{account.send(crate::accounts::Command::Select(id));}
+                        ui.checkbox(&mut youtube_public,"Make it public when I go live").on_hover_text("As your stream starts going to YouTube, Rosorah switches the broadcast to public, so its recording stays public too");
                     }
                     ui.label("Title");ui.text_edit_singleline(&mut account.title);
                     if index==0 {ui.text_edit_singleline(&mut account.category_query);if ui.button("Find category").clicked(){account.send(crate::accounts::Command::Search(account.category_query.clone()));}}
@@ -5208,8 +5232,114 @@ impl Studio {
                 if ui.add_enabled(!account.title.trim().is_empty(),egui::Button::new("Update title & category")).clicked(){account.send(crate::accounts::Command::Update{title:account.title.clone(),category:account.category.clone()});}
             });});
         }
+        if youtube_public != self.stream_config.youtube_public {
+            self.stream_config.youtube_public = youtube_public;
+            self.save_stream_settings();
+        }
     }
 
+    /// Tells the streamer when Twitch's shared chat starts, changes or ends, and when an invite
+    /// arrives (the card under Chat may be out of sight).
+    fn costream_notices(&mut self) {
+        let shared = &self.accounts[0].shared_chat;
+        if *shared != self.shared_chat_seen {
+            let names: Vec<_> = shared.iter().map(|(_, name)| name.as_str()).collect();
+            let text = if names.is_empty() {
+                "Shared chat ended.".to_owned()
+            } else {
+                format!("You're now sharing chat with {}. Their chat shows in yours, marked ⇄.", names.join(", "))
+            };
+            self.shared_chat_seen = shared.clone();
+            self.tell(text);
+        }
+        let invite = self.browser_chat.invite.as_ref().map_or("", |i| i.text.as_str());
+        if invite != self.invite_told {
+            self.invite_told = invite.to_owned();
+            if !invite.is_empty() {
+                self.tell(format!("Co-stream invite: {}. Accept or decline it under Chat.", invite.trim_end_matches('.')));
+            }
+        }
+        if self.browser_chat.dashboard_signin && !self.signin_hinted {
+            self.signin_hinted = true;
+            self.tell("To see co-stream invites, sign in to Twitch once: Settings > Accounts > Twitch > Sign in for invites.".into());
+        }
+    }
+    /// A co-stream invite, sliding in under the chat and away once it's answered.
+    fn invite_card(&mut self, ui: &mut egui::Ui) {
+        // The chat panel keeps room for it under this same id.
+        let id = ui.make_persistent_id("costream-invite");
+        // Twitch's pop-up went away unanswered: the card points to Twitch for a minute, then goes.
+        if self.browser_chat.invite.as_ref().and_then(|i| i.gone).is_some_and(|t| t.elapsed().as_secs() >= 60) {
+            self.browser_chat.forget_invite();
+        }
+        if let Some(invite) = &self.browser_chat.invite {
+            if self.invite_shown.as_ref().is_none_or(|old| old.text != invite.text) {
+                self.invite_flash = None;
+            }
+            self.invite_shown = Some(invite.clone());
+        }
+        let open = ui.ctx().animate_bool_with_time(id, self.browser_chat.invite.is_some(), 0.3);
+        if open <= 0. {
+            self.invite_shown = None;
+            return;
+        }
+        let Some(invite) = self.invite_shown.clone() else { return };
+        // Once it has slid all the way in, it flashes yellow one time.
+        let now = ui.input(|i| i.time);
+        if open >= 1. && self.invite_flash.is_none() {
+            self.invite_flash = Some(now);
+        }
+        const FLASH: f64 = 0.7;
+        let flash = self.invite_flash.map_or(0., |start| now - start);
+        let glow = if flash < FLASH { (std::f64::consts::PI * flash / FLASH).sin() as f32 } else { 0. };
+        if self.invite_flash.is_some() && flash < FLASH {
+            ui.ctx().request_repaint();
+        }
+        let full = ui.ctx().data(|d| d.get_temp::<f32>(id)).unwrap_or(96.);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), full * open), egui::Sense::hover());
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), full.max(1.)))));
+        child.set_clip_rect(rect.intersect(ui.clip_rect()));
+        let accent = self.accent();
+        let yellow = egui::Color32::from_rgb(255, 214, 10);
+        let shown = egui::Frame::new()
+            .fill(crate::appearance::current().card.lerp_to_gamma(yellow, glow * 0.6))
+            .stroke(egui::Stroke::new(1.5_f32, accent.lerp_to_gamma(yellow, glow)))
+            .corner_radius(crate::appearance::current().panel_corners / 2)
+            .inner_margin(10)
+            .show(&mut child, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new("Twitch co-stream invite").small().strong().color(accent));
+                ui.label(&invite.text);
+                ui.horizontal_wrapped(|ui| {
+                    // Accepting opens Twitch's Stream Together page in your browser, where you join
+                    // with camera and mic; that works even after Twitch's pop-up has closed.
+                    if !invite.link.is_empty() {
+                        if ui.add(egui::Button::new(RichText::new("Accept").strong().color(on_accent(accent))).fill(accent)).on_hover_text("Opens Stream Together on Twitch in your browser").clicked() {
+                            let _ = crate::desktop::open(&invite.link);
+                            self.browser_chat.forget_invite();
+                        }
+                    } else if invite.gone.is_some() {
+                        note(ui, "Twitch's pop-up closed, so answer it on Twitch.");
+                    } else if ui.add(egui::Button::new(RichText::new("Accept").strong().color(on_accent(accent))).fill(accent)).clicked() {
+                        self.browser_chat.answer_invite(true);
+                    }
+                    let decline = if invite.close_only { "Not now" } else { "Decline" };
+                    if invite.gone.is_none() && invite.can_decline && ui.button(decline).clicked() {
+                        self.browser_chat.answer_invite(false);
+                    }
+                    if invite.link.is_empty() && ui.button("Open on Twitch").on_hover_text("Shows your Stream Manager, where the invite came in").clicked() {
+                        self.browser_chat.send(serde_json::json!({"type":"open_platform","platform":"Twitch dashboard"}));
+                    }
+                    if invite.gone.is_some() && ui.button("Dismiss").clicked() {
+                        self.browser_chat.forget_invite();
+                    }
+                });
+            });
+        let measured = shown.response.rect.height() + ui.spacing().item_spacing.y;
+        if (measured - full).abs() > 0.5 {
+            ui.ctx().data_mut(|d| d.insert_temp(id, measured));
+        }
+    }
     fn chat_panel(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if self.filter.is_some() || self.events_only {
@@ -5238,6 +5368,10 @@ impl Studio {
                 ui.small("Preparing chat…");
             });
         }
+        if !self.accounts[0].shared_chat.is_empty() {
+            let names: Vec<_> = self.accounts[0].shared_chat.iter().map(|(_, name)| name.as_str()).collect();
+            ui.label(RichText::new(format!("⇄ Sharing chat with {}", names.join(", "))).small().color(platform_color(Platform::Twitch)));
+        }
         let mut connected: Vec<_> = self
             .accounts
             .iter()
@@ -5256,16 +5390,21 @@ impl Studio {
             .ctx()
             .data(|d| d.get_temp::<f32>(composer_measure))
             .unwrap_or(140.);
+        // Without a composer, room is still kept for an invite card sliding in.
+        let invite_id = ui.make_persistent_id("costream-invite");
+        let invite = ui.ctx().animate_bool_with_time(invite_id, self.browser_chat.invite.is_some(), 0.3)
+            * ui.ctx().data(|d| d.get_temp::<f32>(invite_id)).unwrap_or(96.);
         let height =
-            (ui.available_height() - if connected.is_empty() { 8. } else { reserve }).max(40.);
+            (ui.available_height() - if connected.is_empty() { 8. + invite } else { reserve }).max(40.);
         egui::ScrollArea::vertical()
             .id_salt("messages")
             .auto_shrink([false, false])
             .max_height(height)
             .min_scrolled_height(height)
             .stick_to_bottom(true)
-            .show(ui, |ui| {
+            .show_viewport(ui, |ui, viewport| {
                 ui.set_min_height(height);
+                let origin = ui.min_rect().top();
                 // Registered before the messages so a message's own menu wins where they overlap.
                 let background = ui.interact(ui.clip_rect(), ui.id().with("chat-background"), egui::Sense::click());
                 if self.chat.messages().next().is_none() {
@@ -5279,12 +5418,36 @@ impl Studio {
                         self.settings = Settings::Accounts;
                     }
                 }
+                // Only messages near the visible part are laid out; the rest are skipped by their
+                // last measured height, so a long chat costs the same as a short one each frame.
+                let layout = (ui.available_width().round() as i32, self.project.preferences.chat_font_size.to_bits());
+                if self.chat_heights.0 != layout || self.chat_heights.1.len() > 2000 {
+                    self.chat_heights = (layout, Default::default());
+                }
+                let mut y = ui.cursor().top() - origin;
+                let mut skipped = 0.;
+                let near = viewport.expand2(egui::vec2(0., 300.));
                 for m in self
                     .chat
                     .messages()
                     .filter(|m| self.filter.is_none_or(|p| p == m.platform) && (!self.events_only || m.id.starts_with("event-") || m.text.starts_with("★ ")))
                 {
-                    egui::Frame::new()
+                    let key = (m.platform, m.id.clone());
+                    if let Some(&h) = self.chat_heights.1.get(&key)
+                        && (y + h < near.min.y || y > near.max.y)
+                    {
+                        skipped += h;
+                        y += h;
+                        continue;
+                    }
+                    if skipped > 0. {
+                        ui.add_space(skipped);
+                        skipped = 0.;
+                    }
+                    let before = ui.cursor().top();
+                    // Right-click anywhere on the message; it senses clicks underneath its contents,
+                    // so their own hover text still shows.
+                    ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| egui::Frame::new()
                         .fill(crate::appearance::current().card)
                         .corner_radius(6)
                         .inner_margin(9)
@@ -5295,6 +5458,10 @@ impl Studio {
                                         .small()
                                         .color(platform_color(m.platform)),
                                 );
+                                if !m.metadata.channel.is_empty() {
+                                    ui.label(RichText::new(format!("⇄ {}", m.metadata.channel)).small().color(muted()))
+                                        .on_hover_text(format!("Sent in {}'s chat", m.metadata.channel));
+                                }
                                 ui.strong(&m.author);
                                 note(
                                     ui,
@@ -5308,11 +5475,16 @@ impl Studio {
                                 );
                             });
                             self.browser_chat.rich.draw(ui,&format!("{}:{}",m.platform.name(),m.id),&m.text,self.project.preferences.chat_font_size);
-                        })
+                        }))
                         .response
-                        .interact(egui::Sense::click())
                         .context_menu(|ui| message_menu(ui, m, connected.contains(&m.platform.name()), &mut chat_action));
                     ui.add_space(3.);
+                    let h = ui.cursor().top() - before;
+                    self.chat_heights.1.insert(key, h);
+                    y += h;
+                }
+                if skipped > 0. {
+                    ui.add_space(skipped);
                 }
                 background.context_menu(|ui| {
                     let mut any = false;
@@ -5386,6 +5558,7 @@ impl Studio {
             None => {}
         }
         let composer_top = ui.cursor().top();
+        self.invite_card(ui);
         ui.separator();
         if connected.is_empty() {
             return;
@@ -5887,21 +6060,24 @@ impl Studio {
             let mut style = egui_dock::Style::from_egui(ui.style());
             style.tab_bar.height = 36.;
             style.tab_bar.bg_fill = panel();
+            let round = crate::appearance::current().panel_corners;
             style.tab_bar.corner_radius = egui::CornerRadius {
-                nw: 16,
-                ne: 16,
+                nw: round,
+                ne: round,
                 sw: 0,
                 se: 0,
             };
             style.tab_bar.hline_color = Color32::TRANSPARENT;
+            // A panel on its own (not tabbed with another) gets a full-width title bar.
+            style.tab_bar.lone_tab_title = true;
             style.tab.hline_below_active_tab_name = false;
             style.tab.tab_body.bg_fill = panel();
             style.tab.tab_body.stroke = egui::Stroke::NONE;
             style.tab.tab_body.corner_radius = egui::CornerRadius {
                 nw: 0,
                 ne: 0,
-                sw: 16,
-                se: 16,
+                sw: round,
+                se: round,
             };
             style.tab.tab_body.inner_margin = egui::Margin::same(12);
             for tab in [
@@ -5913,7 +6089,7 @@ impl Studio {
                 tab.bg_fill = panel();
                 tab.outline_color = Color32::TRANSPARENT;
                 tab.text_color = crate::appearance::current().text;
-                tab.corner_radius = egui::CornerRadius::same(16);
+                tab.corner_radius = egui::CornerRadius::same(round);
             }
             style.separator.width = 10.;
             style.separator.color_idle = bg();
@@ -6110,7 +6286,7 @@ impl Studio {
         let alerts_before = scene_channels.iter().find(|c| c.id == ALERTS_STRIP).cloned();
         for error in [&view.error, &view.capture_error] {
             if !error.is_empty() {
-                ui.colored_label(Color32::LIGHT_RED, error);
+                ui.colored_label(crate::appearance::current().error, error);
             }
         }
         let mut changed = false;
@@ -6851,6 +7027,8 @@ if changed{self.changed();}
                         amount: (details.amount * 100.).round() as u64,
                         currency: if rule.options.currency.is_empty() { "USD".into() } else { rule.options.currency.clone() },
                         count: details.count,
+                        level: 2,
+                        stage: rule.options.hype.first(),
                         ..Default::default()
                     },
                     reward_id: rule.conditions.reward_id.clone(),
@@ -6899,6 +7077,8 @@ if changed{self.changed();}
                         amount: 500,
                         currency: "USD".into(),
                         count: 10,
+                        level: 2,
+                        stage: rule.options.hype.first(),
                         ..Default::default()
                     },
                     reward_id: rule.conditions.reward_id.clone(),
@@ -7246,6 +7426,14 @@ impl eframe::App for Studio {
             // A failed attempt waits another hour rather than retrying every frame.
             self.last_backup = Instant::now();
         }
+        if let Some(rx) = &self.theme_import
+            && let Ok(path) = rx.try_recv()
+        {
+            self.theme_import = None;
+            if let Some(path) = path {
+                self.import_theme(&path);
+            }
+        }
         if let Some(rx) = &self.appearance_picker
             && let Ok(path) = rx.try_recv()
         {
@@ -7475,6 +7663,12 @@ impl eframe::App for Studio {
         self.browser_chat
             .sync_accounts(&self.accounts[0], &self.accounts[1], &self.kick_account);
         self.browser_chat.set_tiktok(&self.stream_config.tiktok_username);
+        self.browser_chat.set_costream(
+            &self.stream_config.costream_channels,
+            &self.accounts[0].shared_chat,
+            self.stream_config.costream_invites && self.accounts[0].connected,
+        );
+        self.costream_notices();
         self.browser_chat.set_context(ctx);
         self.browser_chat.tick(&mut self.chat);
         let mut incoming = std::mem::take(&mut self.browser_chat.activity);
@@ -7609,6 +7803,9 @@ impl eframe::App for Studio {
             if let Some(result) = account.moderation_results.drain(..).next_back() {
                 self.browser_chat.post_status = result;
             }
+            if let Some(notice) = account.notices.drain(..).next_back() {
+                self.toast = Some(Toast { text: notice, undo: false, until: Instant::now() + Duration::from_secs(8) });
+            }
             for result in account.post_results.drain(..) {
                 if result["request"].as_str().is_some_and(|s|s.starts_with("automation-")){
                     self.automation_queue.log(format!("{}{} automation chat: {}",account.platform.name(),if account.bot{" bot"}else{""},if result["ok"].as_bool()==Some(true){"sent"}else{result["text"].as_str().unwrap_or("failed")}));
@@ -7668,50 +7865,41 @@ impl eframe::App for Studio {
             self.captures.widgets.start_stream();
         }
         self.was_streaming = streaming;
-        if self.chat_alert_revision != self.chat.revision() {
-            self.chat_alert_revision = self.chat.revision();
+        // Each new message once: profile pictures, chat widgets, automations, and Twitch
+        // activity relayed to the browser chat window.
+        let fresh: Vec<ChatMessage> = self.chat.take_fresh().into_iter().cloned().collect();
+        let mut events = Vec::new();
+        for m in &fresh {
             // Twitch account ids let the chat widget find chatters' profile pictures.
-            for m in self.chat.messages().filter(|m| !m.metadata.user_id.is_empty()) {
+            if !m.metadata.user_id.is_empty() {
                 crate::avatars::note(m.platform.name(), &m.author, &m.metadata.user_id);
             }
-            let events: Vec<_> = self
-                .chat
-                .messages()
-                .flat_map(|m| self.chat_session.messages(m))
-                .collect();
-            for event in events {
-                if event.kind == EventKind::ChatMessage {
-                    self.chat_messages_seen += 1;
-                    // Emotes from the browser chat reach chat widgets as pictures, not just names.
-                    let key = format!("{}:{}", event.platform.name(), event.id);
-                    let text = match self.browser_chat.rich.parts(&key) {
-                        Some(parts) if parts.iter().any(|p| p.src.is_some()) => crate::chat_render::marked(parts, 240),
-                        _ => event.text.clone(),
-                    };
-                    let metadata = self.chat.messages().find(|m| m.platform == event.platform && m.id == event.id).map(|m| m.metadata.clone()).unwrap_or_default();
-                    let look = crate::widgets::ChatLook { color: &metadata.color, badges: &metadata.badges, highlight: &metadata.highlight };
-                    self.captures.widgets.chat(event.platform, &event.author, &text, &look);
-                }
-                self.dispatch_automations(&event, false, false);
+            if m.id.starts_with("event-") {
+                self.browser_chat.relay(m);
             }
+            events.extend(self.chat_session.messages(m).into_iter().map(|e| (e, m)));
+        }
+        for (event, m) in events {
+            if event.kind == EventKind::ChatMessage {
+                self.chat_messages_seen += 1;
+                // Emotes from the browser chat reach chat widgets as pictures, not just names.
+                let key = format!("{}:{}", event.platform.name(), event.id);
+                let text = match self.browser_chat.rich.parts(&key) {
+                    Some(parts) if parts.iter().any(|p| p.src.is_some()) => crate::chat_render::marked(parts, 240),
+                    _ => event.text.clone(),
+                };
+                let metadata = &m.metadata;
+                let look = crate::widgets::ChatLook { color: &metadata.color, badges: &metadata.badges, highlight: &metadata.highlight };
+                self.captures.widgets.chat(event.platform, &event.author, &text, &look);
+                // A co-streamer's chat shows, but doesn't run your commands and automations.
+                if !metadata.channel.is_empty() {
+                    continue;
+                }
+            }
+            self.dispatch_automations(&event, false, false);
         }
         self.audio
             .monitor_device(&self.project.preferences.monitor_device);
-        if self.event_revision != self.chat.revision() {
-            for m in self.chat.messages().filter(|m| m.id.starts_with("event-")) {
-                if !self.event_ids.contains(&m.id) {
-                    self.event_ids.insert(m.id.clone());
-                    self.browser_chat.relay(m);
-                    self.event_relayed.push_back(m.id.clone());
-                }
-            }
-            while self.event_relayed.len() > 2048 {
-                if let Some(id) = self.event_relayed.pop_front() {
-                    self.event_ids.remove(&id);
-                }
-            }
-            self.event_revision = self.chat.revision();
-        }
         if self.browser_chat.running() || self.browser_chat.installing() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
@@ -7882,10 +8070,14 @@ impl eframe::App for Studio {
             ctx.request_repaint_after(Duration::from_millis(16));
         }
         let accent = self.accent();
-        ctx.style_mut(|s| {
-            s.visuals.selection.bg_fill = accent;
-            s.visuals.selection.stroke.color = Color32::from_rgb(56, 30, 114);
-        });
+        let ink = crate::appearance::current().on_accent.unwrap_or(Color32::from_rgb(56, 30, 114));
+        // Only when it changes: setting the style every frame makes egui copy it every frame.
+        if ctx.style().visuals.selection.bg_fill != accent || ctx.style().visuals.selection.stroke.color != ink {
+            ctx.style_mut(|s| {
+                s.visuals.selection.bg_fill = accent;
+                s.visuals.selection.stroke.color = ink;
+            });
+        }
         if let Some(rx) = &self.recorder {
             match rx.try_recv() {
                 Ok(result) => {
@@ -7954,6 +8146,15 @@ impl eframe::App for Studio {
                 crate::demo::pictures();
                 for m in crate::demo::messages() {
                     self.chat.push(m);
+                }
+                if self.demo_input == Some("costream") {
+                    // Shared chat with a co-streamer, one of their viewers' messages, and an invite.
+                    self.accounts[0].shared_chat = vec![("novaraider".into(), "NovaRaider".into())];
+                    let mut m = crate::demo::messages().remove(0);
+                    (m.id, m.author, m.text, m.metadata.channel) = ("demo-shared".into(), "pixelpup".into(), "hi from Nova's chat!".into(), "NovaRaider".into());
+                    m.received_ms = crate::activity::now();
+                    self.chat.push(m);
+                    self.browser_chat.invite = Some(crate::browser_chat::Invite { text: "AliceStreams wants to collaborate.".into(), can_decline: true, close_only: true, link: String::new(), gone: None });
                 }
                 for item in crate::demo::activity() {
                     self.event_history.insert_new(item);

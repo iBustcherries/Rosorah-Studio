@@ -159,9 +159,13 @@ pub enum Command {
     Live(bool),
     /// List the emotes this account can use in chat (Kick needs the channel name).
     Emotes(String),
+    /// YouTube: make the broadcast you're live on public, once it's found.
+    MakePublic,
 }
 pub enum Event {
     Moderated(String),
+    /// Something to tell the streamer (shown as a notice).
+    Notice(String),
     Rewards(std::result::Result<Value,String>),
     Status(String),
     Remembered(String),
@@ -179,6 +183,8 @@ pub enum Event {
     Chat(ChatMessage),
     /// People watching now; None while the channel isn't live.
     Viewers(Option<u64>),
+    /// The other channels in Twitch's shared chat with this one (login, display name); empty when none.
+    SharedChat(Vec<(String, String)>),
     Emotes(std::result::Result<Vec<crate::chat_render::Emote>, String>),
     #[cfg(test)]
     Delete(String),
@@ -213,8 +219,11 @@ pub struct Account {
     pub forgotten: bool,
     pub post_results: Vec<Value>,
     pub moderation_results: Vec<String>,
+    pub notices: Vec<String>,
     /// People watching now (None when offline or unknown).
     pub viewers: Option<u64>,
+    /// Channels sharing chat with this one on Twitch (login, display name).
+    pub shared_chat: Vec<(String, String)>,
     /// Emotes this account can send, for the chat emote picker.
     pub emotes: Vec<crate::chat_render::Emote>,
     /// Why the emote list is missing, if it is.
@@ -254,7 +263,9 @@ impl Account {
             forgotten: false,
             post_results: Vec::new(),
             moderation_results: Vec::new(),
+            notices: Vec::new(),
             viewers: None,
+            shared_chat: Vec::new(),
             emotes: Vec::new(),
             emote_note: String::new(),
             live_sent: None,
@@ -348,6 +359,7 @@ impl Account {
         self.rx = None;
         self.connected = false;
         self.viewers = None;
+        self.shared_chat.clear();
         self.emotes.clear();
         self.emote_note.clear();
         self.live_sent = None;
@@ -431,6 +443,7 @@ impl Account {
         for event in events {
             match event {
                 Event::Moderated(s) => self.moderation_results.push(s),
+                Event::Notice(s) => self.notices.push(s),
                 Event::Rewards(result)=>{self.reward_busy=false;self.reward_result=Some(result);},
                 Event::Status(s) => self.status = s,
                 Event::Remembered(s) => self.remembered_status = s,
@@ -467,6 +480,7 @@ impl Account {
                     feed.push(m);
                 }
                 Event::Viewers(n) => self.viewers = n,
+                Event::SharedChat(channels) => self.shared_chat = channels,
                 Event::Emotes(Ok(list)) => {
                     self.emotes = list;
                     self.emote_note.clear();
@@ -751,6 +765,7 @@ fn run(
                 let _ = tx.send(Event::Moderated(text));
             }
             Ok(Command::Live(live)) => session.watch(live, tx),
+            Ok(Command::MakePublic) => session.want_public(),
             Ok(Command::Emotes(_)) if platform == Platform::Twitch => {
                 let list = services::twitch_emotes(&client, &config, &token, session.user_id()).map_err(|e| {
                     if e.to_string().contains("HTTP 401") || e.to_string().contains("HTTP 403") {
@@ -798,6 +813,7 @@ fn run(
         session.discover_if_due(&client, &config, &token, tx);
         session.subscribers_if_due(&client, &token, tx);
         session.viewers_if_due(&client, &config, &token, tx);
+        session.public_if_due(&client, &token, tx);
         // Browser chat owns message delivery. No YouTube message polling or duplicate IRC reader.
     }
     Ok(())

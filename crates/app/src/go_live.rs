@@ -106,8 +106,8 @@ impl Studio {
         for check in &checks {
             ui.horizontal(|ui| {
                 let (icon, color) = match check.level {
-                    Level::Good => ("✔", Color32::from_rgb(110, 210, 140)),
-                    Level::Warn => ("⚠", Color32::from_rgb(230, 190, 90)),
+                    Level::Good => ("✔", crate::appearance::current().good),
+                    Level::Warn => ("⚠", crate::appearance::current().warning),
                     Level::Block => ("✖", Color32::from_rgb(255, 110, 110)),
                 };
                 ui.label(RichText::new(icon).strong().color(color));
@@ -143,7 +143,7 @@ impl Studio {
                     self.error_line(ui, self.stream_error.clone());
                 }
                 let announce = &self.stream_config.announce;
-                let places = [(announce.discord_ready(), "Discord"), (announce.bluesky_ready(), "Bluesky"), (announce.threads_ready(), "Threads")];
+                let places = [(announce.discord_ready(), "Discord"), (announce.bluesky_ready(), "Bluesky"), (announce.threads_ready(), "Threads"), (announce.x_ready(), "X")];
                 if places.iter().any(|(ready, _)| *ready) {
                     ui.separator();
                     ui.horizontal_wrapped(|ui| {
@@ -155,6 +155,16 @@ impl Studio {
                             }
                         }
                     });
+                }
+                // Whether this stream's YouTube broadcast turns public as it starts (kept as a setting).
+                let youtube = self.stream_config.youtube.enabled && self.accounts[1].connected;
+                if youtube {
+                    ui.separator();
+                    let mut public = self.stream_config.youtube_public;
+                    if ui.checkbox(&mut public, "Make my YouTube stream public when it starts").on_hover_text("Rosorah switches the YouTube broadcast to public as your stream reaches YouTube, so its recording stays public too. Remembered for next time.").changed() {
+                        self.stream_config.youtube_public = public;
+                        self.save_stream_settings();
+                    }
                 }
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -275,7 +285,7 @@ impl Studio {
     }
     /// An error in red, with its Fix it button when one is known.
     fn error_line(&mut self, ui: &mut egui::Ui, error: String) {
-        ui.colored_label(Color32::LIGHT_RED, &error);
+        ui.colored_label(crate::appearance::current().error, &error);
         if let Some((label, fix)) = Self::error_fix(&error)
             && ui.add(self.primary_button(label)).clicked()
         {

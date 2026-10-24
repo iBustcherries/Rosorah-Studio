@@ -733,6 +733,8 @@ pub struct ChatFeed {
     revision: u64,
     messages: VecDeque<ChatMessage>,
     capacity: usize,
+    /// Messages added since `take_fresh` was last called, in arrival order.
+    fresh: VecDeque<(Platform, String)>,
 }
 impl ChatFeed {
     pub fn new(capacity: usize) -> Self {
@@ -740,7 +742,18 @@ impl ChatFeed {
             revision: 0,
             messages: VecDeque::new(),
             capacity: capacity.max(1),
+            fresh: VecDeque::new(),
         }
+    }
+    /// The messages added since the last call, oldest first, each once: so new messages can be
+    /// handled without going through the whole feed (which is kept in time order, so a late
+    /// arrival can land anywhere in it).
+    pub fn take_fresh(&mut self) -> Vec<&ChatMessage> {
+        let fresh = std::mem::take(&mut self.fresh);
+        fresh
+            .iter()
+            .filter_map(|(platform, id)| self.messages.iter().find(|m| m.platform == *platform && m.id == *id))
+            .collect()
     }
     pub fn push(&mut self, message: ChatMessage) -> bool {
         if self
@@ -755,6 +768,10 @@ impl ChatFeed {
             .iter()
             .position(|m| m.received_ms > message.received_ms)
             .unwrap_or(self.messages.len());
+        self.fresh.push_back((message.platform, message.id.clone()));
+        if self.fresh.len() > self.capacity {
+            self.fresh.pop_front();
+        }
         self.messages.insert(position, message);
         self.revision = self.revision.wrapping_add(1);
         while self.messages.len() > self.capacity {
@@ -1969,6 +1986,20 @@ mod tests {
             f.messages().map(|m| m.id.as_str()).collect::<Vec<_>>(),
             vec!["b", "c"]
         );
+    }
+    #[test]
+    fn new_messages_are_handed_out_once_in_arrival_order() {
+        let mut f = ChatFeed::new(10);
+        let msg = |id: &str, t| ChatMessage { metadata: Default::default(), platform: Platform::Twitch, id: id.into(), author: "a".into(), text: "hi".into(), received_ms: t, demo: false };
+        f.push(msg("late", 5));
+        f.push(msg("early", 1));
+        f.push(msg("late", 5));
+        let ids = |f: &mut ChatFeed| f.take_fresh().iter().map(|m| m.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&mut f), vec!["late", "early"]);
+        assert!(ids(&mut f).is_empty());
+        f.push(msg("next", 9));
+        f.remove(Platform::Twitch, "next");
+        assert!(ids(&mut f).is_empty(), "a message removed before it was handled is skipped");
     }
     #[test]
     fn audio_tracks_mute_gain_and_clipping() {

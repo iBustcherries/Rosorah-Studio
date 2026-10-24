@@ -23,13 +23,13 @@ impl Guide {
    match self.step {
     0=>{
      ui.heading("What should start this alert?");
-     ui.horizontal_wrapped(|ui|{for (label,event,text) in [("Follow",EventKind::Follow,"Thanks for following, {user}!"),("Donation",EventKind::Donation,"Thank you, {user}, for {amount} {currency}!"),("First message",EventKind::FirstMessage,"Welcome, {user}!"),("Raid",EventKind::Raid,"Welcome, {user}, and {viewers} raiders!"),("Channel points",EventKind::Redemption,"{user} redeemed a reward!"),("Chat phrase",EventKind::ChatMessage,"{user}: {message}")]{if ui.button(label).clicked(){self.event=event;self.name=label.into();self.text=text.into();}}});
+     ui.horizontal_wrapped(|ui|{for (label,event,text) in [("Follow",EventKind::Follow,"Thanks for following, {user}!"),("Donation",EventKind::Donation,"Thank you, {user}, for {amount} {currency}!"),("First message",EventKind::FirstMessage,"Welcome, {user}!"),("Raid",EventKind::Raid,"Welcome, {user}, and {viewers} raiders!"),("Hype Train",EventKind::HypeTrain,"Hype Train level {level}! Thank you, {user}!"),("Channel points",EventKind::Redemption,"{user} redeemed a reward!"),("Chat phrase",EventKind::ChatMessage,"{user}: {message}")]{if ui.button(label).clicked(){self.event=event;self.name=label.into();self.text=text.into();if event==EventKind::HypeTrain{self.platform=Some(Platform::Twitch);}}}});
      ui.label("Name");ui.text_edit_singleline(&mut self.name);
      egui::ComboBox::from_id_salt("guide_event").selected_text(self.event.label()).show_ui(ui,|ui|{for e in EventKind::ALL{ui.selectable_value(&mut self.event,e,e.label());}});
      egui::ComboBox::from_id_salt("guide_platform").selected_text(self.platform.map(|p|p.name()).unwrap_or("Any connected platform")).show_ui(ui,|ui|{ui.selectable_value(&mut self.platform,None,"Any connected platform");for &p in connected{ui.selectable_value(&mut self.platform,Some(p),p.name());}ui.selectable_value(&mut self.platform,Some(Platform::Donations),"Donation services");});
      if connected.is_empty(){ui.label("You can prepare an alert now. Connect accounts in Settings to receive events.");}
      if matches!(self.event,EventKind::ChatMessage|EventKind::ChatCommand){ui.label("Word, phrase, or command");ui.text_edit_singleline(&mut self.phrase);}
-     if self.event==EventKind::Redemption{ui.label("Reward ID (leave empty for any reward)");ui.text_edit_singleline(&mut self.reward);ui.small("Use Twitch rewards > Link automation to select a reward without copying an ID.");}
+     if self.event==EventKind::HypeTrain{ui.small("Plays when a Twitch Hype Train starts, reaches each new level and ends. Change which moments after creating it.");}if self.event==EventKind::Redemption{ui.label("Reward ID (leave empty for any reward)");ui.text_edit_singleline(&mut self.reward);ui.small("Use Twitch rewards > Link automation to select a reward without copying an ID.");}
     },
     1=>{
      ui.heading("What should viewers see and hear?");
@@ -55,7 +55,7 @@ impl Guide {
      ui.horizontal(|ui|{if ui.button("Create & test").clicked(){match self.create(p,false){Ok(id)=>result=Some((id,true)),Err(e)=>self.notice=e}}if ui.button("Create & enable").clicked(){match self.create(p,true){Ok(id)=>result=Some((id,false)),Err(e)=>self.notice=e}}});
     }
    }
-   if !self.notice.is_empty(){ui.colored_label(egui::Color32::LIGHT_RED,&self.notice);}
+   if !self.notice.is_empty(){ui.colored_label(crate::appearance::current().error,&self.notice);}
    });ui.separator();ui.horizontal(|ui|{if self.step>0&&ui.button("Back").clicked(){self.step-=1;}if self.step<2&&ui.button("Next").clicked(){self.step+=1;}});
   });self.open=open;if result.is_some(){*self=Self::default();}result
  }

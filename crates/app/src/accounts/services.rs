@@ -159,6 +159,18 @@ pub(super) fn validate_twitch(
     );
     Ok(v)
 }
+/// The status to send to make a broadcast public, or None when it already is. Made-for-kids is
+/// sent back as it was, so updating the status doesn't reset it.
+fn public_status(status: &Value) -> Option<Value> {
+    if status["privacyStatus"].as_str() == Some("public") {
+        return None;
+    }
+    let mut changed = j!({"privacyStatus": "public"});
+    if let Some(kids) = status["selfDeclaredMadeForKids"].as_bool() {
+        changed["selfDeclaredMadeForKids"] = j!(kids);
+    }
+    Some(changed)
+}
 pub(super) struct Session {
     platform: Platform,
     id: String,
@@ -177,6 +189,8 @@ pub(super) struct Session {
     subscribers_seen: std::collections::BTreeSet<String>,
     subscribers_initial: bool,
     viewers: ViewerCheck,
+    /// Making the live broadcast public: since when it's been wanted, and when to try next.
+    public: Option<(Instant, Instant)>,
 }
 impl Session {
     pub fn new(
@@ -219,6 +233,7 @@ impl Session {
             subscribers_seen: Default::default(),
             subscribers_initial: true,
             viewers: ViewerCheck::default(),
+            public: None,
         };
         let _ = tx.send(Event::Connected(s.name.clone(), s.id.clone()));
         if let Err(e) = s.command(Command::Refresh, client, config, token, tx) {
@@ -364,6 +379,48 @@ impl Session {
     /// Starts or stops the viewer checks as Rosorah goes live or stops.
     pub fn watch(&mut self, live: bool, tx: &mpsc::SyncSender<Event>) {
         if live { self.viewers.start() } else { self.viewers.stop(tx) }
+    }
+    /// Going live: the YouTube broadcast should become public. YouTube can take a little while to
+    /// show a new broadcast, so it's looked for until it turns up.
+    pub fn want_public(&mut self) {
+        if self.platform == Platform::YouTube {
+            let now = Instant::now();
+            self.public = Some((now, now));
+            self.discovery_burst = 6;
+            self.next_discovery = now;
+        }
+    }
+    pub fn public_if_due(&mut self, client: &Client, token: &Token, tx: &mpsc::SyncSender<Event>) {
+        let Some((since, next)) = self.public else { return };
+        let now = Instant::now();
+        if now < next {
+            return;
+        }
+        if self.broadcast.is_empty() {
+            if now.duration_since(since) > Duration::from_secs(180) {
+                self.public = None;
+                let _ = tx.send(Event::Notice("Couldn't make your YouTube stream public: no YouTube broadcast showed up. Check YouTube Studio.".into()));
+            } else {
+                self.public = Some((since, now + Duration::from_secs(10)));
+            }
+            return;
+        }
+        self.public = None;
+        let text = match self.make_public(client, token) {
+            Ok(true) => "Your YouTube stream is now public.".to_owned(),
+            Ok(false) => return,
+            Err(e) => format!("Couldn't make your YouTube stream public: {e}"),
+        };
+        let _ = tx.send(Event::Notice(text));
+    }
+    /// Sets the selected broadcast to public; false when it already was.
+    fn make_public(&self, client: &Client, token: &Token) -> Result<bool> {
+        let v = json(self.yt(client, token, reqwest::Method::GET, "liveBroadcasts").query(&[("part", "status"), ("id", self.broadcast.as_str())]))?;
+        let status = &v["items"][0]["status"];
+        ensure!(status.is_object(), "the broadcast wasn't found");
+        let Some(changed) = public_status(status) else { return Ok(false) };
+        json(self.yt(client, token, reqwest::Method::PUT, "liveBroadcasts").query(&[("part", "status")]).json(&j!({"id": self.broadcast, "status": changed})))?;
+        Ok(true)
     }
     /// Asks how many people are watching, when it's time to (see ViewerCheck).
     pub fn viewers_if_due(&mut self, client: &Client, config: &ClientConfig, token: &Token, tx: &mpsc::SyncSender<Event>) {
@@ -594,6 +651,7 @@ impl Session {
             Command::Moderate(_) => anyhow::bail!("Moderation must use the account worker"),
             Command::Live(_) => anyhow::bail!("Going live is handled by the account worker"),
             Command::Emotes(_) => anyhow::bail!("Emotes are listed by the account worker"),
+            Command::MakePublic => anyhow::bail!("Making a broadcast public is handled by the account worker"),
             Command::Discover => {
                 self.discovery_burst = 6;
                 self.next_discovery = Instant::now();
@@ -993,6 +1051,12 @@ mod discovery_tests {
         assert_eq!(discovery_retry("dailyLimitExceeded", 10), 3600);
         assert!(discovery_retry("unavailable", 5) > discovery_retry("unavailable", 1));
         assert!(discovery_retry("unavailable", 20) <= 900);
+    }
+    #[test]
+    fn making_a_broadcast_public_keeps_made_for_kids() {
+        assert_eq!(public_status(&j!({"privacyStatus":"public"})), None);
+        assert_eq!(public_status(&j!({"privacyStatus":"unlisted","selfDeclaredMadeForKids":false})), Some(j!({"privacyStatus":"public","selfDeclaredMadeForKids":false})));
+        assert_eq!(public_status(&j!({"privacyStatus":"private"})), Some(j!({"privacyStatus":"public"})));
     }
     #[test]
     fn selects_only_available_broadcast_and_replaces_ended_selection() {

@@ -21,6 +21,10 @@ pub struct ChatMetadata {
     /// "paid", "first" or "highlight": messages the chat widget sets apart.
     #[serde(default)]
     pub highlight: String,
+    /// Another Twitch channel the message was sent in (shared chat or a co-streamer's chat);
+    /// empty for the streamer's own chat.
+    #[serde(default)]
+    pub channel: String,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PhraseMode {

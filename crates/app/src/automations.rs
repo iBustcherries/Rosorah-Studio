@@ -265,7 +265,8 @@ fn variables_for(e: EventKind) -> &'static [&'static str] {
         EventKind::Raid => &["{user}", "{viewers}", "{platform}"],
         EventKind::Redemption => &["{user}", "{reward}", "{message}", "{platform}"],
         EventKind::ChatCommand | EventKind::ChatMessage => &["{user}", "{message}", "{platform}"],
-        EventKind::HypeTrain | EventKind::Poll | EventKind::Prediction => &["{count}", "{platform}"],
+        EventKind::HypeTrain => &["{user}", "{level}", "{count}", "{platform}"],
+        EventKind::Poll | EventKind::Prediction => &["{count}", "{platform}"],
         EventKind::Timer => &[],
     }
 }
@@ -295,7 +296,7 @@ fn when_text(e: EventKind) -> &'static str {
         EventKind::SuperChat => "someone sends a Super Chat",
         EventKind::SuperSticker => "someone sends a Super Sticker",
         EventKind::Subscriber => "someone subscribes on YouTube",
-        EventKind::HypeTrain => "a Hype Train starts",
+        EventKind::HypeTrain => "there's a Hype Train",
         EventKind::ChatCommand => "someone types a command",
         EventKind::ChatMessage => "a chat message matches",
         EventKind::FirstMessage => "someone sends their first message this stream",
@@ -435,7 +436,7 @@ pub fn queue_bar(ui: &mut egui::Ui, q: &mut Scheduler, cmds: &mut Vec<Command>) 
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("Alert queue").strong());
         if q.paused {
-            ui.label(RichText::new("Paused").color(egui::Color32::from_rgb(230, 190, 90)));
+            ui.label(RichText::new("Paused").color(crate::appearance::current().warning));
         }
         ui.label(match q.len() {
             0 => "idle".to_owned(),
@@ -451,7 +452,7 @@ pub fn queue_bar(ui: &mut egui::Ui, q: &mut Scheduler, cmds: &mut Vec<Command>) 
         if ui.add_enabled(q.len() > 1, egui::Button::new("Clear")).on_hover_text("Remove alerts that are waiting").clicked() {
             cmds.push(Command::Clear);
         }
-        if ui.button(RichText::new("Stop all").color(egui::Color32::LIGHT_RED)).on_hover_text("Stop everything now and pause").clicked() {
+        if ui.button(RichText::new("Stop all").color(crate::appearance::current().error)).on_hover_text("Stop everything now and pause").clicked() {
             cmds.push(Command::Stop);
         }
         egui::ComboBox::from_id_salt("queue_mode")
@@ -918,7 +919,9 @@ impl Editor {
                     let r = &mut p.rules[i];
                     let selected = self.selected == i;
                     let fill = if selected { ui.visuals().selection.bg_fill.gamma_multiply(0.22) } else { ui.visuals().faint_bg_color };
-                    let frame = egui::Frame::new().fill(fill).corner_radius(10).inner_margin(8).show(ui, |ui| {
+                    // A click anywhere on the card selects it. The card senses clicks underneath its
+                    // contents, so its own buttons (the ... menu) still get theirs.
+                    let card = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| egui::Frame::new().fill(fill).corner_radius(10).inner_margin(8).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut r.enabled, "").on_hover_text(if r.enabled { "On" } else { "Off" });
@@ -949,8 +952,8 @@ impl Editor {
                         };
                         let last = engine.last_fired(r.id).map(|t| ago(now.saturating_sub(t))).unwrap_or_else(|| "not played yet".into());
                         ui.add(egui::Label::new(RichText::new(format!("{platform} · {last}")).small().weak()).truncate());
-                    });
-                    if frame.response.interact(egui::Sense::click()).clicked() {
+                    }));
+                    if card.response.clicked() {
                         self.selected = i;
                     }
                     ui.add_space(4.);
@@ -1045,7 +1048,7 @@ impl Editor {
                 });
             });
             if conflicts > 0 {
-                ui.colored_label(egui::Color32::from_rgb(230, 190, 90), format!("{conflicts} other alert(s) also react to this. Add a condition to avoid double alerts."));
+                ui.colored_label(crate::appearance::current().warning, format!("{conflicts} other alert(s) also react to this. Add a condition to avoid double alerts."));
             }
             // Plain-language summary; the event and platform are editable in place.
             egui::Frame::new().fill(ui.visuals().faint_bg_color).corner_radius(10).inner_margin(10).show(ui, |ui| {
@@ -1089,6 +1092,15 @@ impl Editor {
                     ui.label("Only when there are at least");
                     ui.add(egui::DragValue::new(&mut r.options.min_count).range(0..=1000000000u64));
                     ui.label(match r.event { EventKind::Bits => "bits", EventKind::Gift => "gifts", _ => "raiders" });
+                }
+                EventKind::HypeTrain => {
+                    ui.label("Play when it");
+                    let h = &mut r.options.hype;
+                    ui.checkbox(&mut h.start, "starts");
+                    ui.checkbox(&mut h.level_up, "reaches a new level");
+                    ui.checkbox(&mut h.end, "ends");
+                    ui.checkbox(&mut h.progress, "moves forward").on_hover_text("Every contribution that doesn't finish a level. This can play many times a minute.");
+                    ui.small("{level} is the train's level, {count} its points, {user} a top contributor.");
                 }
                 EventKind::ChatCommand => {
                     ui.label("Command");
@@ -1516,7 +1528,7 @@ fn media_settings(ui: &mut egui::Ui, sources: &mut [auroracast_core::Source], id
     let Some(s) = sources.iter_mut().find(|s| s.id == id) else { return false };
     let SourceKind::VideoFile(v) = &mut s.kind else { return false };
     if !std::path::Path::new(&v.path).is_file() {
-        ui.colored_label(egui::Color32::LIGHT_RED, "Media file missing; use Change file…");
+        ui.colored_label(crate::appearance::current().error, "Media file missing; use Change file…");
     }
     ui.horizontal_wrapped(|ui| {
         changed |= ui.checkbox(&mut v.audio, "Play its sound").changed();
@@ -1779,5 +1791,49 @@ mod friendly_tests {
         assert_eq!(auroracast_core::check(&r, &event), None);
         r.platform = Some(Platform::Kick);
         assert_eq!(auroracast_core::check(&r, &event), Some("Different platform"));
+    }
+}
+#[cfg(test)]
+mod card_click_tests {
+    use eframe::egui;
+    /// Clicks the "..." button on a clickable card; returns (menu opened, card clicked).
+    fn click_menu(old_way: bool) -> (bool, bool) {
+        let ctx = egui::Context::default();
+        let (mut menu_open, mut card_clicked, mut button_rect) = (false, false, egui::Rect::NOTHING);
+        for frame in 0..6 {
+            let pos = button_rect.center();
+            let events = match frame {
+                2 => vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() }],
+                3 => vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() }],
+                _ => vec![],
+            };
+            let input = egui::RawInput { events, screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800., 600.))), ..Default::default() };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let contents = |ui: &mut egui::Ui, button_rect: &mut egui::Rect, menu_open: &mut bool| {
+                        ui.horizontal(|ui| {
+                            let r = ui.menu_button("...", |ui| {
+                                *menu_open = true;
+                                ui.label("Delete");
+                            });
+                            *button_rect = r.response.rect;
+                        });
+                    };
+                    if old_way {
+                        let frame = egui::Frame::new().inner_margin(8).show(ui, |ui| contents(ui, &mut button_rect, &mut menu_open));
+                        card_clicked |= frame.response.interact(egui::Sense::click()).clicked();
+                    } else {
+                        let card = ui.scope_builder(egui::UiBuilder::new().sense(egui::Sense::click()), |ui| egui::Frame::new().inner_margin(8).show(ui, |ui| contents(ui, &mut button_rect, &mut menu_open)));
+                        card_clicked |= card.response.clicked();
+                    }
+                });
+            });
+        }
+        (menu_open, card_clicked)
+    }
+    #[test]
+    fn the_cards_menu_button_gets_its_click() {
+        assert_eq!(click_menu(true), (false, true), "the old card took the click");
+        assert_eq!(click_menu(false), (true, false));
     }
 }

@@ -81,6 +81,13 @@ pub struct Config {
     pub tiktok_username: String,
     /// Opt-in: type outgoing messages into TikTok's chat box.
     pub tiktok_send: bool,
+    /// Twitch channels streaming with you whose chat is shown in yours (when Twitch's shared
+    /// chat isn't on), separated by spaces or commas.
+    pub costream_channels: String,
+    /// Watch the Twitch Stream Manager for co-stream invites and offer them under Chat.
+    pub costream_invites: bool,
+    /// Make the YouTube broadcast public as the stream starts going to YouTube.
+    pub youtube_public: bool,
     /// "I'm live" posts to Discord and Bluesky; its two secrets live in the keyring.
     pub announce: crate::announce::Settings,
     /// Remote control (Stream Deck, phone apps…); the password lives in the keyring.
@@ -122,6 +129,9 @@ impl Default for Config {
             record: false,
             tiktok_username: String::new(),
             tiktok_send: false,
+            costream_channels: String::new(),
+            costream_invites: true,
+            youtube_public: false,
             announce: Default::default(),
             remote: Default::default(),
             remote_password: String::new(),

@@ -159,7 +159,7 @@ impl Studio {
                             let big = [((cw / 2.) as u32).clamp(16, 1280), ((ch / 2.) as u32).clamp(16, 720)];
                             let mut tiles: Vec<(egui::Rect, Id, Option<Id>, Id, String, Color32)> = Vec::new();
                             if let (Some(main), Some(live)) = (&main, live) {
-                                tiles.push((halves[1].shrink(4.), main.id ^ MULTIVIEW_KEY ^ 2, Some(main.id), live, "PROGRAM".into(), Color32::from_rgb(255, 92, 92)));
+                                tiles.push((halves[1].shrink(4.), main.id ^ MULTIVIEW_KEY ^ 2, Some(main.id), live, "PROGRAM".into(), crate::appearance::current().live));
                                 let shown = preview.unwrap_or(live);
                                 tiles.push((halves[0].shrink(4.), shown ^ MULTIVIEW_KEY ^ 1, None, shown, if preview.is_some() { "PREVIEW".into() } else { "PROGRAM (no Studio Mode)".into() }, self.accent()));
                             }
@@ -168,7 +168,7 @@ impl Studio {
                             for (n, (scene, name)) in scenes.iter().enumerate() {
                                 let (c, r) = (n % columns, n / columns);
                                 let rect = egui::Rect::from_min_size(egui::pos2(area.min.x + c as f32 * cell_w, top.max.y + r as f32 * cell_h), egui::vec2(cell_w, cell_h)).shrink(4.);
-                                let colour = if Some(*scene) == live { Color32::from_rgb(255, 92, 92) } else if Some(*scene) == preview { self.accent() } else { Color32::from_gray(90) };
+                                let colour = if Some(*scene) == live { crate::appearance::current().live } else if Some(*scene) == preview { self.accent() } else { Color32::from_gray(90) };
                                 tiles.push((rect, scene ^ MULTIVIEW_KEY, None, *scene, name.clone(), colour));
                             }
                             for (i, (rect, key, canvas, scene, label, colour)) in tiles.into_iter().enumerate() {

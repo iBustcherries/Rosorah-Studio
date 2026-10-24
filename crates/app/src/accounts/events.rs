@@ -1,5 +1,6 @@
 //! EventSub is push-based: REST is used only to create subscriptions after a new session.
 use super::*;
+use auroracast_core::automation::HypeStage;
 use std::{
     collections::VecDeque,
     net::{TcpStream, ToSocketAddrs},
@@ -16,6 +17,8 @@ pub(super) struct Events {
     migrating: bool,
     attempts: u32,
     seen: VecDeque<String>,
+    /// The running Hype Train's level, to tell a new level from other progress.
+    hype_level: u64,
 }
 fn connect(url: &str) -> Result<Socket> {
     let parsed = reqwest::Url::parse(url)?;
@@ -123,6 +126,10 @@ impl Events {
                         let failures = if self.migrating {
                             vec![]
                         } else {
+                            // Shared chat may already be on: events only tell of changes.
+                            if let Ok(channels) = shared_chat_now(client, config, token, id) {
+                                let _ = tx.try_send(Event::SharedChat(channels));
+                            }
                             subscribe(client, config, token, id, session)
                         };
                         self.migrating = false;
@@ -153,7 +160,11 @@ impl Events {
                             while self.seen.len() > 2048 {
                                 self.seen.pop_front();
                             }
-                            if let Some(text) = describe(&v["payload"]) {
+                            if let Some(channels) = shared_chat(&v["payload"], id) {
+                                let _ = tx.try_send(Event::SharedChat(channels));
+                            }
+                            let hype = hype_moment(&v["payload"], &mut self.hype_level);
+                            if let Some(text) = hype.as_ref().map(|h| h.text.clone()).or_else(|| describe(&v["payload"])) {
                                 if let Some(kind) = crate::activity::twitch_kind(&v["payload"]) {
                                     let author = v["payload"]["event"]["user_name"]
                                         .as_str()
@@ -161,6 +172,7 @@ impl Events {
                                             v["payload"]["event"]["from_broadcaster_user_name"]
                                                 .as_str()
                                         })
+                                        .or(hype.as_ref().map(|h| h.who.as_str()))
                                         .unwrap_or("Viewer");
                                     let _ = tx.send(Event::Activity(crate::activity::Item {
                                         facts: auroracast_core::automation::Facts {
@@ -171,6 +183,8 @@ impl Events {
                                                 })
                                                 .or_else(|| v["payload"]["event"]["total"].as_u64())
                                                 .unwrap_or(0),
+                                            level: hype.as_ref().map_or(0, |h| h.level),
+                                            stage: hype.as_ref().map_or_else(Default::default, |h| h.stage),
                                             ..Default::default()
                                         },
                                         goal_count: match v["payload"]["subscription"]["type"]
@@ -199,6 +213,10 @@ impl Events {
                                         at_ms: now(),
                                         historical: false,
                                     }));
+                                }
+                                // Every contribution would flood chat; the train's start, levels and end show.
+                                if hype.as_ref().is_some_and(|h| h.stage == HypeStage::Progress) {
+                                    return Ok(());
                                 }
                                 let _ = tx.try_send(Event::Chat(ChatMessage {
                                     metadata: Default::default(),
@@ -255,6 +273,9 @@ fn subscribe(
         "channel.poll.end",
         "channel.prediction.begin",
         "channel.prediction.end",
+        "channel.shared_chat.begin",
+        "channel.shared_chat.update",
+        "channel.shared_chat.end",
     ] {
         let mut condition = j!({"broadcaster_user_id":id});
         if kind == "channel.follow" {
@@ -277,11 +298,101 @@ fn subscribe(
                 .json(&body),
         )
         .is_err()
+            // Shared chat is a bonus; its absence isn't worth a warning.
+            && !kind.starts_with("channel.shared_chat")
         {
             failures.push(kind.trim_start_matches("channel.").to_string());
         }
     }
     failures
+}
+/// A Hype Train event: which moment it is, the level, who to name and what to say.
+struct Hype {
+    stage: HypeStage,
+    level: u64,
+    who: String,
+    text: String,
+}
+fn hype_moment(payload: &Value, last_level: &mut u64) -> Option<Hype> {
+    let kind = payload["subscription"]["type"].as_str()?;
+    let e = &payload["event"];
+    let level = e["level"].as_u64().unwrap_or(1).max(1);
+    let stage = match kind {
+        "channel.hype_train.begin" => HypeStage::Start,
+        // Started mid-train, the first progress Rosorah sees also counts as reaching that level.
+        "channel.hype_train.progress" if level > *last_level => HypeStage::LevelUp,
+        "channel.hype_train.progress" => HypeStage::Progress,
+        "channel.hype_train.end" => HypeStage::End,
+        _ => return None,
+    };
+    *last_level = if stage == HypeStage::End { 0 } else { level };
+    // Version 1 names the latest contributor; version 2 only lists the top ones.
+    let who = e["last_contribution"]["user_name"]
+        .as_str()
+        .or_else(|| e["top_contributions"][0]["user_name"].as_str())
+        .unwrap_or("")
+        .to_owned();
+    let train = match e["type"].as_str() {
+        Some("golden_kappa") => "Golden Kappa Train",
+        Some("treasure") => "Treasure Train",
+        _ if e["is_shared_train"] == true => "Shared Hype Train",
+        _ => "Hype Train",
+    };
+    let total = e["total"].as_u64().unwrap_or(0);
+    let text = match stage {
+        HypeStage::Start => format!("{train} started! Level {level}"),
+        HypeStage::LevelUp => format!("{train} reached level {level}!"),
+        HypeStage::Progress => format!("{train} level {level} · {} of {} points", e["progress"].as_u64().unwrap_or(0), e["goal"].as_u64().unwrap_or(0)),
+        HypeStage::End => format!("{train} ended at level {level} · {total} points"),
+    };
+    Some(Hype { stage, level, who, text })
+}
+/// The other channels in a shared chat event (empty when it ended); None for other events.
+fn shared_chat(payload: &Value, me: &str) -> Option<Vec<(String, String)>> {
+    let kind = payload["subscription"]["type"].as_str()?;
+    if kind == "channel.shared_chat.end" {
+        return Some(Vec::new());
+    }
+    if kind != "channel.shared_chat.begin" && kind != "channel.shared_chat.update" {
+        return None;
+    }
+    Some(
+        payload["event"]["participants"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|p| p["broadcaster_user_id"].as_str() != Some(me))
+            .filter_map(|p| {
+                let login = p["broadcaster_user_login"].as_str()?;
+                Some((login.to_owned(), p["broadcaster_user_name"].as_str().unwrap_or(login).to_owned()))
+            })
+            .take(8)
+            .collect(),
+    )
+}
+/// Asks Twitch whether this channel is in a shared chat right now, and with whom.
+fn shared_chat_now(client: &Client, config: &ClientConfig, token: &Token, me: &str) -> Result<Vec<(String, String)>> {
+    let helix = |path: &str| client.get(format!("https://api.twitch.tv/helix/{path}")).header("Client-Id", &config.id).bearer_auth(&token.access);
+    let session = json(helix("shared_chat/session").query(&[("broadcaster_id", me)]))?;
+    let ids: Vec<(&str, &str)> = session["data"][0]["participants"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p["broadcaster_id"].as_str())
+        .filter(|id| *id != me)
+        .take(8)
+        .map(|id| ("id", id))
+        .collect();
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let users = json(helix("users").query(&ids))?;
+    Ok(users["data"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|u| Some((u["login"].as_str()?.to_owned(), u["display_name"].as_str().unwrap_or_default().to_owned())))
+        .collect())
 }
 fn describe(payload: &Value) -> Option<String> {
     let kind = payload["subscription"]["type"].as_str()?;
@@ -343,6 +454,29 @@ fn describe(payload: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn hype_train_moments_and_levels() {
+        let mut level = 0;
+        let event = |kind: &str, e: Value| j!({"subscription":{"type":kind},"event":e});
+        let start = hype_moment(&event("channel.hype_train.begin", j!({"level":1,"total":300,"top_contributions":[{"user_name":"Ann"}]})), &mut level).unwrap();
+        assert_eq!((start.stage, start.level, start.who.as_str(), start.text.as_str()), (HypeStage::Start, 1, "Ann", "Hype Train started! Level 1"));
+        assert_eq!(hype_moment(&event("channel.hype_train.progress", j!({"level":1,"progress":500,"goal":1800})), &mut level).unwrap().stage, HypeStage::Progress);
+        let up = hype_moment(&event("channel.hype_train.progress", j!({"level":2,"last_contribution":{"user_name":"Bo"}})), &mut level).unwrap();
+        assert_eq!((up.stage, up.who.as_str()), (HypeStage::LevelUp, "Bo"));
+        let end = hype_moment(&event("channel.hype_train.end", j!({"level":3,"total":9000,"type":"golden_kappa"})), &mut level).unwrap();
+        assert_eq!((end.stage, end.text.as_str()), (HypeStage::End, "Golden Kappa Train ended at level 3 · 9000 points"));
+        assert_eq!(level, 0);
+        assert!(hype_moment(&event("channel.raid", j!({})), &mut level).is_none());
+    }
+    #[test]
+    fn shared_chat_lists_the_other_channels() {
+        let begin = j!({"subscription":{"type":"channel.shared_chat.begin"},"event":{"participants":[
+            {"broadcaster_user_id":"1","broadcaster_user_login":"me","broadcaster_user_name":"Me"},
+            {"broadcaster_user_id":"2","broadcaster_user_login":"alice","broadcaster_user_name":"Alice"}]}});
+        assert_eq!(shared_chat(&begin, "1").unwrap(), vec![("alice".to_owned(), "Alice".to_owned())]);
+        assert_eq!(shared_chat(&j!({"subscription":{"type":"channel.shared_chat.end"},"event":{}}), "1").unwrap(), vec![]);
+        assert!(shared_chat(&j!({"subscription":{"type":"channel.raid"}}), "1").is_none());
+    }
     #[test]
     fn raid_and_redemption_are_not_chat_text() {
         assert_eq!(describe(&j!({"subscription":{"type":"channel.raid"},"event":{"from_broadcaster_user_name":"Rose","viewers":25}})).unwrap(),"Rose raided with 25 viewers");

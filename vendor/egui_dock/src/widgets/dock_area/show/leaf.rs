@@ -166,9 +166,8 @@ impl<Tab> DockArea<'_, Tab> {
             tabs_ui.set_clip_rect(clip_rect);
 
             // Desired size for tabs in "expanded" mode.
-            let prefered_width = style
-                .tab_bar
-                .fill_tab_bar
+            let lone_title = style.tab_bar.lone_tab_title && leaf.tabs.len() == 1;
+            let prefered_width = (style.tab_bar.fill_tab_bar || lone_title)
                 .then_some(available_width / (leaf.tabs.len() as f32));
 
             let tab_hovered = self.tabs(
@@ -562,11 +561,11 @@ impl<Tab> DockArea<'_, Tab> {
 
         ui.painter().line_segment(
             [plus_rect.center_top(), plus_rect.center_bottom()],
-            Stroke::new(1.0, color),
+            Stroke::new(1.0_f32, color),
         );
         ui.painter().line_segment(
             [plus_rect.right_center(), plus_rect.left_center()],
-            Stroke::new(1.0, color),
+            Stroke::new(1.0_f32, color),
         );
 
         // Draw button left border.
@@ -711,11 +710,11 @@ impl<Tab> DockArea<'_, Tab> {
 
             ui.painter().line_segment(
                 [close_all_rect.left_top(), close_all_rect.right_bottom()],
-                Stroke::new(1.0, stroke_color),
+                Stroke::new(1.0_f32, stroke_color),
             );
             ui.painter().line_segment(
                 [close_all_rect.right_top(), close_all_rect.left_bottom()],
-                Stroke::new(1.0, stroke_color),
+                Stroke::new(1.0_f32, stroke_color),
             );
         }
 
@@ -877,15 +876,15 @@ impl<Tab> DockArea<'_, Tab> {
                     .center_top()
                     .lerp(close_all_rect.left_top(), 0.5),
             ],
-            Stroke::new(1.0, stroke_color),
+            Stroke::new(1.0_f32, stroke_color),
         ));
         ui.painter().line_segment(
             [close_all_rect.center_top(), close_all_rect.right_center()],
-            Stroke::new(1.0, stroke_color),
+            Stroke::new(1.0_f32, stroke_color),
         );
         ui.painter().line_segment(
             [close_all_rect.center(), close_all_rect.right_top()],
-            Stroke::new(1.0, stroke_color),
+            Stroke::new(1.0_f32, stroke_color),
         );
     }
 
@@ -1039,7 +1038,7 @@ impl<Tab> DockArea<'_, Tab> {
         ui.painter().rect_stroke(
             stroke_rect,
             tab_style.corner_radius,
-            Stroke::new(1.0, tab_style.outline_color),
+            Stroke::new(1.0_f32, tab_style.outline_color),
             StrokeKind::Inside,
         );
         if !is_being_dragged {
@@ -1050,16 +1049,21 @@ impl<Tab> DockArea<'_, Tab> {
                     stroke_rect.max.x - f32::max(tab_style.corner_radius.se.into(), 1.5),
                 ),
                 stroke_rect.bottom(),
-                Stroke::new(2.0, tab_style.bg_fill),
+                Stroke::new(2.0_f32, tab_style.bg_fill),
             );
         }
 
         let mut text_rect = tab_rect;
         text_rect.set_width(text_rect.width() - close_button_size);
-        let text_pos = {
-            let pos = Align2::CENTER_CENTER.pos_in_rect(&text_rect.shrink2(vec2(x_spacing, 0.0)));
-            pos - galley.size() / 2.0
+        // A lone tab drawn as a title bar keeps its name on the left.
+        let align = if style.tab_bar.lone_tab_title && !style.tab_bar.fill_tab_bar && preferred_width.is_some() {
+            Align2::LEFT_CENTER
+        } else {
+            Align2::CENTER_CENTER
         };
+        let text_pos = align
+            .align_size_within_rect(galley.size(), text_rect.shrink2(vec2(x_spacing, 0.0)))
+            .min;
 
         ui.painter()
             .add(TextShape::new(text_pos, galley, tab_style.text_color));
@@ -1096,11 +1100,11 @@ impl<Tab> DockArea<'_, Tab> {
             rect_set_size_centered(&mut x_rect, Vec2::splat(Style::TAB_CLOSE_X_SIZE));
             ui.painter().line_segment(
                 [x_rect.left_top(), x_rect.right_bottom()],
-                Stroke::new(1.0, color),
+                Stroke::new(1.0_f32, color),
             );
             ui.painter().line_segment(
                 [x_rect.right_top(), x_rect.left_bottom()],
-                Stroke::new(1.0, color),
+                Stroke::new(1.0_f32, color),
             );
 
             close_response
@@ -1254,7 +1258,7 @@ impl<Tab> DockArea<'_, Tab> {
         ctx.layer_painter(layer_id).rect_stroke(
             body_rect.union(title_rect),
             tabs_style.tab_body.corner_radius,
-            Stroke::new(2.0, ctx.style().visuals.selection.stroke.color),
+            Stroke::new(2.0_f32, ctx.style().visuals.selection.stroke.color),
             StrokeKind::Outside,
         );
         if open {
@@ -1360,7 +1364,7 @@ impl<Tab> DockArea<'_, Tab> {
                     ui.painter().rect_stroke(
                         hold,
                         6.0,
-                        Stroke::new(1.0, visuals.selection.stroke.color.gamma_multiply(0.6)),
+                        Stroke::new(1.0_f32, visuals.selection.stroke.color.gamma_multiply(0.6)),
                         StrokeKind::Inside,
                     );
                     ui.painter().text(

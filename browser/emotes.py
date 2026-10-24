@@ -2,7 +2,7 @@
 import base64, threading
 from collections import OrderedDict
 from urllib.parse import urlsplit
-from PySide6.QtCore import QObject, Signal, QByteArray, QBuffer, QIODevice, QTimer, Qt
+from PySide6.QtCore import QObject, Signal, QByteArray, QBuffer, QIODevice, Qt
 from PySide6.QtGui import QImageReader
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 from PySide6.QtCore import QUrl

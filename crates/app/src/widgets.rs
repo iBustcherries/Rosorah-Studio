@@ -1390,7 +1390,7 @@ fn music_font_row(ui: &mut eframe::egui::Ui, label: &str, font: &mut String, siz
         .on_hover_text("Drag or type a size; 0 sizes it automatically");
     });
     if !font.is_empty() && crate::fonts::load(font).is_none() {
-        ui.colored_label(egui::Color32::LIGHT_RED, "This font can't be loaded; the widget font is used.");
+        ui.colored_label(crate::appearance::current().error, "This font can't be loaded; the widget font is used.");
     }
 }
 /// Searchable list of every bundled and installed font, each name drawn in its own font when possible.
@@ -1416,7 +1416,7 @@ fn font_picker(ui: &mut eframe::egui::Ui, font: &mut String) {
     ui.data_mut(|d| d.insert_temp(search_id, search));
     ui.small(format!("{} fonts · bundled with Rosorah and installed on this computer", crate::fonts::installed().len() + 1));
     if !font.is_empty() && crate::fonts::load(font).is_none() {
-        ui.colored_label(egui::Color32::LIGHT_RED, "This font can't be loaded; Roboto is used.");
+        ui.colored_label(crate::appearance::current().error, "This font can't be loaded; Roboto is used.");
     }
 }
 fn text_controls(ui: &mut eframe::egui::Ui, s: &mut Settings) {
@@ -1705,7 +1705,7 @@ pub fn controls(ui: &mut eframe::egui::Ui, s: &mut Settings) {
             match crate::sports::configure(&token) {
                 Ok(()) => token.clear(),
                 Err(e) => {
-                    ui.colored_label(egui::Color32::LIGHT_RED, e.to_string());
+                    ui.colored_label(crate::appearance::current().error, e.to_string());
                 }
             }
         }

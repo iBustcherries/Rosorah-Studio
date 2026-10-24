@@ -310,18 +310,26 @@ impl Backend for ScreenBackend {
         );
         output.connecting();
         let mut capture = Duplication::open(&self.monitor_id)?;
-        let interval = Duration::from_secs_f64(1.0 / options.fps as f64);
+        // AcquireNextFrame waits for the desktop to change, so frames are taken as they're
+        // drawn; at most twice the capture rate keeps the copy work bounded on fast monitors.
+        let gap = Duration::from_secs_f64(0.5 / options.fps as f64);
+        let mut last = Instant::now() - gap;
         while !*cancel.borrow() && cancel.has_changed().is_ok() {
-            let started = Instant::now();
+            if let Some(wait) = gap.checked_sub(last.elapsed()) {
+                std::thread::sleep(wait);
+            }
             match capture.next(options.resolution, &cancel) {
-                Ok(Some(frame)) => output.publish_with_detail(
+                Ok(Some(frame)) => {
+                    last = Instant::now();
+                    output.publish_with_detail(
                     frame,
                     Some(&format!(
                         "Live · Windows DXGI · readback {:.1} ms · conversion {:.1} ms · desktop-to-publish {}",
                         capture.readback_ms, capture.conversion_ms,
                         desktop_age_ms(capture.desktop_present).map(|v| format!("{v:.1} ms")).unwrap_or_else(|| "unavailable".into())
                     )),
-                )?,
+                    )?
+                }
                 Ok(None) => {}
                 Err(e)
                     if e.downcast_ref::<windows::core::Error>().is_some_and(|e| {
@@ -348,10 +356,6 @@ impl Backend for ScreenBackend {
                     };
                 }
                 Err(e) => bail!("Windows capture failed: {e:#}"),
-            }
-            // No unbounded frame queue or polling faster than the requested capture rate.
-            if let Some(wait) = interval.checked_sub(started.elapsed()) {
-                std::thread::sleep(wait);
             }
         }
         Ok(())

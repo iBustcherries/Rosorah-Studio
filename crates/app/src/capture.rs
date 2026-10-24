@@ -800,6 +800,8 @@ pub(crate) fn pipeline(source: gst::Element) -> Result<(gst::Pipeline, gst_app::
 }
 /// `ROSORAH_CAPTURE_TRACE=1`: once a second, prints how many frames PipeWire delivered and any
 /// gap over 100 ms, with the gap in PipeWire's own arrival stamps, to tell its stalls from ours.
+// Linux capture only (PipeWire, X11 and the game-capture layer).
+#[cfg(not(windows))]
 #[derive(Default)]
 pub(crate) struct Trace {
     second: Option<std::time::Instant>,
@@ -811,6 +813,8 @@ pub(crate) struct Trace {
     longest_gap: Duration,
     last: Option<(std::time::Instant, Option<gst::ClockTime>)>,
 }
+// Linux capture only (PipeWire, X11 and the game-capture layer).
+#[cfg(not(windows))]
 impl Trace {
     pub(crate) fn frame(&mut self, pts: Option<gst::ClockTime>, work: Duration, sample: Option<u64>) {
         let now = std::time::Instant::now();
@@ -836,10 +840,14 @@ impl Trace {
         }
     }
 }
+// Linux capture only (PipeWire, X11 and the game-capture layer).
+#[cfg(not(windows))]
 /// A cheap fingerprint of a picture for the trace: every 4099th byte.
 pub(crate) fn fingerprint(rgba: &[u8]) -> u64 {
     rgba.iter().step_by(4099).fold(0xcbf29ce484222325, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x100000001b3))
 }
+// Linux capture only (PipeWire, X11 and the game-capture layer).
+#[cfg(not(windows))]
 /// Wakes the capture loop as soon as the sink has a new frame.
 fn frame_ready(sink: &gst_app::AppSink) -> std::sync::Arc<tokio::sync::Notify> {
     let ready = std::sync::Arc::new(tokio::sync::Notify::new());

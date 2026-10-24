@@ -9,6 +9,51 @@ pub struct Facts {
     pub count: u64,
     pub moderator: bool,
     pub subscriber: bool,
+    /// Hype Trains: the level reached, and which moment of the train this is.
+    pub level: u64,
+    pub stage: HypeStage,
+}
+/// The moments of a Hype Train an alert can play on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HypeStage {
+    #[default]
+    Start,
+    LevelUp,
+    /// Every contribution that moves the train forward without a new level.
+    Progress,
+    End,
+}
+/// Which Hype Train moments a rule plays on. By default: start, each new level and the end, but
+/// not every contribution (that would play many times a minute).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HypeStages {
+    pub start: bool,
+    pub level_up: bool,
+    pub progress: bool,
+    pub end: bool,
+}
+impl Default for HypeStages {
+    fn default() -> Self {
+        Self { start: true, level_up: true, progress: false, end: true }
+    }
+}
+impl HypeStages {
+    pub fn allows(&self, stage: HypeStage) -> bool {
+        match stage {
+            HypeStage::Start => self.start,
+            HypeStage::LevelUp => self.level_up,
+            HypeStage::Progress => self.progress,
+            HypeStage::End => self.end,
+        }
+    }
+    /// The first moment this rule plays on, for tests.
+    pub fn first(&self) -> HypeStage {
+        [HypeStage::Start, HypeStage::LevelUp, HypeStage::Progress, HypeStage::End]
+            .into_iter()
+            .find(|s| self.allows(*s))
+            .unwrap_or_default()
+    }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Permission {
@@ -36,9 +81,14 @@ pub struct Options {
     pub timer_messages: u32,
     /// Timers: also run while not streaming.
     pub timer_offline: bool,
+    /// Hype Trains: the moments this rule plays on.
+    pub hype: HypeStages,
 }
 impl Options {
     pub fn reason(&self, e: &Event) -> Option<&'static str> {
+        if e.kind == crate::EventKind::HypeTrain && !self.hype.allows(e.facts.stage) {
+            return Some("This alert is off for this part of the Hype Train");
+        }
         if self.min_amount > e.facts.amount {
             return Some("Amount below minimum or unavailable");
         }
@@ -71,6 +121,7 @@ pub fn expand(text: &str, e: &Event) -> String {
         format!("{}.{:02}", e.facts.amount / 100, e.facts.amount % 100)
     };
     let count = e.facts.count.to_string();
+    let level = e.facts.level.to_string();
     let mut output = String::new();
     let mut rest = text;
     while let Some(start) = rest.find('{') {
@@ -94,6 +145,7 @@ pub fn expand(text: &str, e: &Event) -> String {
                 }
             }
             "{count}" | "{bits}" | "{viewers}" => count.as_str(),
+            "{level}" => level.as_str(),
             "{reward}" => e.reward_id.as_str(),
             _ => key,
         };
@@ -219,6 +271,31 @@ mod tests {
         );
         e.facts.amount_hidden = true;
         assert_eq!(expand("{amount}{currency}", &e), "");
+    }
+    #[test]
+    fn hype_trains_play_on_the_chosen_moments() {
+        let mut r = Project::default().rules.remove(0);
+        (r.event, r.platform, r.cooldown_ms) = (EventKind::HypeTrain, None, 0);
+        let mut engine = AlertEngine::default();
+        let train = |id: &str, stage, level| Event {
+            facts: Facts { count: 1200, level, stage, ..Default::default() },
+            reward_id: String::new(),
+            id: id.into(),
+            platform: Platform::Twitch,
+            kind: EventKind::HypeTrain,
+            author: "Ann".into(),
+            text: String::new(),
+            at_ms: 1000,
+        };
+        assert!(!engine.dispatch(&[r.clone()], &train("1", HypeStage::Start, 1)).is_empty());
+        assert!(engine.dispatch(&[r.clone()], &train("2", HypeStage::Progress, 1)).is_empty(), "contributions are off by default");
+        assert!(!engine.dispatch(&[r.clone()], &train("3", HypeStage::LevelUp, 2)).is_empty());
+        r.options.hype.end = false;
+        assert!(engine.dispatch(&[r.clone()], &train("4", HypeStage::End, 3)).is_empty());
+        assert_eq!(expand("Level {level} · {count} points · {user}", &train("5", HypeStage::End, 3)), "Level 3 · 1200 points · Ann");
+        // Rules saved before stages existed get the defaults.
+        let old: Options = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.hype, HypeStages::default());
     }
     #[test]
     fn legacy_rule_options_and_video_defaults() {

@@ -42,16 +42,37 @@ pub struct BrowserChat {
     youtube: String,
     kick: String,
     tiktok: String,
+    /// Co-streamers' Twitch channels whose chat pages are read alongside yours.
+    costream: Vec<String>,
+    /// Your Twitch login while invites are watched for on your Stream Manager page.
+    dashboard: String,
+    /// A co-stream invite showing on your Stream Manager, offered under Chat.
+    pub invite: Option<Invite>,
+    /// The Stream Manager page wants you signed in to Twitch in the chat browser.
+    pub dashboard_signin: bool,
     /// Last page-structure report requested from the chat browser (no message text).
     pub diagnostic: Option<String>,
     page_results: Vec<Value>,
-    last_sources: Option<(String, String, String, String)>,
+    last_sources: Option<Value>,
     retry: Retry,
     started: Option<Instant>,
     /// Emotes listed on the signed-in YouTube chat page, for the emote picker.
     pub youtube_emotes: Vec<crate::chat_render::Emote>,
     /// Picker pictures asked of the chat browser, and when.
     image_requests: std::collections::HashMap<String, Instant>,
+}
+/// A co-stream invite read from the Stream Manager page.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Invite {
+    /// What the invite says, as Twitch shows it ("Alice invited you to Stream Together").
+    pub text: String,
+    pub can_decline: bool,
+    /// Twitch's pop-up only has Close, which puts the invite off rather than declining it.
+    pub close_only: bool,
+    /// Twitch's Stream Together page for this invite, where accepting takes you.
+    pub link: String,
+    /// When Twitch's pop-up went away unanswered; it can then only be answered on Twitch.
+    pub gone: Option<std::time::Instant>,
 }
 #[derive(Default)]
 struct Retry {
@@ -291,6 +312,37 @@ impl BrowserChat {
         };
         self.sources();
     }
+    /// Co-streaming on Twitch: the channels typed in Settings, except those already in Twitch's
+    /// shared chat with you (your own chat page shows theirs then), and whether invites are watched for.
+    pub fn set_costream(&mut self, typed: &str, shared: &[(String, String)], invites: bool) {
+        let mut channels: Vec<String> = Vec::new();
+        for name in typed.split(|c: char| c == ',' || c.is_whitespace()) {
+            let name = name.trim().trim_start_matches('@').to_lowercase();
+            if valid_login(&name) && name != self.twitch.to_lowercase() && !shared.iter().any(|(login, _)| *login == name) && !channels.contains(&name) {
+                channels.push(name);
+            }
+        }
+        channels.truncate(6);
+        let dashboard = if invites { self.twitch.clone() } else { String::new() };
+        if channels != self.costream || dashboard != self.dashboard {
+            if dashboard.is_empty() {
+                self.invite = None;
+                self.dashboard_signin = false;
+            }
+            self.costream = channels;
+            self.dashboard = dashboard;
+            self.sources();
+        }
+    }
+    /// Presses Accept or Decline on the invite, on the Stream Manager page.
+    pub fn answer_invite(&mut self, accept: bool) {
+        self.send(json!({"type":"invite_action","action":if accept {"accept"} else {"decline"}}));
+    }
+    /// Takes the card away without answering, once Twitch's pop-up has gone.
+    pub fn forget_invite(&mut self) {
+        self.invite = None;
+        self.send(json!({"type":"invite_action","action":"forget"}));
+    }
     /// TikTok has no sign-in here: chat is read from this username's LIVE page.
     pub fn set_tiktok(&mut self, username: &str) {
         let name = username.trim().trim_start_matches('@');
@@ -388,17 +440,17 @@ impl BrowserChat {
         }
     }
     fn sources(&mut self) {
-        let next = (
-            self.twitch.trim().to_string(),
-            self.youtube.trim().to_string(),
-            self.kick.trim().to_string(),
-            self.tiktok.trim().to_string(),
-        );
+        let mut next = json!({"type":"sources","twitch":self.twitch.trim(),"youtube":self.youtube.trim(),"kick":self.kick.trim(),"tiktok":self.tiktok.trim()});
+        // Only sent when used, so the message stays the same for everyone else.
+        if !self.costream.is_empty() {
+            next["costream"] = json!(self.costream);
+        }
+        if !self.dashboard.is_empty() {
+            next["dashboard"] = json!(self.dashboard);
+        }
         if self.last_sources.as_ref() != Some(&next)
             && let Some(tx) = &self.tx
-            && tx
-                .try_send(json!({"type":"sources","twitch":next.0,"youtube":next.1,"kick":next.2,"tiktok":next.3}))
-                .is_ok()
+            && tx.try_send(next.clone()).is_ok()
         {
             self.last_sources = Some(next);
         }
@@ -533,6 +585,20 @@ impl BrowserChat {
                             })
                             .collect();
                     }
+                    Some("invite") => {
+                        self.dashboard_signin = v["signin"].as_bool().unwrap_or(false);
+                        let text: String = v["text"].as_str().unwrap_or("").split_whitespace().collect::<Vec<_>>().join(" ").chars().take(300).collect();
+                        let gone = v["gone"].as_bool().unwrap_or(false);
+                        let was = self.invite.take().filter(|old| old.text == text);
+                        self.invite = (!text.is_empty() && !self.dashboard.is_empty()).then(|| Invite {
+                            // Gone keeps the buttons it had, and the time it went.
+                            can_decline: if gone { was.as_ref().is_some_and(|o| o.can_decline) } else { v["can_decline"].as_bool().unwrap_or(false) },
+                            close_only: if gone { was.as_ref().is_some_and(|o| o.close_only) } else { v["close_only"].as_bool().unwrap_or(false) },
+                            link: v["link"].as_str().filter(|l| l.starts_with("https://www.twitch.tv/popout/")).unwrap_or("").to_owned(),
+                            gone: gone.then(|| was.and_then(|o| o.gone).unwrap_or_else(std::time::Instant::now)),
+                            text,
+                        });
+                    }
                     Some("status") => {
                         self.status = v["text"]
                             .as_str()
@@ -651,6 +717,11 @@ impl BrowserChat {
                                         .filter(|h| matches!(*h, "paid" | "first" | "highlight"))
                                         .unwrap_or("")
                                         .into(),
+                                    channel: v["channel"]
+                                        .as_str()
+                                        .map(|c| c.trim().chars().filter(|c| !c.is_control()).take(40).collect::<String>())
+                                        .filter(|c| platform == Platform::Twitch && !c.is_empty() && !c.eq_ignore_ascii_case(&self.twitch))
+                                        .unwrap_or_default(),
                                 },
                                 platform,
                                 id,
@@ -666,6 +737,10 @@ impl BrowserChat {
             }
         }
     }
+}
+/// A Twitch login: 1-25 letters, digits or underscores.
+fn valid_login(name: &str) -> bool {
+    (1..=25).contains(&name.len()) && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 /// A name colour from a chat page: "#rrggbb".
 fn valid_color(c: &str) -> bool {
@@ -859,6 +934,32 @@ for line in sys.stdin:
             rx.try_recv().unwrap(),
             json!({"type":"sources","twitch":"","youtube":"","kick":"","tiktok":""})
         );
+    }
+
+    #[test]
+    fn costreamers_get_their_own_pages_unless_twitch_already_shares_their_chat() {
+        let (tx, rx) = mpsc::sync_channel(8);
+        let mut browser = BrowserChat::default();
+        browser.tx = Some(tx);
+        browser.twitch = "moe".into();
+        browser.set_costream("@Alice, bob  moe bad-name!", &[], false);
+        assert_eq!(rx.try_recv().unwrap()["costream"], json!(["alice", "bob"]));
+        browser.set_costream("alice bob", &[("alice".into(), "Alice".into())], true);
+        let next = rx.try_recv().unwrap();
+        assert_eq!((next["costream"].clone(), next["dashboard"].clone()), (json!(["bob"]), json!("moe")));
+        browser.set_costream("alice bob", &[("alice".into(), "Alice".into())], true);
+        assert!(rx.try_recv().is_err(), "unchanged co-streams must not reload pages");
+        let mut feed = ChatFeed::new(10);
+        let (events, incoming) = mpsc::sync_channel(8);
+        browser.rx = Some(incoming);
+        events.send(json!({"type":"invite","signin":false,"text":"Alice  invited you\nto Stream Together","can_decline":true})).unwrap();
+        events.send(json!({"type":"message","platform":"Twitch","id":"1","author":"Ann","text":"hi","channel":"bob"})).unwrap();
+        browser.receive(&mut feed);
+        assert_eq!(browser.invite.as_ref().unwrap().text, "Alice invited you to Stream Together");
+        assert_eq!(feed.messages().next().unwrap().metadata.channel, "bob");
+        events.send(json!({"type":"invite","signin":false,"text":""})).unwrap();
+        browser.receive(&mut feed);
+        assert!(browser.invite.is_none());
     }
 
     #[test]

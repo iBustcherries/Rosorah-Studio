@@ -19,6 +19,17 @@ pub struct Palette {
     /// Chat message bubbles and other inset blocks.
     pub card: Color32,
     pub light: bool,
+    /// Connected/ready, waiting, and failed states.
+    pub good: Color32,
+    pub warning: Color32,
+    pub error: Color32,
+    /// LIVE, REC and the program outline.
+    pub live: Color32,
+    /// A theme's accent and the text on it; None uses the accent chosen in Settings.
+    pub accent: Option<Color32>,
+    pub on_accent: Option<Color32>,
+    pub panel_corners: u8,
+    pub button_corners: u8,
 }
 impl Palette {
     pub fn for_theme(theme: ThemeMode) -> Self {
@@ -33,6 +44,14 @@ impl Palette {
                 muted: rgb(188, 182, 201),
                 card: rgb(28, 34, 50),
                 light: false,
+                good: rgb(110, 210, 140),
+                warning: rgb(230, 190, 90),
+                error: rgb(255, 128, 128),
+                live: rgb(255, 92, 92),
+                accent: None,
+                on_accent: None,
+                panel_corners: 16,
+                button_corners: 20,
             },
             ThemeMode::Light => Self {
                 bg: rgb(232, 231, 238),
@@ -43,6 +62,14 @@ impl Palette {
                 muted: rgb(92, 86, 110),
                 card: rgb(240, 238, 246),
                 light: true,
+                good: rgb(26, 140, 70),
+                warning: rgb(160, 110, 0),
+                error: rgb(200, 40, 40),
+                live: rgb(220, 40, 40),
+                accent: None,
+                on_accent: None,
+                panel_corners: 16,
+                button_corners: 20,
             },
         }
     }
@@ -80,9 +107,13 @@ fn tint(a: &Appearance, palette: &Palette) -> Color32 {
     };
     with_alpha(color, alpha)
 }
+/// The theme's own colours, before see-through styles: a custom theme's, or Dark/Light.
+pub fn solid(a: &Appearance, theme: Option<&crate::themes::Theme>) -> Palette {
+    theme.map_or_else(|| Palette::for_theme(a.theme), |t| t.palette())
+}
 /// The palette with see-through styles applied.
-pub fn effective(a: &Appearance) -> Palette {
-    let mut p = Palette::for_theme(a.theme);
+pub fn effective(a: &Appearance, theme: Option<&crate::themes::Theme>) -> Palette {
+    let mut p = solid(a, theme);
     if see_through(a) {
         let t = tint(a, &p);
         p.bg = Color32::TRANSPARENT;
@@ -92,9 +123,9 @@ pub fn effective(a: &Appearance) -> Palette {
     p
 }
 /// Builds the egui style for `a`, keeping fonts and spacing from `base`.
-pub fn style(base: &egui::Style, a: &Appearance) -> egui::Style {
-    let p = effective(a);
-    let solid = Palette::for_theme(a.theme);
+pub fn style(base: &egui::Style, a: &Appearance, theme: Option<&crate::themes::Theme>) -> egui::Style {
+    let p = effective(a, theme);
+    let solid = solid(a, theme);
     let mut s = base.clone();
     let mut v = if p.light { egui::Visuals::light() } else { egui::Visuals::dark() };
     v.panel_fill = if see_through(a) { p.panel } else { p.bg };
@@ -103,14 +134,16 @@ pub fn style(base: &egui::Style, a: &Appearance) -> egui::Style {
     v.extreme_bg_color = if p.light { Color32::WHITE } else { solid.bg };
     v.faint_bg_color = with_alpha(solid.card, if see_through(a) { 0.55 } else { 1. });
     v.override_text_color = None;
-    v.window_corner_radius = egui::CornerRadius::same(16);
+    v.window_corner_radius = egui::CornerRadius::same(p.panel_corners);
+    v.error_fg_color = p.error;
+    v.warn_fg_color = p.warning;
     v.window_stroke = egui::Stroke::NONE;
     for widget in [&mut v.widgets.inactive, &mut v.widgets.hovered, &mut v.widgets.active] {
         widget.bg_fill = p.widget;
         widget.weak_bg_fill = p.widget;
         widget.bg_stroke = egui::Stroke::NONE;
         widget.fg_stroke = egui::Stroke::new(1.0_f32, p.text);
-        widget.corner_radius = egui::CornerRadius::same(20);
+        widget.corner_radius = egui::CornerRadius::same(p.button_corners);
     }
     v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, p.text);
     v.widgets.hovered.bg_fill = p.widget_hover;
@@ -188,7 +221,14 @@ type Loaded = (egui::ColorImage, Arc<image::RgbaImage>);
 /// Owns the backdrop textures and keeps the style in sync with the settings.
 #[derive(Default)]
 pub struct Renderer {
-    applied: Option<Appearance>,
+    applied: Option<(Appearance, Option<crate::themes::Theme>)>,
+    /// The chosen custom theme: its id, the file's last change, and the theme (None if unreadable).
+    theme: Option<(String, Option<std::time::SystemTime>, Option<crate::themes::Theme>)>,
+    theme_checked: Option<std::time::Instant>,
+    /// Why the chosen theme can't be used (shown in Settings); the last good version stays on.
+    pub theme_error: String,
+    /// The themes folder's themes for Settings, re-read every few seconds while Settings shows them.
+    listed: Option<(std::time::Instant, Vec<(String, String, Option<crate::themes::Theme>)>)>,
     picture: Option<(String, TextureHandle, [usize; 2], Arc<image::RgbaImage>)>,
     loading: Option<(String, mpsc::Receiver<Result<Loaded, String>>)>,
     blur: Option<((String, PanelStyle, u8), TextureHandle)>,
@@ -203,17 +243,20 @@ impl Renderer {
     }
     /// Call once per frame before any panel is shown.
     pub fn frame(&mut self, ctx: &egui::Context, a: &Appearance) {
-        let palette = effective(a);
+        self.watch_theme(a);
+        let theme = self.theme().cloned();
+        let theme = theme.as_ref();
+        let palette = effective(a, theme);
         CURRENT.with(|c| c.set(palette));
-        if self.applied.as_ref() != Some(a) {
-            ctx.set_style(style(&ctx.style(), a));
-            self.applied = Some(a.clone());
+        if self.applied.as_ref().is_none_or(|(applied, t)| applied != a || t.as_ref() != theme) {
+            ctx.set_style(style(&ctx.style(), a, theme));
+            self.applied = Some((a.clone(), theme.cloned()));
         }
         self.load_picture(ctx, a);
         self.make_glass(ctx, a);
         let screen = ctx.content_rect();
         let painter = ctx.layer_painter(egui::LayerId::background());
-        let solid = Palette::for_theme(a.theme);
+        let solid = solid(a, theme);
         let base = match a.backdrop {
             Backdrop::Color => Color32::from_rgb(a.backdrop_color[0], a.backdrop_color[1], a.backdrop_color[2]),
             _ => solid.bg,
@@ -242,6 +285,60 @@ impl Renderer {
         if self.loading.is_some() || self.blurring.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
+    }
+    /// Every theme in the themes folder: (id, name, theme if readable).
+    pub fn themes(&mut self) -> Vec<(String, String, Option<crate::themes::Theme>)> {
+        if self.listed.as_ref().is_none_or(|(at, _)| at.elapsed() > std::time::Duration::from_secs(3)) {
+            let found = crate::themes::list()
+                .into_iter()
+                .map(|(id, path)| {
+                    let theme = crate::themes::Theme::read(&path).ok();
+                    let name = theme.as_ref().map_or_else(|| format!("{id} (has a mistake)"), |t| t.name.clone());
+                    (id, name, theme)
+                })
+                .collect();
+            self.listed = Some((std::time::Instant::now(), found));
+        }
+        self.listed.as_ref().map(|(_, l)| l.clone()).unwrap_or_default()
+    }
+    /// The custom theme in use, if one is chosen and could be read.
+    pub fn theme(&self) -> Option<&crate::themes::Theme> {
+        self.theme.as_ref().and_then(|(_, _, t)| t.as_ref())
+    }
+    /// Reads the chosen theme, and again whenever its file changes (checked once a second), so
+    /// a theme being edited updates as it's saved.
+    fn watch_theme(&mut self, a: &Appearance) {
+        if a.custom_theme.is_empty() {
+            self.theme = None;
+            self.theme_error.clear();
+            return;
+        }
+        let same = self.theme.as_ref().is_some_and(|(id, _, _)| *id == a.custom_theme);
+        if same && self.theme_checked.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(1)) {
+            return;
+        }
+        self.theme_checked = Some(std::time::Instant::now());
+        let Some(path) = crate::themes::path(&a.custom_theme) else {
+            self.theme = None;
+            self.theme_error = "That theme name isn't valid.".into();
+            return;
+        };
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if same && self.theme.as_ref().is_some_and(|(_, m, _)| *m == modified) {
+            return;
+        }
+        let last = if same { self.theme.take().and_then(|(_, _, t)| t) } else { None };
+        let theme = match crate::themes::Theme::read(&path) {
+            Ok(t) => {
+                self.theme_error.clear();
+                Some(t)
+            }
+            Err(e) => {
+                self.theme_error = e;
+                last
+            }
+        };
+        self.theme = Some((a.custom_theme.clone(), modified, theme));
     }
     fn load_picture(&mut self, ctx: &egui::Context, a: &Appearance) {
         let want = (a.backdrop == Backdrop::Picture && !a.backdrop_image.trim().is_empty()).then(|| a.backdrop_image.trim().to_owned());
@@ -364,19 +461,19 @@ mod tests {
     #[test]
     fn solid_and_light_palettes_and_see_through_tints() {
         let mut a = Appearance::default();
-        assert_eq!(effective(&a), Palette::for_theme(ThemeMode::Dark));
+        assert_eq!(effective(&a, None), Palette::for_theme(ThemeMode::Dark));
         a.theme = ThemeMode::Light;
-        let light = effective(&a);
+        let light = effective(&a, None);
         assert!(light.light && light.text.r() < 60 && light.bg.r() > 200);
         // Transparency needs something behind the panels.
         a.panels = PanelStyle::Frosted;
-        assert_eq!(effective(&a).panel.a(), 255);
+        assert_eq!(effective(&a, None).panel.a(), 255);
         a.backdrop = Backdrop::Color;
         a.transparency = 0.6;
-        let glass = effective(&a);
+        let glass = effective(&a, None);
         assert!(glass.panel.a() < 200 && glass.bg == Color32::TRANSPARENT);
         a.contrast_boost = true;
-        assert!(effective(&a).panel.a() > glass.panel.a());
+        assert!(effective(&a, None).panel.a() > glass.panel.a());
     }
     #[test]
     fn picture_fits_and_glass_blurs_by_clarity() {

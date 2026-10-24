@@ -184,7 +184,8 @@ impl Compositor {
         self.nv12.flights.len()
     }
 
-    /// Draws and converts one frame and waits for it (for tests and one-off pictures).
+    /// Draws and converts one frame and waits for it (for tests).
+    #[cfg(test)]
     pub fn render_nv12(&mut self, project: &Project, canvas: &Canvas, width: u32, height: u32, pictures: &[Nv12]) -> Result<Vec<Vec<u8>>> {
         let tag = u64::MAX;
         self.begin_nv12(project, canvas, width, height, pictures, tag)?;

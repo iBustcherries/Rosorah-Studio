@@ -181,6 +181,10 @@ pub struct TabBarStyle {
     /// Whether tab titles expand to fill the width of their tab bars.
     /// By `Default` it's `false`.
     pub fill_tab_bar: bool,
+
+    /// Whether a leaf with a single tab shows it as a title bar: as wide as the tab bar,
+    /// with its name on the left. By `Default` it's `false`.
+    pub lone_tab_title: bool,
 }
 
 /// Specifies the look and feel of an individual tab.
@@ -420,6 +424,7 @@ impl Default for TabBarStyle {
             corner_radius: CornerRadius::default(),
             hline_color: Color32::BLACK,
             fill_tab_bar: false,
+            lone_tab_title: false,
         }
     }
 }
@@ -491,7 +496,7 @@ impl Default for OverlayStyle {
 
             hovered_leaf_highlight: Default::default(),
             button_color: Color32::from_gray(140),
-            button_border_stroke: Stroke::new(1.0, Color32::from_gray(60)),
+            button_border_stroke: Stroke::new(1.0_f32, Color32::from_gray(60)),
             overlay_type: OverlayType::Widgets,
             feel: Default::default(),
         }

@@ -57,7 +57,7 @@ fi
 size="$(du -sk "$pkg" | cut -f1)"
 cat > "$pkg/DEBIAN/control" <<CONTROL
 Package: rosorah-studio
-Version: ${debversion}-1
+Version: ${debversion}-${DEB_REVISION:-1}
 Architecture: amd64
 Maintainer: iBustcherries <102161061+iBustcherries@users.noreply.github.com>
 Installed-Size: ${size}
@@ -81,6 +81,6 @@ if command -v gtk-update-icon-cache >/dev/null 2>&1; then
 fi
 POSTINST
 chmod 0755 "$pkg/DEBIAN/postinst"
-out="/dist/rosorah-studio_${debversion}-1_amd64.deb"
+out="/dist/rosorah-studio_${debversion}-${DEB_REVISION:-1}_amd64.deb"
 dpkg-deb --root-owner-group --build "$pkg" "$out" >/dev/null
 echo "Built $out"

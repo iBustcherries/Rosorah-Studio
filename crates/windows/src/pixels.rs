@@ -40,22 +40,23 @@ pub fn convert(
     let ow = ((rw as f64 * scale).round() as u32).max(1);
     let oh = ((rh as f64 * scale).round() as u32).max(1);
     let mut rgba = vec![0; ow as usize * oh as usize * 4];
-    if matches!(rotation, Rotation::Identity) && ow == width && oh == height {
+    let row_bytes = ow as usize * 4;
+    let fill_row: Box<dyn Fn(usize, &mut [u8]) + Sync> = if matches!(rotation, Rotation::Identity) && ow == width && oh == height {
         // The common unscaled path is a contiguous swizzle. Keep division,
         // rotation branches and coordinate calculations outside the pixel loop.
-        for (y, row) in rgba.chunks_exact_mut(ow as usize * 4).enumerate() {
+        Box::new(move |y, row: &mut [u8]| {
             let input = &bytes[y * pitch..y * pitch + row.len()];
             for (dst, src) in row.chunks_exact_mut(4).zip(input.chunks_exact(4)) {
                 dst.copy_from_slice(&[src[2], src[1], src[0], 255]);
             }
-        }
+        })
     } else {
         // Scaling/rotation still uses the exact original nearest-neighbour
         // mapping, but each horizontal coordinate is divided only once.
         let xs: Vec<usize> = (0..ow)
             .map(|x| (x as u64 * rw as u64 / ow as u64) as usize)
             .collect();
-        for (y, row) in rgba.chunks_exact_mut(ow as usize * 4).enumerate() {
+        Box::new(move |y, row: &mut [u8]| {
             let ry = (y as u64 * rh as u64 / oh as u64) as usize;
             let (start, step, reverse) = match rotation {
                 Rotation::Identity => (ry * pitch, 4, false),
@@ -76,8 +77,27 @@ pub fn convert(
                 };
                 dst.copy_from_slice(&[bytes[from + 2], bytes[from + 1], bytes[from], 255]);
             }
+        })
+    };
+    // Large frames are split across a few cores: on one core a 1440p conversion takes several
+    // milliseconds, which shows as preview delay.
+    let bands = if rgba.len() >= 4 << 20 {
+        std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, 4)
+    } else {
+        1
+    };
+    let band_rows = (oh as usize).div_ceil(bands);
+    std::thread::scope(|scope| {
+        for (band, chunk) in rgba.chunks_mut(band_rows * row_bytes).enumerate() {
+            let fill_row = &fill_row;
+            let mut work = move || {
+                for (i, row) in chunk.chunks_exact_mut(row_bytes).enumerate() {
+                    fill_row(band * band_rows + i, row);
+                }
+            };
+            if bands == 1 { work() } else { scope.spawn(work); }
         }
-    }
+    });
     Ok(Frame {
         width: ow,
         height: oh,

@@ -12,7 +12,7 @@ def put(kind,payload=b'',w=0,h=0):
 def main():
     config=json.loads(sys.stdin.readline())
     if urlsplit(config['url']).scheme not in ('https','http'):raise ValueError('Use an HTTP or HTTPS address')
-    from PySide6.QtCore import Qt,QTimer,QUrl,QObject,Signal,QPointF,QPoint,QEvent,QSize
+    from PySide6.QtCore import Qt,QTimer,QUrl,QObject,Signal,QPointF,QPoint,QEvent
     from PySide6.QtGui import QImage,QMouseEvent,QWheelEvent,QKeyEvent,QFocusEvent
     from PySide6.QtWidgets import QApplication
     from PySide6.QtWebEngineCore import QWebEnginePage,QWebEngineProfile,QWebEngineSettings

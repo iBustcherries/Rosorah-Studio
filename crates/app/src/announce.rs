@@ -1,5 +1,7 @@
 //! "I'm live" posts to Discord (a channel webhook), Bluesky (handle + app password) and Threads
 //! (an access token from the user's own Meta app), sent once per stream when it starts sending.
+//! X has no free posting API, so its post opens ready to send in the browser, with the picture
+//! copied for pasting.
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -13,6 +15,7 @@ pub const DEFAULT_MESSAGE: &str = "🔴 I'm live! {title}\n{links}";
 pub const BLUESKY_LIMIT: usize = 300;
 const DISCORD_LIMIT: usize = 2000;
 pub const THREADS_LIMIT: usize = 500;
+pub const X_LIMIT: usize = 280;
 const THREADS_API: &str = "https://graph.threads.net";
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -36,6 +39,8 @@ pub struct Settings {
     pub threads_username: String,
     /// An optional picture (PNG or JPEG) posted with the announcement.
     pub image: String,
+    /// Open the post on X in the browser (no account details needed).
+    pub x: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -51,6 +56,7 @@ impl Default for Settings {
             threads_expires: 0,
             threads_username: String::new(),
             image: String::new(),
+            x: false,
         }
     }
 }
@@ -63,6 +69,9 @@ impl Settings {
     }
     pub fn threads_ready(&self) -> bool {
         self.threads && !self.threads_token.trim().is_empty()
+    }
+    pub fn x_ready(&self) -> bool {
+        self.x
     }
 }
 /// Bluesky refuses images over about 1 MB; Discord allows far more, so one size suits both.
@@ -319,6 +328,54 @@ fn chrono_now() -> String {
     now.and_then(|d| d.format("%Y-%m-%dT%H:%M:%S.000Z").ok()).map(|d| d.to_string()).unwrap_or_else(|| "1970-01-01T00:00:00Z".into())
 }
 
+/// The length as X counts it: every link counts as 23 characters, however long it is.
+pub fn x_length(text: &str) -> usize {
+    text.split_inclusive(char::is_whitespace)
+        .map(|word| {
+            let bare = word.trim_end();
+            if bare.starts_with("http://") || bare.starts_with("https://") { 23 + word.len() - bare.len() } else { word.chars().count() }
+        })
+        .sum()
+}
+/// X's own "share a post" page, with the message filled in.
+pub fn x_intent(text: &str) -> String {
+    let mut url = "https://x.com/intent/post?text=".to_owned();
+    for byte in text.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => url.push(byte as char),
+            _ => url.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    url
+}
+/// Puts the announcement picture on the clipboard, so it can be pasted into the post on X.
+/// The clipboard is kept for the life of the app: on Linux, the picture is only there while it is.
+fn copy_picture(path: &str) -> Result<()> {
+    static CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
+    let picture = image::open(path).context("That image couldn't be opened")?.thumbnail(1600, 1600).to_rgba8();
+    let mut clipboard = CLIPBOARD.lock().unwrap();
+    if clipboard.is_none() {
+        *clipboard = Some(arboard::Clipboard::new().context("The clipboard isn't available")?);
+    }
+    let data = arboard::ImageData { width: picture.width() as usize, height: picture.height() as usize, bytes: picture.into_raw().into() };
+    clipboard.as_mut().unwrap().set_image(data).context("The picture couldn't be copied")?;
+    Ok(())
+}
+fn open_x(text: &str, image: &str) -> String {
+    let picture = if image.trim().is_empty() {
+        None
+    } else {
+        Some(copy_picture(image))
+    };
+    if let Err(e) = crate::desktop::open(x_intent(text)) {
+        return format!("Couldn't open X in your browser: {e}");
+    }
+    match picture {
+        None => "Your post on X is open in your browser: press Post.".to_owned(),
+        Some(Ok(())) => "Your post on X is open in your browser. The picture is copied: press Ctrl+V in the post, then Post.".to_owned(),
+        Some(Err(e)) => format!("Your post on X is open in your browser, without the picture ({e:#}). Press Post."),
+    }
+}
 /// Sends announcements off the UI thread; results are collected for the studio to show.
 #[derive(Default)]
 pub struct Announcer {
@@ -326,8 +383,8 @@ pub struct Announcer {
     threads: Arc<Mutex<Option<ThreadsAccount>>>,
 }
 impl Announcer {
-    /// Posts to the places switched on in `which` ([Discord, Bluesky, Threads]).
-    pub fn send(&self, settings: &Settings, stream: Stream, which: [bool; 3], ctx: &eframe::egui::Context) {
+    /// Posts to the places switched on in `which` ([Discord, Bluesky, Threads, X]).
+    pub fn send(&self, settings: &Settings, stream: Stream, which: [bool; 4], ctx: &eframe::egui::Context) {
         let (settings, results, threads, ctx) = (settings.clone(), self.results.clone(), self.threads.clone(), ctx.clone());
         std::thread::spawn(move || {
             let text = fill(&settings.message, &stream);
@@ -365,6 +422,10 @@ impl Announcer {
                     Err(e) => format!("Threads announcement failed: {e:#}"),
                 });
             }
+            // Last, so its paste hint is the message left showing.
+            if which[3] {
+                out.push(open_x(&text, &settings.image));
+            }
             results.lock().unwrap().extend(out);
             ctx.request_repaint();
         });
@@ -380,6 +441,14 @@ impl Announcer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn x_post_link_and_length() {
+        assert_eq!(x_intent("Live! a&b #1\nhttps://twitch.tv/me"), "https://x.com/intent/post?text=Live%21%20a%26b%20%231%0Ahttps%3A%2F%2Ftwitch.tv%2Fme");
+        assert_eq!(x_intent("🔴"), "https://x.com/intent/post?text=%F0%9F%94%B4");
+        // Links count as 23 however long they are.
+        assert_eq!(x_length("Live now\nhttps://www.twitch.tv/averyveryverylongchannelname"), 9 + 23);
+        assert_eq!(x_length("on https://x.co/a and https://kick.com/b"), 3 + 24 + 4 + 23);
+    }
     #[test]
     fn fills_title_category_and_links() {
         let stream = Stream {

@@ -272,7 +272,7 @@ impl History {
         });
         if !self.error.is_empty() {
             ui.colored_label(
-                egui::Color32::LIGHT_RED,
+                crate::appearance::current().error,
                 format!("History could not be saved: {}", self.error),
             );
         }

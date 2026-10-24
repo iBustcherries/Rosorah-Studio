@@ -42,7 +42,7 @@ class BackgroundTests(unittest.TestCase):
         callback=page.runJavaScript.call_args.args[2]
         message={'type':'message','platform':'Twitch','id':'one','text':'Background message'}
         callback(json.dumps([message]))
-        window.deliver.assert_called_once_with(message)
+        window.deliver.assert_called_once_with(message,slot='Twitch')
         self.assertFalse(window.polling)
         window.last['Twitch']='new_account'
         callback(json.dumps([message]))
@@ -53,7 +53,7 @@ class BridgeTests(unittest.TestCase):
         page=Mock();view=Mock();view.page.return_value=page
         window=SimpleNamespace(sources={'Twitch':view},last={'Twitch':'moe'},deliver=Mock())
         window.matches=lambda p,u:m.Window.matches(window,p,u)
-        bridge=SimpleNamespace(window=window,platform='Twitch',page=page)
+        bridge=SimpleNamespace(window=window,slot='Twitch',page=page)
         message=json.dumps({'type':'message','platform':'Twitch','id':'1','text':'hi'})
         m.CollectorBridge.post(bridge,'https://www.twitch.tv/popout/moe/chat?popout=',message)
         self.assertEqual(window.deliver.call_count,1)
@@ -61,6 +61,20 @@ class BridgeTests(unittest.TestCase):
         m.CollectorBridge.post(bridge,'https://www.twitch.tv/popout/moe/chat?popout=',message)
         m.CollectorBridge.post(bridge,'https://evil.test/popout/new/chat',message)
         self.assertEqual(window.deliver.call_count,1)
+
+    def test_invites_only_from_stream_manager(self):
+        window=SimpleNamespace(last={m.DASHBOARD:'moe','Twitch':'moe'})
+        link='https://www.twitch.tv/popout/bob/guest-star?tt_content=open_calling_invite&tt_medium=notification_toast'
+        invite={'type':'invite','platform':'Twitch','text':'bob wants to collaborate.','link':link,'gone':True,'can_decline':True,'close_only':True,'extra':'page data'}
+        with patch.object(m,'emit') as emit:
+            m.Window.deliver(window,invite,slot=m.DASHBOARD)
+            emit.assert_called_once_with({'type':'invite','platform':'Twitch','signin':False,'text':'bob wants to collaborate.','link':link,'gone':True,'can_decline':True,'close_only':True})
+            # Nothing but Twitch's Stream Together page is passed on as the invite's link.
+            m.Window.deliver(window,dict(invite,link='https://evil.test/popout/bob/guest-star'),slot=m.DASHBOARD)
+            self.assertEqual(emit.call_args.args[0]['link'],'')
+            emit.reset_mock()
+            m.Window.deliver(window,invite,slot='Twitch')
+            self.assertEqual(emit.call_count,0)
 
     def test_composer_routes_to_shared_account_without_website_login(self):
         window=SimpleNamespace()

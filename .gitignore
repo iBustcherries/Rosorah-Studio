@@ -6,3 +6,6 @@
 # Sign-in registrations packaged with the installers; never committed.
 /packaging/accounts-defaults.json
 packaging/ndi/*.crate
+
+# Python bytecode from running the chat browser scripts.
+__pycache__/

@@ -11,6 +11,9 @@ impl Studio {
                 ui.push_id(platform.name(), |ui| {
                     ui.set_width(ui.available_width());
                     self.account_row(ui, platform);
+                    if platform == Platform::Twitch {
+                        save |= self.costream_settings(ui);
+                    }
                     let slots: Vec<usize> = match platform {
                         Platform::Twitch => vec![0],
                         Platform::YouTube => vec![1, 2],
@@ -120,6 +123,43 @@ impl Studio {
             ui.small("Chat is read from the platform websites. Sending a YouTube message uses 20 units of API quota.");
         }); }
     }
+    /// Twitch co-streaming: other channels' chat in yours, and invites offered under Chat.
+    fn costream_settings(&mut self, ui: &mut egui::Ui) -> bool {
+        let mut save = false;
+        ui.add_space(4.);
+        ui.collapsing("Co-streaming (Stream Together, shared chat)", |ui| {
+            let shared = &self.accounts[0].shared_chat;
+            if !shared.is_empty() {
+                let names: Vec<_> = shared.iter().map(|(_, name)| name.as_str()).collect();
+                ui.label(RichText::new(format!("⇄ Sharing chat with {}", names.join(", "))).color(crate::appearance::current().good));
+            }
+            note(ui, "When Twitch's shared chat is on, your co-streamers' chat shows in yours automatically, marked ⇄ with their channel. Their messages don't run your commands or automations.");
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Also show chat from");
+                save |= ui
+                    .add(egui::TextEdit::singleline(&mut self.stream_config.costream_channels).hint_text("channel1, channel2").desired_width(220.))
+                    .on_hover_text("Twitch channels you're streaming with but not sharing chat with. Up to 6.")
+                    .lost_focus();
+            });
+            save |= ui
+                .checkbox(&mut self.stream_config.costream_invites, "Show co-stream invites under Chat")
+                .on_hover_text("Rosorah keeps your Twitch Stream Manager open in the background and offers invites with Accept and Decline")
+                .changed();
+            if self.stream_config.costream_invites {
+                if self.browser_chat.dashboard_signin {
+                    ui.colored_label(crate::appearance::current().warning, "Sign in to Twitch once so Rosorah can see invites.");
+                }
+                if ui.button(if self.browser_chat.dashboard_signin { "Sign in for invites" } else { "Open Stream Manager" }).on_hover_text("Opens your Twitch Stream Manager in Rosorah's chat browser").clicked() {
+                    if !self.browser_chat.running() {
+                        let _ = self.browser_chat.start();
+                    }
+                    self.browser_chat.send(serde_json::json!({"type":"open_platform","platform":"Twitch dashboard"}));
+                }
+                note(ui, "Twitch has no invite API, so Rosorah reads the invite from your Stream Manager page. If Twitch changes that page, use Open Stream Manager to answer.");
+            }
+        });
+        save
+    }
     /// TikTok has no sign-in API for chat: Rosorah reads the user's LIVE page in the chat browser.
     fn tiktok_card(&mut self, ui: &mut egui::Ui, live: bool) -> bool {
         let mut save = false;
@@ -129,7 +169,7 @@ impl Studio {
             let (badge, color) = if name.is_empty() {
                 ("● Not set up".to_owned(), Color32::GRAY)
             } else {
-                (format!("● Reading @{name}'s LIVE chat"), Color32::from_rgb(110, 210, 140))
+                (format!("● Reading @{name}'s LIVE chat"), crate::appearance::current().good)
             };
             ui.label(RichText::new(badge).small().color(color));
         });
@@ -188,9 +228,9 @@ impl Studio {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(format!("{} bot", platform.name())).strong().color(platform_color(platform)));
                     let (badge, color) = if bot.connected {
-                        (format!("● Connected as {}", bot.name), Color32::from_rgb(110, 210, 140))
+                        (format!("● Connected as {}", bot.name), crate::appearance::current().good)
                     } else if bot.busy {
-                        ("● Waiting for the bot to sign in…".into(), Color32::from_rgb(230, 190, 90))
+                        ("● Waiting for the bot to sign in…".into(), crate::appearance::current().warning)
                     } else {
                         ("● Not connected".into(), Color32::GRAY)
                     };
@@ -241,9 +281,9 @@ impl Studio {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(platform.name()).heading().color(platform_color(platform)));
             let (badge, color) = if account.connected {
-                (format!("● Connected as {}", account.name), Color32::from_rgb(110, 210, 140))
+                (format!("● Connected as {}", account.name), crate::appearance::current().good)
             } else if account.busy {
-                ("● Connecting…".into(), Color32::from_rgb(230, 190, 90))
+                ("● Connecting…".into(), crate::appearance::current().warning)
             } else {
                 ("● Not connected".into(), Color32::GRAY)
             };

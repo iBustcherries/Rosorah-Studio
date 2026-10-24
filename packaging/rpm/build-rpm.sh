@@ -26,6 +26,7 @@ stage="$work/stage"
 mkdir -p "$stage/browser"
 cp target/release/rosorah-studio "$stage/"
 cp -r browser/. "$stage/browser/"
+rm -rf "$stage/browser/__pycache__"
 # Open-licence fonts for text layers; each family folder carries its licence.
 cp -r fonts "$stage/fonts"
 cp packaging/install-renderer.py "$stage/"

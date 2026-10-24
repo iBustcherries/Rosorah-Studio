@@ -9,7 +9,7 @@ class ImportTests(unittest.TestCase):
    result=mod.run(dict(path=str(p),project=base()));r=result['project']['rules'][0];self.assertFalse(r['enabled']);self.assertEqual(r['actions'][0]['SendChat']['text'],'Thanks {user}');self.assertEqual(len(r['actions']),1);self.assertTrue(any('customscript' in w for w in result['warnings']))
  def test_obs_order_and_missing_files(self):
   with tempfile.TemporaryDirectory() as d:
-   p=Path(d)/'scene.json';p.write_text(json.dumps({'sources':[{'id':'image_source','name':'Logo','settings':{'file':'Z:/old/logo.png'}},{'id':'scene','name':'Live','settings':{'items':[{'name':'Logo','pos':{'x':100,'y':200},'bounds':{'x':400,'y':200},'align':5}]}}]}));r=mod.run(dict(path=str(p),project=base()));self.assertEqual(r['project']['scenes'][0]['layers'][0]['rect'],[100/1920,200/1080,400/1920,200/1080]);self.assertEqual(r['missing'],['Z:/old/logo.png'])
+   p=Path(d)/'scene.json';p.write_text(json.dumps({'sources':[{'id':'image_source','name':'Logo','settings':{'file':'Z:/old/logo.png'}},{'id':'scene','name':'Live','settings':{'items':[{'name':'Logo','pos':{'x':100,'y':200},'bounds':{'x':400,'y':200},'bounds_type':2,'align':5}]}}]}));r=mod.run(dict(path=str(p),project=base()));self.assertEqual(r['project']['scenes'][0]['layers'][0]['rect'],[100/1920,200/1080,400/1920,200/1080]);self.assertEqual(r['missing'],['Z:/old/logo.png'])
  def test_zip_traversal_is_rejected_without_extraction(self):
   with tempfile.TemporaryDirectory() as d:
    p=Path(d)/'bad.zip'
