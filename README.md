@@ -9,27 +9,21 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
 **[Download the latest release](https://github.com/iBustcherries/RosorahStudio-releases/releases/latest)**
 · Windows 10/11 installer, Fedora `.rpm`, Ubuntu/Debian `.deb`
 
-## What's new in 0.52.0
+## What's new in 0.53.0
+
+- **Game capture on the graphics card (Linux):** Vulkan games' frames, including Windows games
+  through Proton, go straight to Rosorah on the graphics card instead of through main memory.
+  In a 1440p test this cut Rosorah's CPU use for game capture by about 85% and kept the full
+  60 fps. Used automatically when the game and Rosorah share a GPU and driver; otherwise capture
+  works as before.
+
+## 0.52.0
 
 - **Choose which audio track each platform hears:** an Audio choice on every platform in
   Settings → Accounts → Streaming platforms.
 - **A DRM free track, set up for you:** Track 2 holds everything except music. YouTube hears it
   by default, and one tick (**VOD: DRM free**) keeps music out of your Twitch VODs while viewers
   still hear everything live.
-
-## 0.51.0
-
-- **Twitch co-streaming:** with shared chat on, the other channels' messages show in your chat
-  marked ⇄ with where they came from. Co-stream invites slide in under Chat with Accept and
-  Not now.
-- **Go-live post on X:** Rosorah opens your post on X ready to send, with your announcement
-  picture copied for pasting.
-- **Make your YouTube stream public** automatically when you go live.
-- **Custom themes:** shareable theme files for colours, corners and backgrounds
-  ([guide](docs/themes.md)).
-- **Hype Train alerts** for when a train starts, levels up or ends.
-- **Panel title bars**, lower capture delay on Windows, Spout from Steam games on Linux, a
-  smoother chat, right-click menus for scenes and layers, and the alert list's ... menu works again.
 
 ## Screenshots
 
@@ -51,8 +45,8 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
   tools, layer effects, colour correction, masks and a green-screen key.
 - **Main and vertical videos**: a second canvas for TikTok, YouTube Shorts and Reels, with linked
   scenes.
-- **Capture**: automatic game capture on Linux (Vulkan/OpenGL) and Windows (Windows Graphics
-  Capture), PipeWire desktop and window capture, cameras and DroidCam, per-app sound.
+- **Capture**: automatic game capture on Linux (Vulkan/OpenGL, with Vulkan frames kept on the graphics
+  card) and Windows (Windows Graphics Capture), PipeWire desktop and window capture, cameras and DroidCam, per-app sound.
 - **Sound**: mixer with per-scene volumes, noise suppression, gate, compressor, EQ and more,
   monitoring, delay and six recording tracks, with a DRM free track and a choice of track for
   each platform.

@@ -43,7 +43,7 @@ impl Paint {
         self.text_font(&text, x, y, width + 1., size, c, f, bold, y);
     }
     fn finish(self) -> Frame {
-        Frame {
+        Frame { shared: None,
             width: self.width,
             height: self.height,
             rgba: self.pixels,

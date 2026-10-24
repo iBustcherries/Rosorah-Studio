@@ -9,3 +9,7 @@ packaging/ndi/*.crate
 
 # Python bytecode from running the chat browser scripts.
 __pycache__/
+
+# Native test builds (native/test.sh); the shipped hooks in native/build/32 and 64 stay tracked.
+/native/build/test-*
+/native/build/launch-fixture/

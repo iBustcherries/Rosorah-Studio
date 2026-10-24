@@ -10,6 +10,8 @@ use std::{
 
 mod nv12;
 pub use nv12::Nv12;
+#[cfg(target_os = "linux")]
+pub mod external;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, PartialEq)]
@@ -240,6 +242,11 @@ pub struct Compositor {
     params: Vec<LayerParams>,
     draws: Vec<Draw>,
     nv12: nv12::State,
+    /// Games' shared pictures imported into this device, by source, and how they're drawn.
+    #[cfg(target_os = "linux")]
+    shared: HashMap<Id, external::Imported>,
+    #[cfg(target_os = "linux")]
+    shared_pipeline: Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
 }
 
 /// A .cube colour look-up table: its size and RGBA texels (red varying fastest).
@@ -364,6 +371,8 @@ impl Compositor {
             darken: pipeline("Darken", with(C { src_factor: F::One, dst_factor: F::One, operation: O::Min })),
         };
         let white = Self::make_source(&device, &queue, &layout, &sampler, 1, 1, &[255, 255, 255, 255]);
+        #[cfg(target_os = "linux")]
+        external::register(&device);
         let no_extras = Self::make_extras(&device, &queue, &extras_layout, &sampler, (2, &identity_lut(2)), (1, 1, &[255, 255, 255, 255]));
         Self {
             device,
@@ -391,6 +400,10 @@ impl Compositor {
             params: Vec::new(),
             draws: Vec::new(),
             nv12: Default::default(),
+            #[cfg(target_os = "linux")]
+            shared: HashMap::new(),
+            #[cfg(target_os = "linux")]
+            shared_pipeline: None,
         }
     }
     fn make_source(device: &wgpu::Device, queue: &wgpu::Queue, layout: &wgpu::BindGroupLayout, sampler: &wgpu::Sampler, width: u32, height: u32, rgba: &[u8]) -> SharedSource {
@@ -401,8 +414,9 @@ impl Compositor {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
+            // Also drawn into (as plain Rgba8Unorm, the same bytes) for pictures shared on the GPU.
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
         });
         let view = texture.create_view(&Default::default());
         let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -414,7 +428,9 @@ impl Compositor {
             ],
         });
         let source = SharedSource { texture, binding, width, height };
-        Self::write(queue, &source, rgba);
+        if !rgba.is_empty() {
+            Self::write(queue, &source, rgba);
+        }
         source
     }
     fn write(queue: &wgpu::Queue, source: &SharedSource, rgba: &[u8]) {
@@ -532,6 +548,86 @@ impl Compositor {
         self.uploads += 1;
         Ok(())
     }
+    /// Draws a picture a game shares on the graphics card into the source's texture (or its next
+    /// delayed frame). `keep` is let go once the GPU has finished with the picture, which hands
+    /// its slot back to the game.
+    #[cfg(target_os = "linux")]
+    pub fn upload_shared(&mut self, id: Id, frame: &external::SharedFrame, keep: Box<dyn std::any::Any + Send>) -> Result<()> {
+        let (width, height) = (frame.width, frame.height);
+        if self.shared_pipeline.is_none() {
+            let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Shared picture"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: false }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                }],
+            });
+            let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("Shared picture"), source: wgpu::ShaderSource::Wgsl(external::SHADER.into()) });
+            let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: Some("Shared picture"), bind_group_layouts: &[&layout], push_constant_ranges: &[] });
+            let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Shared picture"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState { module: &module, entry_point: Some("vs"), compilation_options: Default::default(), buffers: &[] },
+                fragment: Some(wgpu::FragmentState { module: &module, entry_point: Some("fs"), compilation_options: Default::default(), targets: &[Some(wgpu::TextureFormat::Rgba8Unorm.into())] }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview: None,
+                cache: None,
+            });
+            self.shared_pipeline = Some((pipeline, layout));
+        }
+        if self.shared.get(&id).is_none_or(|i| i.export != frame.export) {
+            let imported = external::import(&self.device, &self.shared_pipeline.as_ref().unwrap().1, frame)?;
+            self.shared.insert(id, imported);
+        }
+        let picture = self.shared[&id].slots.get(frame.slot).context("No such shared picture")?;
+        // The texture it goes into: the source's own, or a delayed source's next frame.
+        let target = if self.delays.contains_key(&id) {
+            let delay = self.delays[&id];
+            let ring = self.rings.entry(id).or_insert_with(|| DelayRing { frames: VecDeque::new(), spare: Vec::new() });
+            while ring.frames.len() > 1 && (ring.frames.len() >= 64 || ring.frames[1].0.elapsed() > delay) {
+                let (_, old) = ring.frames.pop_front().unwrap();
+                ring.spare.push(old);
+            }
+            let reused = ring.spare.iter().position(|s| s.width == width && s.height == height).map(|i| ring.spare.swap_remove(i));
+            ring.spare.retain(|s| s.width == width && s.height == height);
+            let frame = reused.unwrap_or_else(|| Self::make_source(&self.device, &self.queue, &self.layout, &self.sampler, width, height, &[]));
+            ring.frames.push_back((Instant::now(), frame));
+            &ring.frames.back().unwrap().1.texture
+        } else {
+            if self.sources.get(&id).is_none_or(|s| s.width != width || s.height != height) {
+                let source = Self::make_source(&self.device, &self.queue, &self.layout, &self.sampler, width, height, &[]);
+                self.sources.insert(id, source);
+            }
+            &self.sources[&id].texture
+        };
+        let view = target.create_view(&wgpu::TextureViewDescriptor { format: Some(wgpu::TextureFormat::Rgba8Unorm), ..Default::default() });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("Shared picture") });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Shared picture"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            pass.set_pipeline(&self.shared_pipeline.as_ref().unwrap().0);
+            pass.set_bind_group(0, picture, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.queue.submit([encoder.finish()]);
+        self.queue.on_submitted_work_done(move || drop(keep));
+        self.uploads += 1;
+        Ok(())
+    }
     /// The picture to draw for a source now: its delayed frame, a nested scene, or its latest frame.
     fn picture(&self, id: Id) -> Option<(&wgpu::BindGroup, u32, u32)> {
         if let Some((group, w, h)) = self.nested.get(&id) {
@@ -548,6 +644,8 @@ impl Compositor {
 
     pub fn retain_sources(&mut self, project: &Project) {
         self.sources.retain(|id, _| project.source(*id).is_some());
+        #[cfg(target_os = "linux")]
+        self.shared.retain(|id, _| project.source(*id).is_some());
         self.rings.retain(|id, _| project.source(*id).is_some());
     }
 

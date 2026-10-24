@@ -660,7 +660,7 @@ impl Captures {
             let start = std::time::Instant::now();
             match frame {
                 Some(f) => {
-                    gpu.upload(id, f.width, f.height, &f.rgba)?;
+                    upload_frame(gpu, id, &f)?;
                     let mailbox = self.engine.snapshot(id).and_then(|s| s.mailbox_ms).unwrap_or(0.);
                     self.preview_timing.insert(id, (start, mailbox, start.elapsed().as_secs_f64()*1000., None));
                 },
@@ -669,6 +669,33 @@ impl Captures {
         }
         Ok(changed)
     }
+}
+
+/// Puts a captured frame into the compositor: drawn straight from the graphics card when a game
+/// shared it there, uploaded otherwise. If a shared picture can't be used, sharing stops for this
+/// run and games send their frames through memory again.
+pub fn upload_frame(gpu: &mut auroracast_gpu::Compositor, id: Id, frame: &rosorah_capture::Frame) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    if let Some(shared) = &frame.shared {
+        let picture = auroracast_gpu::external::SharedFrame {
+            export: shared.export,
+            slot: shared.slot,
+            width: shared.width,
+            height: shared.height,
+            vk_format: shared.vk_format,
+            sizes: &shared.sizes,
+            memory: &shared.memory,
+        };
+        return match gpu.upload_shared(id, &picture, Box::new(shared.clone())) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                crate::capture_log::event(format!("Game capture on the graphics card stopped: {e:#}. Using shared memory instead."));
+                auroracast_gpu::external::give_up();
+                gpu.upload(id, 1, 1, &[0, 0, 0, 255])
+            }
+        };
+    }
+    gpu.upload(id, frame.width, frame.height, &frame.rgba)
 }
 
 #[cfg(any(not(windows), test))]
@@ -874,7 +901,7 @@ pub(crate) fn decode(sample: &gst::Sample) -> Result<Frame> {
     );
     let stride = usize::try_from(mapped.plane_stride()[0]).context("Negative capture stride")?;
     let data = mapped.plane_data(0)?;
-    Ok(Frame {
+    Ok(Frame { shared: None,
         width,
         height,
         rgba: copy_rows(data, width as usize * 4, height as usize, stride)?,

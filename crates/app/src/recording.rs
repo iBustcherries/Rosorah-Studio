@@ -606,7 +606,7 @@ fn upload_frames(
             continue;
         }
         match &current {
-            Some(f) => gpu.upload(id, f.width, f.height, &f.rgba)?,
+            Some(f) => crate::capture::upload_frame(gpu, id, f)?,
             None => gpu.upload(id, 1, 1, &[0, 0, 0, 0])?,
         }
         previous.insert(id, current);
@@ -1085,7 +1085,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         engine.start(1, Box::new(Controlled(tx)), rosorah_capture::Options::default())?;
         let source = rx.recv_timeout(Duration::from_secs(2))?;
-        source.publish(Frame { width: 1, height: 1, rgba: vec![0, 0, 180, 255] })?;
+        source.publish(Frame { shared: None, width: 1, height: 1, rgba: vec![0, 0, 180, 255] })?;
         let stream = Stream::start(&project, 0, engine.reader(), &config, &folder)?;
         let start = wait_ready(&stream.engine);
         let outlet = stream.engine.outlet();
@@ -1134,7 +1134,7 @@ mod tests {
         let source = rx.recv_timeout(Duration::from_secs(2))?;
         // Eight grey levels far apart, stepping one level per captured frame like a 180 fps game.
         let level = |n: u64| (16 + (n % 8) * 30) as u8;
-        source.publish(Frame { width: 1, height: 1, rgba: vec![level(0), level(0), level(0), 255] })?;
+        source.publish(Frame { shared: None, width: 1, height: 1, rgba: vec![level(0), level(0), level(0), 255] })?;
         let recording = Recording::start(&project, 0, engine.reader(), &folder)?;
         let start = wait_ready(&recording);
         let mut n = 0;
@@ -1142,7 +1142,7 @@ mod tests {
             n += 1;
             let v = level(n);
             // Full-size frames, as a game capture delivers them.
-            source.publish(Frame { width: 1920, height: 1080, rgba: [v, v, v, 255].repeat(1920 * 1080) })?;
+            source.publish(Frame { shared: None, width: 1920, height: 1080, rgba: [v, v, v, 255].repeat(1920 * 1080) })?;
             let _ = engine.drain();
             thread::sleep(Duration::from_micros(5555));
         }
@@ -1180,7 +1180,7 @@ mod tests {
             )?;
             let source = rx.recv_timeout(Duration::from_secs(2))?;
             let set_color = |color: [u8; 4]| {
-                source.publish(Frame {
+                source.publish(Frame { shared: None,
                     width: 1,
                     height: 1,
                     rgba: color.to_vec(),
@@ -1421,7 +1421,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         engine.start(1, Box::new(Controlled(tx)), rosorah_capture::Options::default())?;
         let source = rx.recv_timeout(Duration::from_secs(2))?;
-        source.publish(Frame { width: 1, height: 1, rgba: vec![255, 0, 0, 255] })?;
+        source.publish(Frame { shared: None, width: 1, height: 1, rgba: vec![255, 0, 0, 255] })?;
         // No audio is pushed at all: video must still flow.
         let camera = Recording::start_camera(&project, 0, engine.reader(), device.clone())?;
         wait_ready(&camera);
@@ -1453,7 +1453,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         engine.start(1, Box::new(Controlled(tx)), rosorah_capture::Options::default())?;
         let source = rx.recv_timeout(Duration::from_secs(2))?;
-        source.publish(Frame { width: 1, height: 1, rgba: vec![0, 0, 180, 255] })?;
+        source.publish(Frame { shared: None, width: 1, height: 1, rgba: vec![0, 0, 180, 255] })?;
         {
             let mut r = REPLAY.lock().unwrap();
             r.enabled = true;
@@ -1579,7 +1579,7 @@ mod tests {
         )?;
         let source = rx.recv_timeout(Duration::from_secs(2))?;
         let color = |rgba: [u8; 4]| {
-            source.publish(Frame {
+            source.publish(Frame { shared: None,
                 width: 1,
                 height: 1,
                 rgba: rgba.to_vec(),
@@ -2041,7 +2041,7 @@ mod selective_upload_tests {
         p.canvases.truncate(1);
         p.scenes[0].layers.truncate(2);
         p.scenes[0].layers[1].visible = false;
-        let frame = Arc::new(Frame {
+        let frame = Arc::new(Frame { shared: None,
             width: 1,
             height: 1,
             rgba: vec![255, 0, 0, 255],

@@ -134,7 +134,7 @@ fn artwork(props: &GlobalSystemMediaTransportControlsSessionMediaProperties) -> 
     limits.max_alloc = Some(64 * 1024 * 1024);
     reader.limits(limits);
     let image = reader.decode().ok()?.thumbnail(512, 512).into_rgba8();
-    Some(Arc::new(Frame {
+    Some(Arc::new(Frame { shared: None,
         width: image.width(),
         height: image.height(),
         rgba: image.into_raw(),

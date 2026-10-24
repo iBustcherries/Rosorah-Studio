@@ -667,7 +667,7 @@ impl Backend for Renderer {
                     }
                 }
                 if settings.kind == Kind::NowPlaying && !fading {
-                    last_frame = Some(Frame {
+                    last_frame = Some(Frame { shared: None,
                         width: frame.width,
                         height: frame.height,
                         rgba: frame.rgba.clone(),
@@ -905,7 +905,7 @@ fn render_frame(s: &Settings, text: &str, value: u64, elapsed: f32) -> anyhow::R
         height,
     };
     if s.kind == Kind::AlertBox && text.is_empty() {
-        return Ok(Frame {
+        return Ok(Frame { shared: None,
             width,
             height,
             rgba: p.pixels,
@@ -1175,7 +1175,7 @@ fn render_frame(s: &Settings, text: &str, value: u64, elapsed: f32) -> anyhow::R
             }
         }
     }
-    Ok(Frame {
+    Ok(Frame { shared: None,
         width,
         height,
         rgba: p.pixels,
@@ -1879,12 +1879,12 @@ mod widget_regressions {
     }
     #[test]
     fn media_fits_and_preserves_text_alpha() {
-        let mut f = Frame {
+        let mut f = Frame { shared: None,
             width: 4,
             height: 4,
             rgba: vec![0; 64],
         };
-        let v = Frame {
+        let v = Frame { shared: None,
             width: 2,
             height: 1,
             rgba: [255, 0, 0, 255].repeat(2),
@@ -1895,7 +1895,7 @@ mod widget_regressions {
     }
 }
 #[cfg(test)]mod alert_layout_tests{use super::*;use auroracast_core::widgets::AlertLayout;
- #[test]fn below_text_region_is_never_covered_by_media(){let mut f=Frame{width:10,height:10,rgba:vec![0;400]};let video=Frame{width:1,height:1,rgba:vec![255,0,0,255]};compose_media_layout(&mut f,&video,false,AlertLayout::Below);assert_eq!(f.rgba[3],255);assert_eq!(f.rgba[(9*10)*4+3],0);}
+ #[test]fn below_text_region_is_never_covered_by_media(){let mut f=Frame{ shared: None,width:10,height:10,rgba:vec![0;400]};let video=Frame{ shared: None,width:1,height:1,rgba:vec![255,0,0,255]};compose_media_layout(&mut f,&video,false,AlertLayout::Below);assert_eq!(f.rgba[3],255);assert_eq!(f.rgba[(9*10)*4+3],0);}
     #[test]
     fn alert_with_playing_media_waits_for_the_clip() {
         let hub = Hub::default();

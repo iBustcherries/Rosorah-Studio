@@ -55,7 +55,38 @@ impl Default for Options {
 pub struct Frame {
     pub width: u32,
     pub height: u32,
+    /// The picture's pixels; empty when it's `shared` instead.
     pub rgba: Vec<u8>,
+    /// A picture still on the graphics card (a game's, shared with Rosorah), drawn from there
+    /// instead of `rgba`.
+    pub shared: Option<Arc<SharedImage>>,
+}
+/// One of a game's shared pictures on the graphics card: Vulkan memory exported by Rosorah's
+/// game layer as an opaque file descriptor. Every slot of an export has the same size and format.
+pub struct SharedImage {
+    /// Unique to this set of slots, so a renderer imports each set once.
+    pub export: u64,
+    pub slot: usize,
+    pub width: u32,
+    pub height: u32,
+    /// The Vulkan format (B8G8R8A8_UNORM, R8G8B8A8_UNORM or A2B10G10R10_UNORM_PACK32).
+    pub vk_format: i32,
+    /// Each slot's exported allocation size, and its memory.
+    pub sizes: Vec<u64>,
+    #[cfg(unix)]
+    pub memory: Arc<Vec<std::os::fd::OwnedFd>>,
+    /// Called once nobody draws from this slot any more, so the game can write to it again.
+    pub release: Box<dyn Fn() + Send + Sync>,
+}
+impl Drop for SharedImage {
+    fn drop(&mut self) {
+        (self.release)();
+    }
+}
+impl std::fmt::Debug for SharedImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SharedImage(export {} slot {} {}x{})", self.export, self.slot, self.width, self.height)
+    }
 }
 /// Host process identity. The start time prevents a recycled PID from becoming
 /// an audio target after the captured application exits.
@@ -138,8 +169,12 @@ impl Producer {
             frame.width > 0 && frame.height > 0 && frame.width <= 4096 && frame.height <= 4096,
             "Capture dimensions out of bounds"
         );
+        // A picture shared on the graphics card has no pixels here; its size must agree.
         ensure!(
-            frame.rgba.len() == frame.width as usize * frame.height as usize * 4,
+            match &frame.shared {
+                Some(shared) => frame.rgba.is_empty() && shared.width == frame.width && shared.height == frame.height,
+                None => frame.rgba.len() == frame.width as usize * frame.height as usize * 4,
+            },
             "Invalid RGBA frame length"
         );
         let mut s = self.0.lock().unwrap();
@@ -367,7 +402,7 @@ mod tests {
         rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap()
     }
     fn frame(value: u8) -> Frame {
-        Frame {
+        Frame { shared: None,
             width: 1,
             height: 1,
             rgba: vec![value, 0, 0, 255],
@@ -460,7 +495,7 @@ mod tests {
                 .unwrap()
         );
         assert!(
-            p.publish(Frame {
+            p.publish(Frame { shared: None,
                 width: 2,
                 height: 2,
                 rgba: vec![0; 4]

@@ -199,7 +199,7 @@ impl rosorah_capture::Backend for BridgeBackend {
             anyhow::ensure!(width <= 8192 && height <= 8192, "The Spout picture is too large");
             let mut rgba = vec![0u8; width as usize * height as usize * 4];
             stdout.read_exact(&mut rgba).context("The Spout bridge stopped mid-picture")?;
-            output.publish_with_detail(rosorah_capture::Frame { width, height, rgba }, Some(&detail))?;
+            output.publish_with_detail(rosorah_capture::Frame { shared: None, width, height, rgba }, Some(&detail))?;
         }
         Ok(())
     }

@@ -1,7 +1,9 @@
 //! Event-driven game renderer receiver. A home-directory socket passes an anonymous
-//! memfd; pixels never go through regular files or Steam launch-option mounts.
+//! memfd; pixels never go through regular files or Steam launch-option mounts. When the game's
+//! GPU and driver are the ones Rosorah draws with, its pictures stay on the graphics card
+//! instead: the layer offers a set of exported Vulkan images and names a slot per frame.
 use anyhow::{Context, Result, ensure};
-use rosorah_capture::{Backend, Frame, GameProcess, Options, Producer};
+use rosorah_capture::{Backend, Frame, GameProcess, Options, Producer, SharedImage};
 use std::{
     fs::{self, File, OpenOptions},
     os::{
@@ -20,6 +22,10 @@ use std::{
 };
 use tokio::sync::watch;
 const HEADER: usize = 112;
+/// A set of slots offered for sharing on the graphics card (the layer's `Shared`).
+const OFFER: usize = 128;
+/// Header flag: the game can share its pictures on the graphics card.
+const CAN_SHARE: u32 = 16;
 const CAPACITY: u64 = HEADER as u64 + 4096 * 4096 * 4;
 const MAGIC: u32 = 0x52535246;
 const VERSION: u32 = 3;
@@ -161,6 +167,10 @@ struct Header {
     gl: bool,
     hdr: bool,
     bits32: bool,
+    /// The game can share its pictures on the graphics card.
+    share: bool,
+    /// This frame is in shared slot `slot - 1`; 0 when its pixels are in the memory.
+    slot: u32,
     sequence: u64,
     /// When the game captured the frame (monotonic nanoseconds).
     timestamp: u64,
@@ -196,6 +206,8 @@ fn parse_header(bytes: &[u8], now: u64) -> Option<Header> {
         gl: u32at(24) & 2 != 0,
         hdr: u32at(24) & 4 != 0,
         bits32: u32at(24) & 8 != 0,
+        share: u32at(24) & CAN_SHARE != 0,
+        slot: u32at(28),
         sequence: u64at(32),
         timestamp,
         name: String::from_utf8_lossy(&bytes[48..48 + end])
@@ -226,7 +238,66 @@ fn open_memory(fd: &OwnedFd) -> Result<File> {
     );
     Ok(file)
 }
-fn read_frame(file: &File, previous: u64) -> Result<Option<(Header, Frame)>> {
+/// A game's set of shared slots, once Rosorah has taken it.
+struct SharedSet {
+    /// Unique in this process, so renderers import each set once.
+    key: u64,
+    width: u32,
+    height: u32,
+    vk_format: i32,
+    sizes: Vec<u64>,
+    memory: Arc<Vec<OwnedFd>>,
+    /// The game's connection, for handing slots back.
+    socket: Arc<OwnedFd>,
+}
+static SHARED_SETS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+/// Reads an offered set: (its id, the set, its GPU and driver).
+fn parse_offer(bytes: &[u8], files: Vec<OwnedFd>, socket: &OwnedFd) -> Option<(u32, SharedSet, auroracast_gpu::external::Identity)> {
+    if bytes.len() != OFFER {
+        return None;
+    }
+    let u32at = |i: usize| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+    let (slots, width, height, format, id) = (u32at(12) as usize, u32at(16), u32at(20), u32at(24) as i32, u32at(28));
+    // B8G8R8A8_UNORM, R8G8B8A8_UNORM or A2B10G10R10_UNORM_PACK32, as the layer makes them.
+    if u32at(0) != MAGIC || u32at(4) != VERSION || u32at(8) != 10 || !(1..=8).contains(&slots) || files.len() != slots || !matches!(format, 44 | 37 | 64) || width == 0 || height == 0 || width > 4096 || height > 4096 || id == 0 {
+        return None;
+    }
+    let sizes: Vec<u64> = (0..slots).map(|i| u64::from_le_bytes(bytes[32 + i * 8..40 + i * 8].try_into().unwrap())).collect();
+    let identity = (bytes[96..112].try_into().unwrap(), bytes[112..128].try_into().unwrap());
+    let set = SharedSet {
+        key: SHARED_SETS.fetch_add(1, Ordering::Relaxed),
+        width,
+        height,
+        vk_format: format,
+        sizes,
+        memory: Arc::new(files),
+        socket: Arc::new(socket.try_clone().ok()?),
+    };
+    Some((id, set, identity))
+}
+/// A frame in a shared slot: no pixels, and the slot goes back to the game once every renderer
+/// has finished drawing from it.
+fn shared_frame(set: &SharedSet, slot: usize) -> Frame {
+    let socket = set.socket.clone();
+    Frame {
+        width: set.width,
+        height: set.height,
+        rgba: Vec::new(),
+        shared: Some(Arc::new(SharedImage {
+            export: set.key,
+            slot,
+            width: set.width,
+            height: set.height,
+            vk_format: set.vk_format,
+            sizes: set.sizes.clone(),
+            memory: set.memory.clone(),
+            release: Box::new(move || {
+                send_control(socket.as_raw_fd(), 4, slot as u32);
+            }),
+        })),
+    }
+}
+fn read_frame(file: &File, previous: u64, shared: Option<&SharedSet>, socket: RawFd) -> Result<Option<(Header, Frame)>> {
     if !lock(file, false) {
         return Ok(None);
     }
@@ -239,6 +310,17 @@ fn read_frame(file: &File, previous: u64) -> Result<Option<(Header, Frame)>> {
     if header.sequence == previous {
         return Ok(None);
     }
+    if header.slot > 0 {
+        let slot = header.slot as usize - 1;
+        return Ok(match shared.filter(|s| slot < s.sizes.len() && s.width == header.width && s.height == header.height) {
+            Some(set) => Some((header, shared_frame(set, slot))),
+            None => {
+                // Not a set Rosorah holds (any more): give the slot straight back.
+                send_control(socket, 4, slot as u32);
+                None
+            }
+        });
+    }
     let mut rgba = vec![0; header.width as usize * header.height as usize * 4];
     file.read_exact_at(&mut rgba, HEADER as u64)?;
     // Release the mailbox before conversion, minimizing producer contention.
@@ -249,7 +331,7 @@ fn read_frame(file: &File, previous: u64) -> Result<Option<(Header, Frame)>> {
         let v = if header.bgra { (v & 0x0000_ff00) | ((v >> 16) & 0xff) | ((v & 0xff) << 16) } else { v & 0x00ff_ffff };
         *pixel = (v | 0xff00_0000).to_le_bytes();
     }
-    let frame = Frame {
+    let frame = Frame { shared: None,
         width: header.width,
         height: header.height,
         rgba,
@@ -267,13 +349,34 @@ struct Client {
     notified: bool,
     rate: Option<u32>,
     resolution: Option<u32>,
+    /// Whether Rosorah asked this game to share on the graphics card, and the set it took.
+    share: Option<bool>,
+    shared: Option<SharedSet>,
+    /// The last frame came on the graphics card (for the capture log).
+    on_gpu: bool,
 }
 impl Client {
     fn drain(&mut self) -> Result<()> {
         for _ in 0..64 {
-            let Some(mut packet) = receive(self.socket.as_raw_fd(), HEADER)? else {
+            let Some(mut packet) = receive(self.socket.as_raw_fd(), OFFER)? else {
                 break;
             };
+            if self.memory.is_some() && packet.bytes.len() == OFFER {
+                // Taken only when every renderer here uses the same GPU and driver.
+                let files = std::mem::take(&mut packet.files);
+                let answer = match parse_offer(&packet.bytes, files, &self.socket) {
+                    Some((id, set, identity)) if auroracast_gpu::external::accepts(identity) => {
+                        self.shared = Some(set);
+                        id
+                    }
+                    _ => {
+                        self.shared = None;
+                        0
+                    }
+                };
+                ensure!(send_control(self.socket.as_raw_fd(), 6, answer), "Renderer connection closed");
+                continue;
+            }
             if self.memory.is_none() {
                 ensure!(
                     packet.files.len() == 1,
@@ -372,6 +475,9 @@ impl Server {
                     notified: false,
                     rate: None,
                     resolution: None,
+                    share: None,
+                    shared: None,
+                    on_gpu: false,
                 });
             }
         }
@@ -407,25 +513,37 @@ impl Server {
             if client.rate != Some(rate) && send_control(client.socket.as_raw_fd(), 1, rate) {
                 client.rate = Some(rate);
             }
+            // The game being shown shares its pictures on the graphics card when it can and every
+            // renderer here could draw them; otherwise (or once that changes) through memory.
+            let share = Some(i) == selected && client.header.as_ref().is_some_and(|h| h.share) && auroracast_gpu::external::sharing_possible();
+            if client.share != Some(share) && send_control(client.socket.as_raw_fd(), 5, share as u32) {
+                client.share = Some(share);
+                if !share {
+                    client.shared = None;
+                }
+            }
             if Some(i) != selected || !client.notified {
                 continue;
             }
             let work = Instant::now();
-            match read_frame(client.memory.as_ref().unwrap(), client.sequence) {
+            match read_frame(client.memory.as_ref().unwrap(), client.sequence, client.shared.as_ref(), client.socket.as_raw_fd()) {
                 Ok(Some((header, frame))) => {
                     if let Some(trace) = &mut self.trace {
-                        trace.frame(Some(gst::ClockTime::from_nseconds(header.timestamp)), work.elapsed(), Some(crate::capture::fingerprint(&frame.rgba)));
+                        trace.frame(Some(gst::ClockTime::from_nseconds(header.timestamp)), work.elapsed(), (!frame.rgba.is_empty()).then(|| crate::capture::fingerprint(&frame.rgba)));
                     }
-                    if client.sequence == 0 {
+                    let on_gpu = frame.shared.is_some();
+                    if client.sequence == 0 || on_gpu != client.on_gpu {
+                        client.on_gpu = on_gpu;
                         crate::capture_log::event(format!(
-                            "{} connected: {} (PID {}) {}x{} · {}-bit{} · shared memory",
+                            "{} connected: {} (PID {}) {}x{} · {}-bit{} · {}",
                             if header.gl { "OpenGL" } else { "Vulkan" },
                             header.name,
                             header.pid,
                             header.width,
                             header.height,
                             if header.bits32 { 32 } else { 64 },
-                            if header.hdr { " · HDR to SDR" } else { "" }
+                            if header.hdr { " · HDR to SDR" } else { "" },
+                            if on_gpu { "on the graphics card" } else { "shared memory" }
                         ));
                     }
                     client.sequence = header.sequence;
@@ -619,7 +737,7 @@ impl Backend for RendererBackend {
                 match frame {
                     Some(frame) => output.publish(frame)?,
                     None => {
-                        output.publish(Frame {
+                        output.publish(Frame { shared: None,
                             width: 1,
                             height: 1,
                             rgba: vec![0; 4],
@@ -635,6 +753,66 @@ impl Backend for RendererBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// A real Vulkan program with Rosorah's layer shares its frames on the graphics card, and they
+    /// draw through the compositor. Run by native/share-test.sh, which starts vkcube with the
+    /// freshly built layer in an off-screen session and its own HOME.
+    #[test]
+    #[ignore = "Needs a Vulkan program running with Rosorah's layer; run native/share-test.sh"]
+    fn a_vulkan_game_shares_its_frames_on_the_graphics_card() -> Result<()> {
+        let mut gpu = pollster::block_on(auroracast_gpu::Compositor::new())?;
+        ensure!(auroracast_gpu::external::sharing_possible(), "this device can't import shared memory");
+        // ROSORAH_SHARE_TEST_MEMORY=1 compares against the memory path.
+        let memory_path = std::env::var_os("ROSORAH_SHARE_TEST_MEMORY").is_some_and(|v| !v.is_empty());
+        if memory_path {
+            auroracast_gpu::external::give_up();
+        }
+        let mut project = auroracast_core::Project::default();
+        project.scenes[0].layers.retain(|l| l.source == 1);
+        let canvas = project.canvases[0].clone();
+        gpu.upload(1, 1, 1, &[0, 0, 0, 255])?;
+        // As a benchmark: ROSORAH_SHARE_TEST_SECONDS runs that long, at ROSORAH_SHARE_TEST_RESOLUTION.
+        let number = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok());
+        let (seconds, resolution) = (number("ROSORAH_SHARE_TEST_SECONDS"), number("ROSORAH_SHARE_TEST_RESOLUTION").unwrap_or(0) as u32);
+        let mut engine = rosorah_capture::Engine::default();
+        engine.start(1, Box::new(RendererBackend), Options { fps: 60, resolution, ..Default::default() })?;
+        let (mut shared, mut memory, mut slots) = (0, 0, std::collections::BTreeSet::new());
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(seconds.unwrap_or(15)) && (seconds.is_some() || shared + memory < 240) {
+            for (id, frame) in engine.drain() {
+                if let Some(frame) = frame {
+                    match &frame.shared {
+                        Some(s) => {
+                            shared += 1;
+                            slots.insert(s.slot);
+                        }
+                        None if frame.rgba.len() > 4 => memory += 1,
+                        None => {}
+                    }
+                    crate::capture::upload_frame(&mut gpu, id, &frame)?;
+                }
+            }
+            // Rendering also lets the GPU report finished work, which hands slots back.
+            gpu.render(&project, &canvas, 64, 36)?;
+            std::thread::sleep(Duration::from_millis(4));
+        }
+        println!("{shared} frames on the graphics card ({} slots), {memory} through memory, in {:.1} s", slots.len(), start.elapsed().as_secs_f32());
+        let pixels = gpu.render(&project, &canvas, 320, 180)?;
+        if let Some(path) = std::env::var_os("ROSORAH_SHARE_TEST_PNG").filter(|v| !v.is_empty()) {
+            image::save_buffer(path, &pixels, 320, 180, image::ExtendedColorType::Rgba8)?;
+        }
+        if memory_path {
+            ensure!(memory >= 100 && shared == 0, "{memory} frames through memory, {shared} shared");
+            return Ok(());
+        }
+        // Far more frames than slots: slots go back to the game after drawing.
+        ensure!(shared >= 200, "only {shared} shared frames ({memory} through memory)");
+        let at = |x: usize, y: usize| &pixels[(y * 320 + x) * 4..(y * 320 + x) * 4 + 4];
+        let distinct: std::collections::BTreeSet<_> = pixels.as_chunks::<4>().0.iter().map(|p| (p[0] >> 4, p[1] >> 4, p[2] >> 4)).collect();
+        println!("middle {:?}, corner {:?}, {} colours", at(160, 90), at(4, 4), distinct.len());
+        ensure!(pixels.as_chunks::<4>().0.iter().all(|p| p[3] == 255), "the game's picture should be opaque");
+        ensure!(distinct.len() > 20, "the picture should be the spinning cube, not a flat colour");
+        Ok(())
+    }
     fn header(now: u64) -> [u8; HEADER] {
         let mut b = [0; HEADER];
         for (i, v) in [
@@ -705,14 +883,14 @@ mod tests {
         let reader = open_memory(&owned).unwrap();
         assert!(lock(&writer, true));
         for _ in 0..100 {
-            assert!(read_frame(&reader, 0).unwrap().is_none());
+            assert!(read_frame(&reader, 0, None, -1).unwrap().is_none());
         }
         unsafe {
             libc::flock(raw, libc::LOCK_UN);
         }
-        let (h, f) = read_frame(&reader, 0).unwrap().unwrap();
+        let (h, f) = read_frame(&reader, 0, None, -1).unwrap().unwrap();
         assert_eq!(f.rgba, vec![3, 2, 1, 255, 6, 5, 4, 255]);
-        assert!(read_frame(&reader, h.sequence).unwrap().is_none());
+        assert!(read_frame(&reader, h.sequence, None, -1).unwrap().is_none());
         // In-flight readers cannot be invalidated by a producer resizing storage.
         assert!(writer.set_len(1).is_err());
     }
@@ -731,6 +909,8 @@ mod tests {
                 gl: false,
                 hdr: false,
                 bits32: false,
+                share: false,
+                slot: 0,
                 sequence: 0,
                 timestamp: 0,
                 name: "test".into(),
@@ -741,6 +921,9 @@ mod tests {
             notified: false,
             rate: None,
             resolution: None,
+            share: None,
+            shared: None,
+            on_gpu: false,
         }
     }
     #[test]

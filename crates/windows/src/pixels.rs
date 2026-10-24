@@ -98,7 +98,7 @@ pub fn convert(
             if bands == 1 { work() } else { scope.spawn(work); }
         }
     });
-    Ok(Frame {
+    Ok(Frame { shared: None,
         width: ow,
         height: oh,
         rgba,

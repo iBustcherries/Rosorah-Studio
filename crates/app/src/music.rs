@@ -251,7 +251,7 @@ fn artwork(url: &str) -> Option<(Arc<Frame>, [u8; 4])> {
         }
     }
     Some((
-        Arc::new(Frame {
+        Arc::new(Frame { shared: None,
             width: 320,
             height: 320,
             rgba: img.into_raw(),

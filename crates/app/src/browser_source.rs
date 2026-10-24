@@ -193,7 +193,7 @@ fn read_packets(
         match kind {
             1 => {
                 output.publish_with_detail(
-                    Frame {
+                    Frame { shared: None,
                         width: w,
                         height: h,
                         rgba: bytes,

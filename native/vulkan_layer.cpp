@@ -18,6 +18,9 @@ void* key(const void* h) { return h?*static_cast<void* const*>(h):nullptr; }
 struct Instance {
     VkInstance handle{}; PFN_vkGetInstanceProcAddr gipa{};
     PFN_GetPhysicalDeviceProcAddr gpdpa{};
+    uint32_t api=VK_API_VERSION_1_0;
+    // For naming the GPU and driver (core in 1.1, an extension the layer adds before that).
+    PFN_vkGetPhysicalDeviceProperties2 properties2{};
 };
 struct ReadSlot {
     VkBuffer buffer{}; VkDeviceMemory memory{}; void* mapped=nullptr;
@@ -27,6 +30,25 @@ struct ReadSlot {
     uint64_t timestamp=0;
     // Release/acquire transfers ownership between presentation and delivery.
     std::atomic<bool> pending{false};
+    // The shared slot this copy went to, or -1 for a copy into `buffer`.
+    int shared=-1;
+};
+// Pictures shared with the studio on the graphics card: images in exportable memory, which the
+// studio imports once and draws from, so nothing goes through main memory. A slot is free (0),
+// being written (1), or with the studio (2) until it says it's done.
+struct SharedSlot {
+    VkImage image{}; VkDeviceMemory memory{}; VkDeviceSize size=0; int fd=-1;
+    std::atomic<int> state{0};
+    std::atomic<uint64_t> since{0};
+};
+struct SharedSet {
+    std::array<SharedSlot,4> slots;
+    VkFormat format{};
+    // The game's channel order differs from the slots' (10-bit BGR), so it's blitted, not copied.
+    bool blit=false;
+    uint32_t id=0, connection=0;
+    // 0 none, 1 made (to offer), 2 offered, 3 in use, 4 refused.
+    std::atomic<int> stage{0};
 };
 struct Readback {
     std::array<ReadSlot,2> slots;
@@ -38,6 +60,10 @@ struct Swap {
     VkFilter filter=VK_FILTER_NEAREST;
     std::vector<VkImage> images;
     Readback read;
+    SharedSet shared;
+    // Set by the delivery thread: the studio wants pictures shared on the graphics card.
+    std::atomic<bool> share{false};
+    uint8_t uuids[32]{};
     rosorah::Mailbox mailbox;
     std::thread worker;
     std::atomic<bool> stop{false};
@@ -51,9 +77,12 @@ struct Swap {
  F(CreateImage) F(DestroyImage) F(GetImageMemoryRequirements) F(BindImageMemory) F(CmdBlitImage) \
  F(CreateBuffer) F(DestroyBuffer) F(GetBufferMemoryRequirements) F(AllocateMemory) F(FreeMemory) F(BindBufferMemory) F(MapMemory) F(UnmapMemory) F(InvalidateMappedMemoryRanges) \
  F(CreateCommandPool) F(DestroyCommandPool) F(AllocateCommandBuffers) F(ResetCommandPool) F(BeginCommandBuffer) F(EndCommandBuffer) F(CmdPipelineBarrier) F(CmdCopyImageToBuffer) \
- F(CreateFence) F(DestroyFence) F(ResetFences) F(WaitForFences) F(GetFenceStatus) F(CreateSemaphore) F(DestroySemaphore) F(QueueSubmit) F(DeviceWaitIdle)
+ F(CreateFence) F(DestroyFence) F(ResetFences) F(WaitForFences) F(GetFenceStatus) F(CreateSemaphore) F(DestroySemaphore) F(QueueSubmit) F(DeviceWaitIdle) \
+ F(CmdCopyImage) F(GetMemoryFdKHR)
 struct Device {
     VkDevice handle{}; VkPhysicalDevice physical{}; Instance instance;
+    // Exportable memory is available (VK_KHR_external_memory_fd), and this GPU and driver.
+    bool can_share=false; uint8_t device_uuid[16]{}, driver_uuid[16]{};
     PFN_vkGetDeviceProcAddr gdpa{}; PFN_vkSetDeviceLoaderData set_data{};
     VkPhysicalDeviceMemoryProperties memory{};
     std::vector<VkQueueFamilyProperties> families;
@@ -92,6 +121,15 @@ void stop_worker(Swap& s) {
     if(s.worker.joinable())s.worker.join();
     s.fps.store(0,std::memory_order_relaxed);
 }
+// The studio keeps its own reference to shared memory, so freeing it here is safe.
+void free_shared(Device& d,Swap& s) {
+    for(auto& slot:s.shared.slots) {
+        if(slot.image)d.DestroyImage(d.handle,slot.image,nullptr);
+        if(slot.memory)d.FreeMemory(d.handle,slot.memory,nullptr);
+        if(slot.fd>=0)close(slot.fd);
+        slot.image=VK_NULL_HANDLE;slot.memory=VK_NULL_HANDLE;slot.size=0;slot.fd=-1;slot.state.store(0);
+    }
+}
 void cleanup(Device& d,Swap& s) {
     stop_worker(s);
     auto& r=s.read;
@@ -109,9 +147,11 @@ void cleanup(Device& d,Swap& s) {
         if(slot.memory)d.FreeMemory(d.handle,slot.memory,nullptr);
         slot.fence=VK_NULL_HANDLE;slot.pool=VK_NULL_HANDLE;slot.scaled=VK_NULL_HANDLE;
         slot.image_memory=VK_NULL_HANDLE;slot.buffer=VK_NULL_HANDLE;slot.memory=VK_NULL_HANDLE;
-        slot.mapped=nullptr;slot.pending.store(false);
+        slot.mapped=nullptr;slot.shared=-1;slot.pending.store(false);
     }
     r.family=UINT32_MAX;
+    free_shared(d,s);
+    s.shared.stage.store(0);
 }
 uint32_t memory_type(Device& d,uint32_t bits,bool host) {
     uint32_t best=UINT32_MAX;int score=-1;
@@ -134,6 +174,43 @@ bool configure_output(Device& d,Swap& s) {
     auto f=props.optimalTilingFeatures;
     s.filter=(f&VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)?VK_FILTER_LINEAR:VK_FILTER_NEAREST;
     return (f&(VK_FORMAT_FEATURE_BLIT_SRC_BIT|VK_FORMAT_FEATURE_BLIT_DST_BIT))==(VK_FORMAT_FEATURE_BLIT_SRC_BIT|VK_FORMAT_FEATURE_BLIT_DST_BIT);
+}
+// SDR pictures (8- or 10-bit) are shared on the GPU; HDR is tone-mapped on the CPU as before.
+// 10-bit BGR has no matching studio texture format, so it's blitted into RGB order.
+VkFormat shared_format(rosorah::Pixel p) {
+    using P=rosorah::Pixel;
+    return p==P::Bgra8?VK_FORMAT_B8G8R8A8_UNORM:p==P::Rgba8?VK_FORMAT_R8G8B8A8_UNORM:VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+}
+bool shareable(const Device& d,const Swap& s) {
+    using P=rosorah::Pixel;
+    if(!d.can_share || s.color.transfer!=rosorah::Transfer::Srgb || s.color.pixel==P::Rgba16f)return false;
+    if(s.color.pixel!=P::Bgr10)return true;
+    auto get=(PFN_vkGetPhysicalDeviceFormatProperties)d.instance.gipa(d.instance.handle,"vkGetPhysicalDeviceFormatProperties");
+    VkFormatProperties from{},to{};get(d.physical,s.format,&from);get(d.physical,VK_FORMAT_A2B10G10R10_UNORM_PACK32,&to);
+    return (from.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_SRC_BIT) && (to.optimalTilingFeatures&VK_FORMAT_FEATURE_BLIT_DST_BIT);
+}
+std::atomic<uint32_t> next_set{1};
+// Makes the shared slots at the output size, in the UNORM form of the game's format (a copy, not
+// a blit, moves the bytes over unchanged). The studio makes its images exactly like these.
+bool make_shared(Device& d,Swap& s) {
+    auto& set=s.shared;
+    set.format=shared_format(s.color.pixel);set.blit=s.color.pixel==rosorah::Pixel::Bgr10;
+    for(auto& slot:set.slots) {
+        VkExternalMemoryImageCreateInfo external{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO};external.handleTypes=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+        VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};ii.pNext=&external;ii.imageType=VK_IMAGE_TYPE_2D;ii.format=set.format;ii.extent={s.output.width,s.output.height,1};ii.mipLevels=1;ii.arrayLayers=1;ii.samples=VK_SAMPLE_COUNT_1_BIT;ii.tiling=VK_IMAGE_TILING_OPTIMAL;ii.usage=VK_IMAGE_USAGE_TRANSFER_DST_BIT|VK_IMAGE_USAGE_SAMPLED_BIT;ii.sharingMode=VK_SHARING_MODE_EXCLUSIVE;ii.initialLayout=VK_IMAGE_LAYOUT_UNDEFINED;
+        if(d.CreateImage(d.handle,&ii,nullptr,&slot.image)!=VK_SUCCESS)return false;
+        VkMemoryRequirements req{};d.GetImageMemoryRequirements(d.handle,slot.image,&req);
+        VkExportMemoryAllocateInfo exported{VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};exported.handleTypes=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+        VkMemoryDedicatedAllocateInfo dedicated{VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO};dedicated.pNext=&exported;dedicated.image=slot.image;
+        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};ai.pNext=&dedicated;ai.allocationSize=req.size;ai.memoryTypeIndex=memory_type(d,req.memoryTypeBits,false);
+        if(ai.memoryTypeIndex==UINT32_MAX || d.AllocateMemory(d.handle,&ai,nullptr,&slot.memory)!=VK_SUCCESS || d.BindImageMemory(d.handle,slot.image,slot.memory,0)!=VK_SUCCESS)return false;
+        VkMemoryGetFdInfoKHR get{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR};get.memory=slot.memory;get.handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+        if(d.GetMemoryFdKHR(d.handle,&get,&slot.fd)!=VK_SUCCESS){slot.fd=-1;return false;}
+        slot.size=req.size;slot.state.store(0);
+    }
+    set.id=next_set.fetch_add(1)|(uint32_t(getpid())<<16);if(!set.id)set.id=1;
+    set.stage.store(1,std::memory_order_release);
+    return true;
 }
 bool prepare(Device& d,Swap& s,uint32_t family) {
     auto& r=s.read;
@@ -173,31 +250,67 @@ bool completed(Device& d,ReadSlot& slot) {
     VkMappedMemoryRange range{VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE};range.memory=slot.memory;range.size=VK_WHOLE_SIZE;
     return slot.coherent || d.InvalidateMappedMemoryRanges(d.handle,1,&range)==VK_SUCCESS;
 }
+// On the delivery thread: offer made slots, hear the studio's answer, take back slots it's done
+// with (or has held for two seconds, which only happens if a message was lost).
+void share_service(Swap& s) {
+    auto& set=s.shared;auto& mail=s.mailbox;
+    s.share.store(mail.sharing(),std::memory_order_release);
+    for(uint32_t done=mail.take_released(),i=0;i<set.slots.size();i++)
+        if(done&(1u<<i)){int held=2;set.slots[i].state.compare_exchange_strong(held,0);}
+    const uint64_t now=rosorah::now_ns();
+    for(auto& slot:set.slots){int held=2;if(slot.state.load()==2 && now-slot.since.load()>2000000000ull)slot.state.compare_exchange_strong(held,0);}
+    int stage=set.stage.load(std::memory_order_acquire);
+    // A new connection is a new studio: it hears about the set again.
+    if(stage>=2 && stage<=3 && mail.connection()!=set.connection){set.stage.store(1);stage=1;}
+    if(stage==1 && mail.sharing() && mail.connection()) {
+        rosorah::Shared offer;offer.slots=uint32_t(set.slots.size());offer.width=s.output.width;offer.height=s.output.height;offer.format=int32_t(set.format);offer.id=set.id;
+        int fds[8]{};for(size_t i=0;i<set.slots.size();i++){fds[i]=set.slots[i].fd;offer.sizes[i]=set.slots[i].size;}
+        memcpy(offer.device,s.uuids,16);memcpy(offer.driver,s.uuids+16,16);
+        if(mail.offer(offer,fds)){set.connection=mail.connection();set.stage.store(2);}
+    } else if(stage==2) {
+        uint32_t answer=0;
+        if(mail.answer_for(answer))set.stage.store(answer==set.id?3:4);
+    }
+}
 void start_worker(Device& d,Swap& s) {
     if(s.worker.joinable())return;
     s.stop.store(false,std::memory_order_release);
-    s.mailbox.configure(s.output.width,s.output.height,s.color.pixel==rosorah::Pixel::Bgra8,s.color.hdr()?4u:0u);
+    s.mailbox.configure(s.output.width,s.output.height,s.color.pixel==rosorah::Pixel::Bgra8,(s.color.hdr()?4u:0u)|(shareable(d,s)?rosorah::CAN_SHARE:0u));
     s.worker=std::thread([&d,&s] {
         uint64_t delivered=0;rosorah::ColorConverter converter;std::vector<uint8_t> rgba;
+        // A copy that went to a shared slot gives the slot back unless the studio now has it.
+        auto finish=[&s](ReadSlot& slot,bool delivered_to_studio) {
+            if(slot.shared>=0 && !delivered_to_studio)s.shared.slots[slot.shared].state.store(0,std::memory_order_release);
+            slot.shared=-1;slot.pending.store(false,std::memory_order_release);
+        };
         while(!s.stop.load(std::memory_order_acquire)) {
             uint32_t fps=0;
             try {fps=s.mailbox.service();}catch(...){/* A transport failure must not terminate the game. */}
             s.requested_quality.store(s.mailbox.resolution(),std::memory_order_release);
             s.fps.store(fps,std::memory_order_relaxed);
+            share_service(s);
             ReadSlot* latest=nullptr;
             for(auto& slot:s.read.slots)if(completed(d,slot)) {
-                if(slot.timestamp<=delivered){slot.pending.store(false,std::memory_order_release);continue;}
-                if(!latest || slot.timestamp>latest->timestamp){if(latest)latest->pending.store(false,std::memory_order_release);latest=&slot;}
-                else slot.pending.store(false,std::memory_order_release);
+                if(slot.timestamp<=delivered){finish(slot,false);continue;}
+                if(!latest || slot.timestamp>latest->timestamp){if(latest)finish(*latest,false);latest=&slot;}
+                else finish(slot,false);
             }
             if(latest) {
                 delivered=latest->timestamp;
+                bool handed=false;
                 if(fps)try{
-                    const void* pixels=latest->mapped;
-                    if(s.color.convert()){converter.convert(pixels,size_t(s.output.width)*s.output.height,s.color,rgba);pixels=rgba.data();}
-                    s.mailbox.publish(pixels,latest->timestamp);
+                    if(latest->shared>=0) {
+                        auto& slot=s.shared.slots[latest->shared];
+                        slot.since.store(rosorah::now_ns(),std::memory_order_relaxed);
+                        slot.state.store(2,std::memory_order_release);
+                        handed=s.mailbox.publish_shared(uint32_t(latest->shared),latest->timestamp);
+                    } else {
+                        const void* pixels=latest->mapped;
+                        if(s.color.convert()){converter.convert(pixels,size_t(s.output.width)*s.output.height,s.color,rgba);pixels=rgba.data();}
+                        s.mailbox.publish(pixels,latest->timestamp);
+                    }
                 }catch(...){}
-                latest->pending.store(false,std::memory_order_release);
+                finish(*latest,handed);
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(fps?1:20));
         }
@@ -209,6 +322,12 @@ VkSemaphore submit_copy(Device& d,VkQueue queue,Swap& s,uint32_t image,const VkP
     for(auto& slot:s.read.slots)if(!slot.pending.load(std::memory_order_acquire)){free=&slot;break;}
     if(!free)return VK_NULL_HANDLE;
     auto& r=*free;
+    // Shared with the studio on the GPU when it's taken the set: into a free slot, or not at all.
+    int shared=-1;
+    if(s.shared.stage.load(std::memory_order_acquire)==3 && s.share.load(std::memory_order_acquire)) {
+        for(size_t i=0;i<s.shared.slots.size();i++)if(s.shared.slots[i].state.load(std::memory_order_acquire)==0){shared=int(i);break;}
+        if(shared<0)return VK_NULL_HANDLE;
+    }
     if(d.ResetCommandPool(d.handle,r.pool,0)!=VK_SUCCESS)return VK_NULL_HANDLE;
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     if(d.BeginCommandBuffer(r.command,&begin)!=VK_SUCCESS)return VK_NULL_HANDLE;
@@ -225,11 +344,28 @@ VkSemaphore submit_copy(Device& d,VkQueue queue,Swap& s,uint32_t image,const VkP
         scale.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;scale.dstAccessMask=VK_ACCESS_TRANSFER_READ_BIT;scale.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;scale.newLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         d.CmdPipelineBarrier(r.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&scale);source=r.scaled;
     }
-    VkBufferImageCopy region{};region.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.imageExtent={s.output.width,s.output.height,1};
-    d.CmdCopyImageToBuffer(r.command,source,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,r.buffer,1,&region);
-    barrier.srcAccessMask=VK_ACCESS_TRANSFER_READ_BIT;barrier.dstAccessMask=0;barrier.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;barrier.newLayout=return_layout;
-    VkBufferMemoryBarrier host{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};host.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;host.dstAccessMask=VK_ACCESS_HOST_READ_BIT;host.srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;host.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;host.buffer=r.buffer;host.size=VK_WHOLE_SIZE;
-    d.CmdPipelineBarrier(r.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT|VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,0,0,nullptr,1,&host,1,&barrier);
+    if(shared>=0) {
+        // Bytes as they are into the shared slot, left ready for the studio to sample.
+        VkImageMemoryBarrier slot=barrier;slot.image=s.shared.slots[shared].image;slot.srcAccessMask=0;slot.dstAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;slot.oldLayout=VK_IMAGE_LAYOUT_UNDEFINED;slot.newLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        d.CmdPipelineBarrier(r.command,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,VK_PIPELINE_STAGE_TRANSFER_BIT,0,0,nullptr,0,nullptr,1,&slot);
+        if(s.shared.blit) {
+            VkImageBlit blit{};blit.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};blit.dstSubresource=blit.srcSubresource;blit.srcOffsets[1]={int32_t(s.output.width),int32_t(s.output.height),1};blit.dstOffsets[1]=blit.srcOffsets[1];
+            d.CmdBlitImage(r.command,source,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,slot.image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&blit,VK_FILTER_NEAREST);
+        } else {
+            VkImageCopy copy{};copy.srcSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};copy.dstSubresource=copy.srcSubresource;copy.extent={s.output.width,s.output.height,1};
+            d.CmdCopyImage(r.command,source,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,slot.image,VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,1,&copy);
+        }
+        slot.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;slot.dstAccessMask=VK_ACCESS_SHADER_READ_BIT;slot.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;slot.newLayout=VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcAccessMask=VK_ACCESS_TRANSFER_READ_BIT;barrier.dstAccessMask=0;barrier.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;barrier.newLayout=return_layout;
+        VkImageMemoryBarrier both[2]={slot,barrier};
+        d.CmdPipelineBarrier(r.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT|VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,0,0,nullptr,0,nullptr,2,both);
+    } else {
+        VkBufferImageCopy region{};region.imageSubresource={VK_IMAGE_ASPECT_COLOR_BIT,0,0,1};region.imageExtent={s.output.width,s.output.height,1};
+        d.CmdCopyImageToBuffer(r.command,source,VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,r.buffer,1,&region);
+        barrier.srcAccessMask=VK_ACCESS_TRANSFER_READ_BIT;barrier.dstAccessMask=0;barrier.oldLayout=VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;barrier.newLayout=return_layout;
+        VkBufferMemoryBarrier host{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};host.srcAccessMask=VK_ACCESS_TRANSFER_WRITE_BIT;host.dstAccessMask=VK_ACCESS_HOST_READ_BIT;host.srcQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;host.dstQueueFamilyIndex=VK_QUEUE_FAMILY_IGNORED;host.buffer=r.buffer;host.size=VK_WHOLE_SIZE;
+        d.CmdPipelineBarrier(r.command,VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT|VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,0,0,nullptr,1,&host,1,&barrier);
+    }
     if(d.EndCommandBuffer(r.command)!=VK_SUCCESS)return VK_NULL_HANDLE;
     std::vector<VkPipelineStageFlags> stages(present.waitSemaphoreCount,VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
     VkSemaphore signal=s.read.ready[image];
@@ -238,6 +374,8 @@ VkSemaphore submit_copy(Device& d,VkQueue queue,Swap& s,uint32_t image,const VkP
     r.timestamp=rosorah::now_ns();
     if(d.QueueSubmit(queue,1,&submit,r.fence)!=VK_SUCCESS)return VK_NULL_HANDLE;
     // Nothing that can throw or fail may occur after consuming the game's waits.
+    if(shared>=0)s.shared.slots[shared].state.store(1,std::memory_order_release);
+    r.shared=shared;
     r.pending.store(true,std::memory_order_release);return signal;
 }
 VkSemaphore capture(Device& d,VkQueue queue,Swap& s,uint32_t image,const VkPresentInfoKHR& present) {
@@ -253,6 +391,12 @@ VkSemaphore capture(Device& d,VkQueue queue,Swap& s,uint32_t image,const VkPrese
     const uint64_t now=rosorah::now_ns(), interval=1000000000ull/(fps*2);
     if(!rosorah::capture_due(now,s.next_capture,interval))return VK_NULL_HANDLE;
     if(!prepare(d,s,qi->second))return VK_NULL_HANDLE;
+    // The studio can draw straight from the GPU: make the shared slots once (a failure keeps
+    // the memory path for this swapchain).
+    if(s.share.load(std::memory_order_acquire) && s.shared.stage.load(std::memory_order_acquire)==0 && shareable(d,s)) {
+        memcpy(s.uuids,d.device_uuid,16);memcpy(s.uuids+16,d.driver_uuid,16);
+        if(!make_shared(d,s)){free_shared(d,s);s.shared.stage.store(4);}
+    }
     auto ready=submit_copy(d,queue,s,image,present,VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
     if(ready)s.next_capture=rosorah::following_capture(now,s.next_capture,interval);
     return ready;
@@ -270,8 +414,25 @@ __attribute__((visibility("default"))) VkResult VKAPI_CALL vkCreateInstance(cons
     if(!link || !link->u.pLayerInfo)return VK_ERROR_INITIALIZATION_FAILED;
     auto gipa=link->u.pLayerInfo->pfnNextGetInstanceProcAddr;auto gpdpa=link->u.pLayerInfo->pfnNextGetPhysicalDeviceProcAddr;
     auto create=(PFN_vkCreateInstance)gipa(VK_NULL_HANDLE,"vkCreateInstance");link->u.pLayerInfo=link->u.pLayerInfo->pNext;
-    VkResult result=create(ci,a,out);
-    if(result==VK_SUCCESS){std::lock_guard<std::recursive_mutex> lock(gate);instances[key(*out)]={*out,gipa,gpdpa};}
+    // Vulkan 1.0 games get the two instance extensions sharing on the GPU needs (to name the GPU
+    // and driver); if the instance can't be made with them, it's made exactly as asked.
+    const uint32_t api=ci->pApplicationInfo && ci->pApplicationInfo->apiVersion?ci->pApplicationInfo->apiVersion:VK_API_VERSION_1_0;
+    std::vector<const char*> extensions(ci->ppEnabledExtensionNames,ci->ppEnabledExtensionNames+ci->enabledExtensionCount);
+    bool added=false;
+    if(api<VK_API_VERSION_1_1 && !rosorah::self_excluded())
+        for(const char* name:{"VK_KHR_get_physical_device_properties2","VK_KHR_external_memory_capabilities"})
+            if(std::none_of(extensions.begin(),extensions.end(),[&](const char* e){return strcmp(e,name)==0;})){extensions.push_back(name);added=true;}
+    auto with=*ci;with.enabledExtensionCount=uint32_t(extensions.size());with.ppEnabledExtensionNames=extensions.data();
+    VkResult result=create(&with,a,out);
+    bool extended=api>=VK_API_VERSION_1_1 || result==VK_SUCCESS;
+    if(result!=VK_SUCCESS && added){extended=false;result=create(ci,a,out);}
+    if(result==VK_SUCCESS) {
+        Instance instance{*out,gipa,gpdpa,api};
+        // Without them a 1.0 game may still have asked for both itself.
+        if(!extended){int both=0;for(uint32_t i=0;i<ci->enabledExtensionCount;i++)for(const char* name:{"VK_KHR_get_physical_device_properties2","VK_KHR_external_memory_capabilities"})both+=strcmp(ci->ppEnabledExtensionNames[i],name)==0;extended=both==2;}
+        if(extended)instance.properties2=(PFN_vkGetPhysicalDeviceProperties2)gipa(*out,api>=VK_API_VERSION_1_1?"vkGetPhysicalDeviceProperties2":"vkGetPhysicalDeviceProperties2KHR");
+        std::lock_guard<std::recursive_mutex> lock(gate);instances[key(*out)]=instance;
+    }
     return result;
 }
 __attribute__((visibility("default"))) void VKAPI_CALL vkDestroyInstance(VkInstance h,const VkAllocationCallbacks* a) {
@@ -287,12 +448,39 @@ __attribute__((visibility("default"))) VkResult VKAPI_CALL vkCreateDevice(VkPhys
     if(!link || !link->u.pLayerInfo)return VK_ERROR_INITIALIZATION_FAILED;
     auto gipa=link->u.pLayerInfo->pfnNextGetInstanceProcAddr;auto gdpa=link->u.pLayerInfo->pfnNextGetDeviceProcAddr;
     auto create=(PFN_vkCreateDevice)gipa(instance.handle,"vkCreateDevice");link->u.pLayerInfo=link->u.pLayerInfo->pNext;
-    VkResult result=create(physical,ci,a,out);if(result!=VK_SUCCESS)return result;
+    // Sharing pictures with the studio on the GPU needs exportable memory, so the layer turns on
+    // VK_KHR_external_memory_fd (and, for Vulkan 1.0, the extensions 1.1 made core) when the GPU
+    // has them. If the device can't be made with them, it's made exactly as the game asked.
+    VkPhysicalDeviceProperties gpu{};((PFN_vkGetPhysicalDeviceProperties)gipa(instance.handle,"vkGetPhysicalDeviceProperties"))(physical,&gpu);
+    std::vector<const char*> needed{"VK_KHR_external_memory_fd"};
+    if(instance.api<VK_API_VERSION_1_1 || gpu.apiVersion<VK_API_VERSION_1_1)
+        needed.insert(needed.end(),{"VK_KHR_external_memory","VK_KHR_get_memory_requirements2","VK_KHR_dedicated_allocation"});
+    std::vector<const char*> extensions(ci->ppEnabledExtensionNames,ci->ppEnabledExtensionNames+ci->enabledExtensionCount);
+    auto has=[&](const char* name){return std::any_of(extensions.begin(),extensions.end(),[&](const char* e){return strcmp(e,name)==0;});};
+    bool available=instance.properties2!=nullptr;
+    if(available) {
+        auto list=(PFN_vkEnumerateDeviceExtensionProperties)gipa(instance.handle,"vkEnumerateDeviceExtensionProperties");uint32_t n=0;std::vector<VkExtensionProperties> e;
+        if(list && list(physical,nullptr,&n,nullptr)==VK_SUCCESS){e.resize(n);if(list(physical,nullptr,&n,e.data())!=VK_SUCCESS)e.clear();}
+        for(const char* name:needed)available=available && std::any_of(e.begin(),e.end(),[&](const VkExtensionProperties& x){return strcmp(x.extensionName,name)==0;});
+    }
+    const bool asked=std::all_of(needed.begin(),needed.end(),has);
+    bool added=false;auto with=*ci;
+    if(available && !asked && !rosorah::self_excluded()) {
+        for(const char* name:needed)if(!has(name))extensions.push_back(name);
+        with.enabledExtensionCount=uint32_t(extensions.size());with.ppEnabledExtensionNames=extensions.data();added=true;
+    }
+    VkResult result=create(physical,&with,a,out);
+    if(result!=VK_SUCCESS && added){added=false;result=create(physical,ci,a,out);}
+    if(result!=VK_SUCCESS)return result;
     auto d=std::make_shared<Device>();d->handle=*out;d->physical=physical;d->instance=instance;d->gdpa=gdpa;d->set_data=set_data;
 #define LOAD(n) d->n=(PFN_vk##n)gdpa(*out,"vk" #n);
     DEVICE_FUNCTIONS(LOAD)
 #undef LOAD
     ((PFN_vkGetPhysicalDeviceMemoryProperties)gipa(instance.handle,"vkGetPhysicalDeviceMemoryProperties"))(physical,&d->memory);
+    if(available && (asked || added) && d->GetMemoryFdKHR && d->CmdCopyImage) {
+        VkPhysicalDeviceIDProperties id{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ID_PROPERTIES};VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};p2.pNext=&id;
+        instance.properties2(physical,&p2);memcpy(d->device_uuid,id.deviceUUID,16);memcpy(d->driver_uuid,id.driverUUID,16);d->can_share=true;
+    }
     auto props=(PFN_vkGetPhysicalDeviceQueueFamilyProperties)gipa(instance.handle,"vkGetPhysicalDeviceQueueFamilyProperties");uint32_t count=0;props(physical,&count,nullptr);d->families.resize(count);props(physical,&count,d->families.data());
     // Multi-device and protected operation are deliberately excluded from capture.
     bool group=false;for(auto* p=(const VkBaseInStructure*)ci->pNext;p;p=p->pNext)if(p->sType==VK_STRUCTURE_TYPE_DEVICE_GROUP_DEVICE_CREATE_INFO && ((const VkDeviceGroupDeviceCreateInfo*)p)->physicalDeviceCount>1)group=true;

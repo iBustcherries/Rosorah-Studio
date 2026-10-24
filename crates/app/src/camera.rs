@@ -415,7 +415,7 @@ pub fn transform(frame: Frame, settings: &CameraSettings) -> Result<Frame> {
             rgba.extend_from_slice(row);
         }
     }
-    Ok(Frame {
+    Ok(Frame { shared: None,
         width,
         height,
         rgba,
@@ -434,7 +434,7 @@ mod tests {
             flip: true,
             ..Default::default()
         };
-        let f = Frame {
+        let f = Frame { shared: None,
             width: 3,
             height: 2,
             rgba: (0u8..6).flat_map(|v| [v, 0, 0, 255]).collect(),

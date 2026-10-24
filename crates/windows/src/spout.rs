@@ -223,7 +223,7 @@ impl Receiver {
                 px.swap(0, 2);
             }
         }
-        Ok(Some(Frame { width: info.width, height: info.height, rgba }))
+        Ok(Some(Frame { shared: None, width: info.width, height: info.height, rgba }))
     }
 }
 /// Shows one Spout sender's picture as a source.

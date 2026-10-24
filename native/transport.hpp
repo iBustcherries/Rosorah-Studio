@@ -46,7 +46,17 @@ struct Header {
     char name[64]{};
 };
 struct Message { uint32_t magic=MAGIC, version=VERSION, kind=1, value=0; };
-static_assert(sizeof(Header)==112 && sizeof(Message)==16);
+// Header flag: this game can share its pictures on the graphics card (Vulkan opaque memory).
+constexpr uint32_t CAN_SHARE=16;
+// Pictures shared on the graphics card: a set of slots, offered once with their memory as
+// file descriptors. Only the same GPU and driver can use them, so both are named.
+struct Shared {
+    uint32_t magic=MAGIC, version=VERSION, kind=10, slots=0;
+    uint32_t width=0, height=0; int32_t format=0; uint32_t id=0;
+    uint64_t sizes[8]{};
+    uint8_t device[16]{}, driver[16]{};
+};
+static_assert(sizeof(Header)==112 && sizeof(Message)==16 && sizeof(Shared)==128);
 inline bool self_excluded() {
     char exe[4096]{}; ssize_t n=readlink("/proc/self/exe",exe,sizeof(exe)-1);
     if(n>0) { exe[n]=0; const char* name=strrchr(exe,'/'); name=name?name+1:exe;
@@ -73,8 +83,12 @@ class Mailbox {
     Header header;
     std::string address_path;
     uint32_t rate=0, quality=1;
+    // Sharing on the graphics card: whether the studio wants it, its answer to the offered set
+    // (its id, or 0 for no), slots it has finished with, and which connection this is.
+    bool share=false, answered=false;
+    uint32_t answer=0, released=0, connections=0;
     void disconnect() {
-        rate=0;
+        rate=0;share=false;answered=false;answer=0;released=0;
         if(socket>=0)close(socket);
         if(mapped!=MAP_FAILED)munmap(mapped,CAPACITY);
         if(fd>=0)close(fd);
@@ -104,6 +118,7 @@ class Mailbox {
         auto* c=CMSG_FIRSTHDR(&msg);c->cmsg_level=SOL_SOCKET;c->cmsg_type=SCM_RIGHTS;c->cmsg_len=CMSG_LEN(sizeof(int));
         memcpy(CMSG_DATA(c),&fd,sizeof(fd));
         if(sendmsg(socket,&msg,MSG_NOSIGNAL|MSG_DONTWAIT)!=sizeof(header))disconnect();
+        else connections++;
     }
 public:
     explicit Mailbox(std::string path=socket_path()):address_path(std::move(path)){}
@@ -124,13 +139,49 @@ public:
             Message m{};ssize_t n=recv(socket,&m,sizeof(m),MSG_DONTWAIT|MSG_TRUNC);
             if(n<0 && errno==EINTR)continue;
             if(n<0 && (errno==EAGAIN || errno==EWOULDBLOCK))break;
-            if(n!=sizeof(m) || m.magic!=MAGIC || m.version!=VERSION || !((m.kind==1 && (m.value==0 || m.value==30 || m.value==60)) || (m.kind==3 && m.value<=4))){disconnect();break;}
-            if(m.kind==1)rate=m.value;else quality=m.value;
+            const bool valid=(m.kind==1 && (m.value==0 || m.value==30 || m.value==60)) || (m.kind==3 && m.value<=4)
+                || (m.kind==4 && m.value<32) || (m.kind==5 && m.value<=1) || m.kind==6;
+            if(n!=sizeof(m) || m.magic!=MAGIC || m.version!=VERSION || !valid){disconnect();break;}
+            if(m.kind==1)rate=m.value;
+            else if(m.kind==3)quality=m.value;
+            else if(m.kind==4)released|=1u<<m.value;
+            else if(m.kind==5){share=m.value==1;answered=false;}
+            else {answered=true;answer=m.value;}
         }
         return rate;
     }
+    // Sharing on the graphics card, for the background delivery thread.
+    bool sharing() const {return share;}
+    uint32_t connection() const {return socket>=0?connections:0;}
+    // The studio's answer to the offered set: its id when accepted, 0 when refused.
+    bool answer_for(uint32_t& value) const {value=answer;return answered;}
+    uint32_t take_released() {uint32_t r=released;released=0;return r;}
+    bool offer(const Shared& set,const int* fds) {
+        if(socket<0 || set.slots==0 || set.slots>8)return false;
+        iovec iov{const_cast<Shared*>(&set),sizeof(set)};
+        alignas(cmsghdr) char control[CMSG_SPACE(8*sizeof(int))]{};
+        msghdr msg{};msg.msg_iov=&iov;msg.msg_iovlen=1;msg.msg_control=control;msg.msg_controllen=CMSG_SPACE(set.slots*sizeof(int));
+        auto* c=CMSG_FIRSTHDR(&msg);c->cmsg_level=SOL_SOCKET;c->cmsg_type=SCM_RIGHTS;c->cmsg_len=CMSG_LEN(set.slots*sizeof(int));
+        memcpy(CMSG_DATA(c),fds,set.slots*sizeof(int));
+        answered=false;
+        if(sendmsg(socket,&msg,MSG_NOSIGNAL|MSG_DONTWAIT)!=sizeof(set)){disconnect();return false;}
+        return true;
+    }
+    // A frame left in a shared slot: the header says which (slot+1), with no pixels copied.
+    bool publish_shared(uint32_t slot,uint64_t captured_at) {
+        if(!rate || fd<0 || !header.width || !header.height)return false;
+        for(int tries=0;flock(fd,LOCK_EX|LOCK_NB)!=0;tries++){if(tries==16)return false;usleep(250);}
+        header.sequence++;header.timestamp=captured_at;header.reserved=slot+1;
+        memcpy(mapped,&header,sizeof(header));
+        flock(fd,LOCK_UN);
+        Message ready;ready.kind=2;
+        ssize_t n=send(socket,&ready,sizeof(ready),MSG_NOSIGNAL|MSG_DONTWAIT);
+        if(n<0 && errno!=EAGAIN && errno!=EWOULDBLOCK)disconnect();
+        return true;
+    }
     bool publish(const void* pixels,uint64_t captured_at) {
         if(!rate || fd<0 || !pixels || !header.width || !header.height || header.width>4096 || header.height>4096)return false;
+        header.reserved=0;
         // Reader reopens its received memfd to get an independent flock owner. The studio holds
         // the lock only while copying a frame out, so this worker thread (never the game's)
         // waits up to 4 ms for it; dropping at once lost frames whenever the two met.

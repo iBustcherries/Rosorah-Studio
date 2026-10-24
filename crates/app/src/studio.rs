@@ -8595,12 +8595,12 @@ mod reuse_preview_tests {
             let x = i as u32 % w;
             px.copy_from_slice(&if x < w / 2 { [255, 0, 0, 255] } else { [0, 0, 255, 255] });
         }
-        let picture = preview_picture(&rosorah_capture::Frame { width: w, height: h, rgba }, 320, 180).unwrap();
+        let picture = preview_picture(&rosorah_capture::Frame { shared: None, width: w, height: h, rgba }, 320, 180).unwrap();
         assert_eq!(picture.size, [320, 180]);
         assert_eq!(picture.pixels[0], Color32::from_rgb(255, 0, 0));
         assert_eq!(picture.pixels[319], Color32::from_rgb(0, 0, 255));
-        let tall = preview_picture(&rosorah_capture::Frame { width: 1080, height: 1920, rgba: vec![9; 1080 * 1920 * 4] }, 320, 180).unwrap();
+        let tall = preview_picture(&rosorah_capture::Frame { shared: None, width: 1080, height: 1920, rgba: vec![9; 1080 * 1920 * 4] }, 320, 180).unwrap();
         assert_eq!(tall.size, [101, 180]);
-        assert!(preview_picture(&rosorah_capture::Frame { width: 10, height: 10, rgba: vec![] }, 320, 180).is_none());
+        assert!(preview_picture(&rosorah_capture::Frame { shared: None, width: 10, height: 10, rgba: vec![] }, 320, 180).is_none());
     }
 }

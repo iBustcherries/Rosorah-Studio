@@ -64,7 +64,7 @@ impl rosorah_capture::Backend for VideoBackend {
         let ext=std::path::Path::new(&self.settings.path).extension().and_then(|s|s.to_str()).unwrap_or("").to_ascii_lowercase();
         if ["png","jpg","jpeg"].contains(&ext.as_str()) {
             let image=image::open(&self.settings.path).context("Could not open alert image")?.thumbnail(4096,4096).into_rgba8();
-            output.publish(rosorah_capture::Frame{width:image.width(),height:image.height(),rgba:image.into_raw()})?;
+            output.publish(rosorah_capture::Frame{ shared: None,width:image.width(),height:image.height(),rgba:image.into_raw()})?;
             let until=std::time::Instant::now()+std::time::Duration::from_secs(self.settings.duration_secs.max(1) as u64);
             while !*cancel.borrow()&&std::time::Instant::now()<until{std::thread::sleep(std::time::Duration::from_millis(20));}
             return Ok(());
