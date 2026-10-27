@@ -1,5 +1,7 @@
 /target/
 /artifacts/
+# Windows development builds (packaging/windows/build.ps1).
+/dist/
 *.tmp
 
 
