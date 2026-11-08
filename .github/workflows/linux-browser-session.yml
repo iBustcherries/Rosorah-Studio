@@ -1,0 +1,40 @@
+name: Linux browser helpers in Wayland and X11 sessions
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  browser-session:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { session: wayland, scale: '1' }
+          - { session: wayland, scale: '2' }
+          - { session: x11, scale: '1' }
+    name: ${{ matrix.session }} (scale ${{ matrix.scale }})
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install a session and the browser's system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends sway grim xvfb python3-venv \
+            libnss3 libxkbfile1 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libxshmfence1 \
+            libgbm1 libasound2t64 libegl1 libgl1 libopengl0 libegl-mesa0 libgl1-mesa-dri \
+            libxkbcommon0 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 \
+            libxcb-shape0 libxcb-xinerama0 libxcb-randr0 libxcb-render-util0 libxcb-image0 \
+            libwayland-client0 libwayland-cursor0 libwayland-egl1 libfontconfig1 libdbus-1-3 fonts-dejavu-core
+          # Ubuntu 24.04 blocks the user namespaces Chromium's sandbox uses; Fedora and Debian don't.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Install the browser runtime Rosorah downloads
+        run: |
+          version=$(grep -oP 'PYSIDE6_VERSION: &str = "\K[^"]+' crates/app/src/browser_chat.rs)
+          python3 -m venv ~/runtime
+          ~/runtime/bin/pip install --disable-pip-version-check "PySide6==$version"
+      - name: Run the helpers in the session
+        run: scripts/browser-session-test.sh ${{ matrix.session }} ${{ matrix.scale }} ~/runtime/bin/python
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-session-${{ matrix.session }}-${{ matrix.scale }}
+          path: session-artifacts
+          if-no-files-found: ignore
+# Headless sway with software rendering: proves the helpers' Wayland paths, not a given GPU driver.
