@@ -29,6 +29,7 @@ def main():
     profile=QWebEngineProfile('rosorah-docks',view)
     profile.setPersistentStoragePath(config['storage']);profile.setCachePath(os.path.join(config['storage'],'cache'))
     profile.setHttpCacheMaximumSize(64*1024*1024)
+    import no_passkeys;no_passkeys.install(profile)
     profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
     profile.downloadRequested.connect(lambda item:item.cancel())
     page=Page(profile,view);view.setPage(page)

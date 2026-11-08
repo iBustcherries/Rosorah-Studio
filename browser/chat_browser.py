@@ -5,6 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import QUrl, QTimer, Signal, QObject, Slot, QFile, QIODevice, Qt
 from PySide6.QtWebChannel import QWebChannel
 from emotes import Images, safe_url
+import no_passkeys
 from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget, QToolBar
 from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineScript, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -89,6 +90,7 @@ class Window(QMainWindow):
         self.profile=QWebEngineProfile('rosorah-chat',self)
         self.profile.setPersistentStoragePath(str(path));self.profile.setCachePath(str(path/'cache'))
         self.profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.AllowPersistentCookies)
+        no_passkeys.install(self.profile)
         self.combined=QWebEngineView(); self.combined.settings().setAttribute(QWebEngineSettings.WebAttribute.LocalContentCanAccessRemoteUrls,True); self.tabs.addTab(self.combined,'Combined');self.combined.setHtml((BASE/'dock.html').read_text(),QUrl('about:blank'))
         self.ready=False;self.combined.loadFinished.connect(self.combined_ready)
         self.composer=ComposerBridge(self);self.dock_channel=QWebChannel(self.combined.page());self.dock_channel.registerObject('composer',self.composer);self.combined.page().setWebChannel(self.dock_channel)

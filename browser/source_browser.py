@@ -125,6 +125,7 @@ def main():
         profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
     else:profile=QWebEngineProfile(view)
     profile.setHttpCacheMaximumSize(32*1024*1024)
+    import no_passkeys;no_passkeys.install(profile)
     profile.downloadRequested.connect(lambda item:item.cancel())
     page=Page(profile,view);view.setPage(page);page.setBackgroundColor(QColor(0,0,0,0));page.setAudioMuted(not (sound.ready or system_audio))
     # Overlays made for OBS: its stylesheet box and its window.obsstudio API.
