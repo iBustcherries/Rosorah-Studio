@@ -86,7 +86,7 @@ pub fn open(path: &Path) -> Result<(Project, Option<String>)> {
     let use_backups = saved.as_ref().map_or(true, |p| p.preferences.backups.restore_on_start);
     let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
     if use_backups {
-        for entry in crate::backups::list(path) {
+        for entry in crate::backups::list(path).into_iter().filter(|e| !crate::backups::in_future(e.modified)) {
             if saved.is_ok() && modified.is_some_and(|m| entry.modified <= m) {
                 break;
             }
@@ -125,6 +125,25 @@ mod tests {
         assert_eq!(open(&file).unwrap().0.scenes[0].name, "Saved later");
         std::fs::write(&file, "not json").unwrap();
         assert_eq!(open(&file).unwrap().0.scenes[0].name, "Backed up", "a damaged project falls back to its backup");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn backups_dated_in_the_future_are_not_opened_at_start() {
+        let dir = std::env::temp_dir().join(format!("rosorah-future-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("project.json");
+        let mut project = Project::default();
+        project.scenes[0].name = "Hours old".into();
+        let backup = crate::backups::create(&project, &file, "on close", 5).unwrap();
+        // Written while the clock was five hours ahead.
+        let ahead = std::time::SystemTime::now() + std::time::Duration::from_secs(5 * 3600);
+        std::fs::File::options().write(true).open(&backup).unwrap().set_modified(ahead).unwrap();
+        project.scenes[0].name = "Saved just now".into();
+        project.save(&file).unwrap();
+        let (opened, note) = open(&file).unwrap();
+        assert_eq!(opened.scenes[0].name, "Saved just now");
+        assert!(note.is_none());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

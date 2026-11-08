@@ -10,6 +10,13 @@ pub struct Entry {
     pub modified: std::time::SystemTime,
 }
 
+/// A file time later than now: written while the computer's clock was ahead (a dual-boot
+/// clock jumping back hours, say). Such a file would look newer than every real save until
+/// the clock caught up, so the newest-file checks at start leave it out.
+pub fn in_future(time: std::time::SystemTime) -> bool {
+    time > std::time::SystemTime::now() + std::time::Duration::from_secs(120)
+}
+
 fn folder(project: &Path) -> PathBuf {
     project.with_extension("backups")
 }

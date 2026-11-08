@@ -1042,7 +1042,7 @@ impl Studio {
                     .and_then(|m| m.modified())
                     .ok(),
             )
-            .is_some_and(|(a, b)| a > b);
+            .is_some_and(|(a, b)| a > b && !crate::backups::in_future(a));
         let recovery_candidate = if newer {
             Project::load(&recovery_path).ok()
         } else {
