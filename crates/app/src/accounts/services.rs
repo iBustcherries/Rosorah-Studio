@@ -842,6 +842,7 @@ impl Session {
             ),
             "This broadcast has ended"
         );
+        let mut keyed = false;
         if let Some(bound) = item["contentDetails"]["boundStreamId"]
             .as_str()
             .filter(|v| !v.is_empty())
@@ -857,6 +858,7 @@ impl Session {
                     .or(info["ingestionAddress"].as_str())
                     .unwrap_or("rtmps://a.rtmps.youtube.com:443/live2");
                 let _ = tx.send(Event::Ingest(server.into(), key.into()));
+                keyed = true;
             }
         }
         self.bound_stream = item["contentDetails"]["boundStreamId"]
@@ -878,7 +880,10 @@ impl Session {
             snippet["categoryId"].as_str().unwrap_or("").into(),
         ));
         let _ = tx.send(Event::Status(
-            if self.chat_id.is_empty() {
+            if !keyed {
+                // Without a linked key there is nothing to stream to; say so rather than look done.
+                "Broadcast selected, but it has no stream key linked. Choose a key below and use Link selected broadcast to this key."
+            } else if self.chat_id.is_empty() {
                 "Broadcast selected; live chat is unavailable"
             } else {
                 "Broadcast selected; chat follows automatically"
