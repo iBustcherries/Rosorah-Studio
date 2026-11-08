@@ -35,4 +35,12 @@ x11)
 *) echo "unknown session $session" >&2; exit 2 ;;
 esac
 "$python" -c 'from PySide6.QtWidgets import QApplication;a=QApplication([]);print("Qt platform:",a.platformName())'
+if [ -n "${ROSORAH_SESSION_PROBE:-}" ] && command -v gdb >/dev/null; then
+    # Starts background chat repeatedly under gdb and keeps the backtrace of any crash.
+    export XDG_DATA_HOME=$(mktemp -d)
+    for i in $(seq "$ROSORAH_SESSION_PROBE"); do
+        gdb -q -batch -ex 'set pagination off' -ex 'handle SIGPIPE nostop noprint'             -ex 'run browser/chat_browser.py --background </dev/null >/dev/null 2>&1'             -ex 'info threads' -ex 'thread apply all bt 25' --args "$python"             >"$ROSORAH_SESSION_ARTIFACTS/probe-$i.txt" 2>&1 || true
+        if grep -q 'SIGSEGV\|SIGABRT' "$ROSORAH_SESSION_ARTIFACTS/probe-$i.txt"; then echo "probe $i crashed"; else rm "$ROSORAH_SESSION_ARTIFACTS/probe-$i.txt"; fi
+    done
+fi
 exec "$python" browser/test_session.py -v

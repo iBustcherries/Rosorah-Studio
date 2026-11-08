@@ -16,7 +16,7 @@ jobs:
       - name: Install a session and the browser's system libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends sway grim wtype xvfb python3-venv \
+          sudo apt-get install -y --no-install-recommends sway grim wtype gdb xvfb python3-venv \
             libnss3 libxkbfile1 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libxshmfence1 \
             libgbm1 libasound2t64 libegl1 libgl1 libopengl0 libegl-mesa0 libgl1-mesa-dri \
             libxkbcommon0 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 \
@@ -34,7 +34,7 @@ jobs:
       - name: Run the helpers in the session
         env:
           ROSORAH_ACTIVATION_TOKEN_TOOL: ${{ github.workspace }}/target/debug/rosorah-activation-token
-          ROSORAH_SESSION_DEBUG: '1'
+          ROSORAH_SESSION_PROBE: '20'
         run: scripts/browser-session-test.sh ${{ matrix.session }} ${{ matrix.scale }} ~/runtime/bin/python
       - if: always()
         uses: actions/upload-artifact@v4
