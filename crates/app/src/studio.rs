@@ -7386,6 +7386,8 @@ mod local_chat_time_tests {
 
 impl eframe::App for Studio {
     fn raw_input_hook(&mut self, _: &egui::Context, input: &mut egui::RawInput) {
+        // The latest click's serial, for the token that brings a helper's window forward.
+        rosorah_activation::pump();
         if let Some(what) = self.demo_input {
             let key = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() };
             // Bottom left, under the Scenes list: away from both canvases and from Layers.

@@ -6,6 +6,7 @@ from PySide6.QtCore import QUrl, QTimer, Signal, QObject, Slot, QFile, QIODevice
 from PySide6.QtWebChannel import QWebChannel
 from emotes import Images, safe_url
 import no_passkeys
+from desktop_session import APP_ID, bring_forward, prepare
 from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget, QToolBar
 from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineScript, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -76,8 +77,8 @@ class OffscreenChatView(ChatView):
         super().__init__();self.setWindowTitle(title);self.resize(*size);self.tuck()
     def tuck(self):
         self.hide();self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen,True);self.show()
-    def reveal(self):
-        self.hide();self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen,False);self.showNormal();self.raise_();self.activateWindow()
+    def reveal(self,token=None):
+        self.hide();self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen,False);bring_forward(self,token)
     def closeEvent(self,event):
         event.ignore();self.tuck()
 
@@ -119,8 +120,7 @@ class Window(QMainWindow):
         except ValueError:return
         typ=msg.get('type')
         if typ=='quit':self.shutdown()
-        elif typ=='show':
-            self.showNormal();self.raise_();self.activateWindow()
+        elif typ=='show':bring_forward(self,msg.get('activation'))
         elif typ=='reload':self.reload()
         elif typ=='post_result':
             if self.ready:self.combined.page().runJavaScript('window.postResult('+json.dumps(msg)+')')
@@ -129,7 +129,7 @@ class Window(QMainWindow):
         elif typ=='invite_action' and msg.get('action') in ('accept','decline','forget') and DASHBOARD in self.sources:
             call='forget()' if msg['action']=='forget' else 'answer('+json.dumps(msg['action'])+')'
             self.sources[DASHBOARD].page().runJavaScript('window.__rosorah&&window.__rosorah.'+call,WORLD)
-        elif typ=='open_platform':self.open_platform(msg.get('platform',''),bool(msg.get('picker',False)))
+        elif typ=='open_platform':self.open_platform(msg.get('platform',''),bool(msg.get('picker',False)),msg.get('activation'))
         elif typ=='event':self.deliver(msg['event'],forward=False)
         elif typ=='images':
             # Pictures for the emote picker; asking again reloads one that Rosorah let go of.
@@ -185,13 +185,13 @@ class Window(QMainWindow):
         script=QWebEngineScript();script.setName('rosorah-live-chat');script.setWorldId(WORLD);script.setInjectionPoint(QWebEngineScript.InjectionPoint.DocumentReady);script.setRunsOnSubFrames(False)
         script.setSourceCode(self.webchannel_js+'\n'+(self.invites if slot==DASHBOARD else self.collector)+"\nnew QWebChannel(qt.webChannelTransport,c=>window.__rosorah.setSink(item=>c.objects.collector.post(location.href,JSON.stringify(item))));")
         page.scripts().insert(script)
-    def open_platform(self,platform,picker=False):
+    def open_platform(self,platform,picker=False,token=None):
         if platform=='Twitch dashboard':platform=DASHBOARD
         view=self.sources.get(platform)
-        if isinstance(view,OffscreenChatView):view.reveal()
+        if isinstance(view,OffscreenChatView):view.reveal(token)
         else:
             if view:self.tabs.setCurrentWidget(view)
-            self.showNormal();self.raise_();self.activateWindow()
+            bring_forward(self,token)
         if picker and platform in self.sources:
             selector={'Twitch':'[data-a-target="emote-picker-button"]','YouTube':'#emoji-picker-button button, #emoji-picker-button','Kick':'[data-testid="emote-picker-button"], button[aria-label*="emote" i]'}.get(platform,'#emoji-picker-button')
             self.sources[platform].page().runJavaScript('document.querySelector('+json.dumps(selector)+')?.click()',WORLD)
@@ -306,8 +306,9 @@ def main():
     for flag in ['--disable-background-timer-throttling','--disable-renderer-backgrounding']:
         if flag not in flags:flags+=' '+flag
     os.environ['QTWEBENGINE_CHROMIUM_FLAGS']=flags.strip()
+    prepare()
     app=QApplication(sys.argv)
-    app.setQuitOnLastWindowClosed(False)
+    app.setQuitOnLastWindowClosed(False);app.setDesktopFileName(APP_ID)
     window=Window()
     if '--background' not in sys.argv:window.show()
     return app.exec()
