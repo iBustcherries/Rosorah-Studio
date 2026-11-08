@@ -339,7 +339,13 @@ impl Studio {
             ui.small("This build has no sign-in registration for this platform.");
         }
         if !account.auth_url.is_empty() {
-            ui.hyperlink_to("Open browser to authorize", &account.auth_url);
+            ui.horizontal_wrapped(|ui| {
+                ui.hyperlink_to("Open browser to authorize", &account.auth_url);
+                // For another browser or a private window, when the default browser's sign-in fails.
+                if ui.button("Copy sign-in link").on_hover_text("Paste it into another browser or a private window to sign in there").clicked() {
+                    ui.ctx().copy_text(account.auth_url.clone());
+                }
+            });
         }
         if platform == Platform::Kick && account.connected && ui.small_button("Refresh stream key").clicked() {
             account.send(crate::accounts::Command::Refresh);
