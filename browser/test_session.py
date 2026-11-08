@@ -10,7 +10,8 @@ WAYLAND=bool(os.environ.get('WAYLAND_DISPLAY'))
 SWAY=WAYLAND and bool(os.environ.get('SWAYSOCK')) and shutil.which('swaymsg') is not None
 SHOTS=Path(os.environ.get('ROSORAH_SESSION_ARTIFACTS',tempfile.gettempdir()))
 APP_ID='io.rosorah.Studio'
-# Prints an activation token, standing in for Rosorah asking the compositor for one (crates/activation).
+# Stands in for Rosorah (crates/activation): a window that gets focus and a key press, then prints
+# the activation token it asks for with that key's serial.
 TOKEN_TOOL=os.environ.get('ROSORAH_ACTIVATION_TOKEN_TOOL','')
 
 # A transparent overlay with a red square and a bar that changes every frame, and a web panel
@@ -102,9 +103,16 @@ def wait_for(test,timeout=15):
 def opening(message):
     """A command that opens a window, with the activation token Rosorah attaches on Wayland."""
     if WAYLAND and TOKEN_TOOL:
-        token=subprocess.run([TOKEN_TOOL],capture_output=True,text=True)
-        assert token.returncode==0 and token.stdout.strip(),'no activation token: '+token.stderr
-        message=dict(message,activation=token.stdout.strip())
+        tool=subprocess.Popen([TOKEN_TOOL],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        try:
+            assert tool.stdout.readline().strip()=='ready','the token window never became active: '+tool.stderr.read()
+            # A real key press in that window, from a virtual keyboard; a pause lets it join the seat.
+            subprocess.run(['wtype','-s','300','-k','space','-s','300','-k','space'],check=True,timeout=10)
+            out,err=tool.communicate(timeout=10)
+        finally:
+            if tool.poll() is None:tool.kill();tool.wait()
+        assert tool.returncode==0 and out.strip(),'no activation token: '+err
+        message=dict(message,activation=out.strip())
     return message
 def screenshot(name):
     if WAYLAND and shutil.which('grim'):subprocess.run(['grim',str(SHOTS/(name+'.png'))],capture_output=True)

@@ -3019,6 +3019,7 @@ dependencies = [
 name = "rosorah-activation"
 version = "0.53.0"
 dependencies = [
+ "rustix 1.1.5",
  "wayland-client",
  "wayland-protocols",
 ]

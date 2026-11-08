@@ -22,7 +22,8 @@ pub(crate) fn remember_window(cc: &eframe::CreationContext<'_>) {
     if let (Ok(RawWindowHandle::Wayland(window)), Ok(RawDisplayHandle::Wayland(display))) =
         (cc.window_handle().map(|h| h.as_raw()), cc.display_handle().map(|h| h.as_raw()))
     {
-        rosorah_activation::remember(display.display.as_ptr(), window.surface.as_ptr());
+        // Safety: the main window and its display last as long as Rosorah runs.
+        unsafe { rosorah_activation::remember(display.display.as_ptr(), window.surface.as_ptr()) };
     }
 }
 #[derive(Default)]
