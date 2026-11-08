@@ -24,6 +24,10 @@ const WINE_SERVICES: [&str; 15] = [
     "services.exe", "winedevice.exe", "plugplay.exe", "explorer.exe", "rpcss.exe", "svchost.exe", "tabtip.exe", "steam.exe", "conhost.exe", "start.exe",
     "rundll32.exe", "wineboot.exe", "xalia.exe", "winemenubuilder.exe", "steamwebhelper.exe",
 ];
+/// Whether any Windows app is open in Wine or Proton, i.e. something Spout output could reach.
+pub fn wine_apps_running() -> bool {
+    !sessions().is_empty()
+}
 /// Running Wine/Proton sessions that have an app open, one per prefix.
 fn sessions() -> Vec<Session> {
     let home = std::env::var("HOME").unwrap_or_default();

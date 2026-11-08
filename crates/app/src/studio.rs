@@ -633,6 +633,11 @@ pub struct Studio {
     spout_output: Option<crate::recording::Recording>,
     /// NDI (true) and Spout (false) senders last seen, refreshed every 2 s while picking one.
     shared_senders: std::collections::BTreeMap<bool, (Instant, Result<Vec<String>, String>)>,
+    /// Whether NDI can run here and an app that uses Spout is open, checked every few seconds,
+    /// and whether the user asked to see both output switches anyway.
+    sharing_seen: std::sync::Arc<std::sync::Mutex<(bool, bool)>>,
+    sharing_checked: Option<Instant>,
+    show_sharing: bool,
     /// Windows: the camera as Windows shows it to apps, while it's on.
     #[cfg(windows)]
     windows_camera: Option<rosorah_windows::virtual_camera::Camera>,
@@ -1144,6 +1149,9 @@ impl Studio {
             ndi_output: None,
             spout_output: None,
             shared_senders: Default::default(),
+            sharing_seen: Default::default(),
+            sharing_checked: None,
+            show_sharing: false,
             #[cfg(windows)]
             windows_camera: None,
             camera_stopping: Vec::new(),
@@ -2973,9 +2981,32 @@ impl Studio {
         for message in stopped {
             self.tell(message);
         }
+        // They stay out of the way until they can be used: NDI once its runtime is installed, Spout
+        // while an app that uses it is open, and either one while it's on.
+        if self.sharing_checked.is_none_or(|t| t.elapsed() > Duration::from_secs(5)) {
+            self.sharing_checked = Some(Instant::now());
+            let seen = self.sharing_seen.clone();
+            std::thread::spawn(move || {
+                let ndi = crate::ndi::ready().is_ok();
+                #[cfg(windows)]
+                let spout = !rosorah_windows::spout::senders().is_empty();
+                #[cfg(not(windows))]
+                let spout = crate::spout_bridge::wine_apps_running();
+                *seen.lock().unwrap() = (ndi, spout);
+            });
+        }
+        let (ndi_ready, spout_apps) = *self.sharing_seen.lock().unwrap();
+        let show_ndi = self.show_sharing || self.ndi_output.is_some() || ndi_ready;
+        let show_spout = self.show_sharing || self.spout_output.is_some() || spout_apps;
+        if !show_ndi && !show_spout {
+            if ui.add(egui::Label::new(egui::RichText::new("Share with other apps (NDI, Spout)…").small().weak()).sense(egui::Sense::click())).on_hover_text("Show the NDI and Spout output switches").clicked() {
+                self.show_sharing = true;
+            }
+            return;
+        }
         ui.horizontal_wrapped(|ui| {
             let mut on = self.ndi_output.is_some();
-            if ui.toggle_value(&mut on, "📡 NDI output").on_hover_text("Sends the main video and sound to your network as “Rosorah Studio”, for OBS, vMix or another PC").changed() {
+            if show_ndi && ui.toggle_value(&mut on, "📡 NDI output").on_hover_text("Sends the main video and sound to your network as “Rosorah Studio”, for OBS, vMix or another PC").changed() {
                 if let Some(output) = self.ndi_output.take() {
                     output.stop();
                     self.audio.shared_outlet(None);
@@ -2989,7 +3020,7 @@ impl Studio {
                     }
                 }
             }
-            {
+            if show_spout {
                 let mut on = self.spout_output.is_some();
                 let hint = if cfg!(windows) {
                     "Shares the main video with apps on this PC as the Spout sender “Rosorah Studio”"
