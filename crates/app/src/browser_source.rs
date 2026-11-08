@@ -14,9 +14,7 @@ use std::{
 };
 use tokio::sync::watch;
 pub fn ready() -> bool {
-    crate::browser_chat::venv()
-        .join("rosorah-runtime-6.10.2.ready")
-        .is_file()
+    crate::browser_chat::runtime_ready_marker().is_file()
 }
 pub fn valid_url(url: &str) -> bool {
     reqwest::Url::parse(url).is_ok_and(|u| {

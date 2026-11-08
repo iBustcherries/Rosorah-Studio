@@ -4589,6 +4589,9 @@ impl Studio {
                         ui.checkbox(&mut dest.enabled, "").on_hover_text("Include when you go live");
                         let (dot, status, color) = if !dest.key.is_empty() {
                             ("●", "ready", crate::appearance::current().good)
+                        } else if connected && platforms[slot] == Some(Platform::YouTube) {
+                            // YouTube's key comes from a broadcast, not from signing in.
+                            ("◌", "choose a broadcast…", crate::appearance::current().warning)
                         } else if connected {
                             ("◌", "getting stream key…", crate::appearance::current().warning)
                         } else {
@@ -4600,7 +4603,13 @@ impl Studio {
                         if several_videos {
                             label.on_hover_text(format!("Sends the {}", video.to_lowercase()));
                         }
-                        ui.label(RichText::new(status).small().color(color));
+                        if status == "choose a broadcast…" {
+                            if ui.link(RichText::new(status).small().color(color)).on_hover_text("Create or link a YouTube broadcast; its stream key is filled in for you").clicked() {
+                                self.broadcast_window = 1;
+                            }
+                        } else {
+                            ui.label(RichText::new(status).small().color(color));
+                        }
                         if ui.small_button("Set up…").on_hover_text("Sign-in, stream key and which video to send").clicked() {
                             self.broadcast_window = 100 + slot as u8;
                         }

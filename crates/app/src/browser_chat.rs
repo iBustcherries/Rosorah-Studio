@@ -97,6 +97,11 @@ pub(crate) fn base() -> PathBuf {
         .unwrap_or(std::path::Path::new("."))
         .join("browser")
 }
+// Twitch refuses to log in from older Chromium builds, so keep this current.
+const PYSIDE6_VERSION: &str = "6.12.0";
+pub(crate) fn runtime_ready_marker() -> PathBuf {
+    venv().join(format!("rosorah-runtime-{PYSIDE6_VERSION}.ready"))
+}
 pub(crate) fn venv() -> PathBuf {
     #[cfg(windows)]
     { auroracast_core::platform::config_root().join("rosorah-studio/browser-runtime") }
@@ -236,12 +241,12 @@ impl BrowserChat {
             let result = (|| -> Result<()> {
                 let p = venv();
                 std::fs::create_dir_all(p.parent().unwrap())?;
-                let ready = p.join("rosorah-runtime-6.10.2.ready");
+                let ready = runtime_ready_marker();
                 let valid = || {
-                    Command::new(p.join(python_relative())).args(["-c", "import PySide6; from PySide6.QtWebEngineWidgets import QWebEngineView; assert PySide6.__version__ == '6.10.2'"]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+                    Command::new(p.join(python_relative())).args(["-c", &format!("import PySide6; from PySide6.QtWebEngineWidgets import QWebEngineView; assert PySide6.__version__ == '{PYSIDE6_VERSION}'")]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
                 };
                 if valid() {
-                    std::fs::write(ready, b"6.10.2\n")?;
+                    std::fs::write(ready, format!("{PYSIDE6_VERSION}\n"))?;
                     return Ok(());
                 }
                 anyhow::ensure!(
@@ -265,7 +270,7 @@ impl BrowserChat {
                             "pip",
                             "install",
                             "--disable-pip-version-check",
-                            "PySide6==6.10.2"
+                            &format!("PySide6=={PYSIDE6_VERSION}")
                         ])
                         .stdout(Stdio::null())
                         .stderr(Stdio::null())
@@ -277,7 +282,7 @@ impl BrowserChat {
                     valid(),
                     "Chat runtime cannot load. Check its desktop libraries in Accounts > Troubleshooting."
                 );
-                std::fs::write(ready, b"6.10.2\n")?;
+                std::fs::write(ready, format!("{PYSIDE6_VERSION}\n"))?;
                 Ok(())
             })();
             let _ = tx.send(result.map_err(|e| e.to_string()));
@@ -483,7 +488,7 @@ impl BrowserChat {
         }
         if (self.accounts_connected || self.runtime_wanted)
             && (!python().is_file()
-                || !venv().join("rosorah-runtime-6.10.2.ready").is_file())
+                || !runtime_ready_marker().is_file())
             && !self.setup_attempted
             && self.setup_retry.ready(Instant::now())
         {
