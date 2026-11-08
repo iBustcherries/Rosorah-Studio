@@ -7,7 +7,7 @@ impl rosorah_capture::Backend for RendererBackend {
         options: rosorah_capture::Options,
     ) -> anyhow::Result<()> {
         rosorah_capture::Backend::run(
-            Box::new(rosorah_windows::window::WindowBackend { window: None }),
+            Box::new(rosorah_windows::window::WindowBackend { window: None, gpu: Some(auroracast_gpu::external::adapter) }),
             output,
             cancel,
             options,

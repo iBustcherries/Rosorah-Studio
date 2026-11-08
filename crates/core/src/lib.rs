@@ -366,7 +366,7 @@ fn replay_seconds() -> u32 {
 fn transition_duration() -> u32 {
     300
 }
-/// Camera input configuration. Disabled until explicitly connected by the user.
+/// Camera input configuration. Off until a camera is chosen.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct CameraSettings {

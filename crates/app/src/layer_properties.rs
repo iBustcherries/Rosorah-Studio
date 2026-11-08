@@ -31,6 +31,8 @@ impl Studio {
             .frame(prominent_window(ctx, self.accent()))
             .collapsible(false)
             .default_width(460.)
+            // As tall as the tab needs, up to the scroll area's limit.
+            .resizable([true, false])
             .pivot(egui::Align2::CENTER_CENTER)
             .default_pos(ctx.content_rect().center())
             .show(ctx, |ui| {
@@ -44,6 +46,7 @@ impl Studio {
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .max_height(ctx.content_rect().height() * 0.7)
+                    .min_scrolled_height(ctx.content_rect().height() * 0.7)
                     .show(ui, |ui| self.layer_properties_body(ui, si, index));
             });
         if let Some(shown) = shown {

@@ -1,6 +1,6 @@
 # Rosorah Studio roadmap
 
-Updated for 0.53.0 (October 2026). Rosorah Studio is original code built on
+Updated for 0.54.0 (October 2026). Rosorah Studio is original code built on
 independent libraries (Rust, egui/wgpu, GStreamer, Qt WebEngine). It aims to be an easier
 all-in-one alternative to running OBS, a chat bot and an alert service side by side,
 not a feature-for-feature copy of OBS.
@@ -14,7 +14,7 @@ not a feature-for-feature copy of OBS.
 | Layer effects | Shipped | Rotate and flip, blend modes, colour correction, LUTs, sharpen, scrolling, image masks, luma key, per-layer delay, show/hide animations |
 | Studio Mode and projectors | Shipped | Prepare a scene before sending it live, per-scene transitions (slide, swipe, pattern wipe, fade to colour), projector windows for the program, a scene or Multiview |
 | Capture (Linux) | Shipped | Automatic game capture (Vulkan/OpenGL hooks) with game audio; Vulkan games' frames stay on the graphics card (shared with Rosorah when both use the same GPU and driver, SDR; HDR and OpenGL go through memory), PipeWire desktop/window capture, cameras and DroidCam, browser sources (web addresses or local HTML files, custom CSS, OBS overlay API, saved sign-ins, keep running or refresh on show) |
-| Capture (Windows) | Shipped | Automatic game capture (finds the game's window and captures it with Windows Graphics Capture), monitor and window capture, application audio and cursor |
+| Capture (Windows) | Shipped | Automatic game capture (finds the game's window and captures it with Windows Graphics Capture), monitor and window capture, application audio and cursor; frames stay on the graphics card (shared with Rosorah's Direct3D 12 or Vulkan renderer when both use the same graphics card; otherwise through memory) |
 | Sound | Shipped | Music strip that follows music apps automatically (never browser video), per-app sound strips that survive app restarts, right-click rename/hide/delete, mixer with per-scene volumes, Sound settings window (device, live level, noise suppression, gate, compressor, limiter, expander, EQ, mono, balance), monitoring, delay, six recording tracks |
 | Recording and streaming | Shipped | Hardware encoders (AMD/NVIDIA, software fallback), multistreaming to Twitch, YouTube, YouTube vertical, Kick, TikTok and custom RTMP, per-destination bitrate, reconnect, Go live checklist, replay buffer (saves the last seconds as an MP4) |
 | Virtual camera | Shipped | Rosorah's video as a webcam for Discord, Zoom and browsers (Linux: v4l2loopback; Windows 11: Rosorah's own camera component) |
@@ -30,8 +30,6 @@ not a feature-for-feature copy of OBS.
 | Distribution | Shipped | Windows installer, Fedora .rpm and Ubuntu/Debian .deb on GitHub Releases; in-app updates (checks at start and every few hours, Help > Check for updates, a window or a bottom-bar reminder, one-click install on Windows and Linux) |
 
 ## Next
-
-- Game capture on the graphics card on Windows too: Windows Graphics Capture's frames are already on the GPU, so they'd go to the compositor through a shared Direct3D texture instead of being copied to memory and back.
 
 Rosorah updates itself from GitHub Releases, so it isn't listed in Discover or GNOME Software.
 

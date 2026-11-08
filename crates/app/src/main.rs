@@ -70,6 +70,9 @@ mod renderer_capture;
 #[cfg(windows)]
 #[path = "platform_windows/renderer_capture.rs"]
 mod renderer_capture;
+#[cfg(windows)]
+#[path = "platform_windows/share_check.rs"]
+mod share_check;
 mod snapping;
 mod demo;
 mod speech;
@@ -224,14 +227,14 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!(
-            "Rosorah Studio 0.32.0-preview.9 live streaming\n\n  rosorah-studio                       Open native studio\n  rosorah-studio --project FILE        Open a project\n  rosorah-studio --self-check          Validate GPU composition\n  rosorah-studio --snapshot --output DIR\n  rosorah-studio --render-demo --output DIR [--seconds 3] [--project FILE]\n\nRender-demo records synthetic video, not your screen. Requires ffmpeg with libx264.\nRecord and Go live are at the top right (FFmpeg required). Auto prefers a tested VAAPI/NVENC GPU encoder with software fallback. Existing output files are never overwritten. Sign in to Twitch, YouTube and Kick in Settings > Accounts."
+            "Rosorah Studio 0.32.0-preview.9 live streaming\n\n  rosorah-studio                       Open native studio\n  rosorah-studio --project FILE        Open a project\n  rosorah-studio --self-check          Validate GPU composition\n  rosorah-studio --gpu-share-check     Windows: check game capture on the graphics card\n  rosorah-studio --snapshot --output DIR\n  rosorah-studio --render-demo --output DIR [--seconds 3] [--project FILE]\n\nRender-demo records synthetic video, not your screen. Requires ffmpeg with libx264.\nRecord and Go live are at the top right (FFmpeg required). Auto prefers a tested VAAPI/NVENC GPU encoder with software fallback. Existing output files are never overwritten. Sign in to Twitch, YouTube and Kick in Settings > Accounts."
         );
         return Ok(());
     }
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
-            "--self-check" | "--snapshot" | "--render-demo" => index += 1,
+            "--self-check" | "--snapshot" | "--render-demo" | "--gpu-share-check" => index += 1,
             "--project" | "--output" | "--seconds" | "--screenshot" | "--page" => {
                 if args.get(index + 1).is_none_or(|v| v.starts_with("--")) {
                     bail!("{} requires a value", args[index]);
@@ -241,7 +244,7 @@ fn main() -> Result<()> {
             flag => bail!("Unknown argument {flag}; use --help"),
         }
     }
-    let modes = ["--self-check", "--snapshot", "--render-demo"];
+    let modes = ["--self-check", "--snapshot", "--render-demo", "--gpu-share-check"];
     if modes
         .iter()
         .filter(|m| args.iter().any(|a| a == **m))
@@ -252,6 +255,12 @@ fn main() -> Result<()> {
     }
     if args.iter().any(|a| a == "--self-check") {
         return media::self_check();
+    }
+    if args.iter().any(|a| a == "--gpu-share-check") {
+        #[cfg(windows)]
+        return share_check::run();
+        #[cfg(not(windows))]
+        bail!("--gpu-share-check checks Windows game capture; on Linux use native/share-test.sh");
     }
     let project_path = option(&args, "--project").map(PathBuf::from);
     if args

@@ -210,6 +210,7 @@ dependencies = [
  "image",
  "pollster",
  "wgpu",
+ "windows",
 ]
 
 [[package]]

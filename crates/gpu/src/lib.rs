@@ -10,7 +10,7 @@ use std::{
 
 mod nv12;
 pub use nv12::Nv12;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 pub mod external;
 
 #[repr(C)]
@@ -243,9 +243,9 @@ pub struct Compositor {
     draws: Vec<Draw>,
     nv12: nv12::State,
     /// Games' shared pictures imported into this device, by source, and how they're drawn.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     shared: HashMap<Id, external::Imported>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     shared_pipeline: Option<(wgpu::RenderPipeline, wgpu::BindGroupLayout)>,
 }
 
@@ -279,10 +279,11 @@ fn ensure_lut(size: u32, texels: &[u8]) -> Result<()> {
 
 impl Compositor {
     pub async fn new() -> Result<Self> {
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: if cfg!(target_os = "windows") { wgpu::Backends::DX12 | wgpu::Backends::VULKAN } else { wgpu::Backends::VULKAN },
-            ..Default::default()
-        });
+        Self::with_backends(if cfg!(target_os = "windows") { wgpu::Backends::DX12 | wgpu::Backends::VULKAN } else { wgpu::Backends::VULKAN }).await
+    }
+    /// A compositor drawing with one of these graphics APIs.
+    pub async fn with_backends(backends: wgpu::Backends) -> Result<Self> {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor { backends, ..Default::default() });
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() })
             .await
@@ -371,7 +372,7 @@ impl Compositor {
             darken: pipeline("Darken", with(C { src_factor: F::One, dst_factor: F::One, operation: O::Min })),
         };
         let white = Self::make_source(&device, &queue, &layout, &sampler, 1, 1, &[255, 255, 255, 255]);
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         external::register(&device);
         let no_extras = Self::make_extras(&device, &queue, &extras_layout, &sampler, (2, &identity_lut(2)), (1, 1, &[255, 255, 255, 255]));
         Self {
@@ -400,9 +401,9 @@ impl Compositor {
             params: Vec::new(),
             draws: Vec::new(),
             nv12: Default::default(),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             shared: HashMap::new(),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", windows))]
             shared_pipeline: None,
         }
     }
@@ -551,7 +552,7 @@ impl Compositor {
     /// Draws a picture a game shares on the graphics card into the source's texture (or its next
     /// delayed frame). `keep` is let go once the GPU has finished with the picture, which hands
     /// its slot back to the game.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub fn upload_shared(&mut self, id: Id, frame: &external::SharedFrame, keep: Box<dyn std::any::Any + Send>) -> Result<()> {
         let (width, height) = (frame.width, frame.height);
         if self.shared_pipeline.is_none() {
@@ -644,7 +645,7 @@ impl Compositor {
 
     pub fn retain_sources(&mut self, project: &Project) {
         self.sources.retain(|id, _| project.source(*id).is_some());
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", windows))]
         self.shared.retain(|id, _| project.source(*id).is_some());
         self.rings.retain(|id, _| project.source(*id).is_some());
     }

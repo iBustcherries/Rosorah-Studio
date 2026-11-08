@@ -229,6 +229,9 @@ fn add_tile(ui: &mut egui::Ui, icon: &str, title: &str, hint: &str, enabled: boo
     }
     response.clicked()
 }
+const SOUND_HIDE_HINT: &str = "Takes it out of this panel; it's still heard on stream";
+const SOUND_DELETE_HINT: &str = "Removes this sound, so it's no longer heard on stream";
+const SOUND_KEPT_HINT: &str = "Rosorah needs this one. You can mute it or hide it instead.";
 /// A small copy of a layer's latest frame that fits in `w`×`h`, for previews.
 fn preview_picture(frame: &rosorah_capture::Frame, w: u32, h: u32) -> Option<egui::ColorImage> {
     let (fw, fh) = (frame.width as usize, frame.height as usize);
@@ -602,6 +605,8 @@ pub struct Studio {
     camera_devices: Vec<crate::camera::Device>,
     browser_drafts: std::collections::BTreeMap<Id, (String, auroracast_core::browser::Settings)>,
     camera_drafts: std::collections::BTreeMap<Id, auroracast_core::CameraSettings>,
+    /// The picture in a camera's Layer Properties, and when it was last updated.
+    camera_preview: Option<(Id, egui::TextureHandle, std::time::Instant)>,
     workspace: Workspace,
     scene_dialog: Option<(Id, String, bool)>,
     /// The sound whose settings window is open.
@@ -1078,6 +1083,7 @@ impl Studio {
             camera_devices: crate::camera::devices(),
             browser_drafts: Default::default(),
             camera_drafts: Default::default(),
+            camera_preview: None,
             audio,
             workspace,
             toggle_panel: None,
@@ -5044,6 +5050,54 @@ impl Studio {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
     }
+    /// The camera's picture, or what's happening instead of one. About 15 pictures a second is
+    /// plenty at this size.
+    fn camera_preview_ui(&mut self, ui: &mut egui::Ui, id: Id, chosen: bool, network: bool) {
+        let width = ui.available_width().min(440.);
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(width, width * 9. / 16.), egui::Sense::hover());
+        ui.painter().rect_filled(rect, 8, Color32::from_gray(16));
+        if chosen && self.captures.camera_live(id) {
+            let due = !self.camera_preview.as_ref().is_some_and(|(shown, _, at)| *shown == id && at.elapsed() < Duration::from_millis(66));
+            if due
+                && let Some((_, Some(frame))) = self.captures.reader().latest().into_iter().find(|(source, _)| *source == id)
+                && let Some(picture) = preview_picture(&frame, 480, 270)
+            {
+                match &mut self.camera_preview {
+                    Some((shown, texture, at)) if *shown == id => {
+                        texture.set(picture, egui::TextureOptions::LINEAR);
+                        *at = std::time::Instant::now();
+                    }
+                    slot => *slot = Some((id, ui.ctx().load_texture("camera-preview", picture, egui::TextureOptions::LINEAR), std::time::Instant::now())),
+                }
+            }
+            if let Some((_, texture, _)) = self.camera_preview.as_ref().filter(|(shown, ..)| *shown == id) {
+                let t = texture.size_vec2();
+                let picture = egui::Rect::from_center_size(rect.center(), t * (rect.width() / t.x).min(rect.height() / t.y));
+                ui.painter().image(texture.id(), picture, egui::Rect::from_min_max(egui::pos2(0., 0.), egui::pos2(1., 1.)), Color32::WHITE);
+            }
+            ui.ctx().request_repaint_after(Duration::from_millis(66));
+            return;
+        }
+        self.camera_preview = None;
+        let failed = self.captures.camera_failed(id);
+        let text = if !chosen && network {
+            "Type your phone's address below"
+        } else if !chosen {
+            "Choose your camera below"
+        } else if failed {
+            "Can't show this camera. It may be unplugged or open in another app. Rosorah keeps trying."
+        } else {
+            "Starting your camera…"
+        };
+        if chosen && failed {
+            response.on_hover_text(self.captures.camera_status(id));
+        }
+        if chosen {
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
+        }
+        let galley = ui.painter().layout(text.to_owned(), egui::FontId::proportional(14.), muted(), rect.width() - 40.);
+        ui.painter().galley(rect.center() - galley.size() / 2., galley, muted());
+    }
     fn camera_controls(&mut self, ui: &mut egui::Ui, id: Id) {
         let Some(Source {
             kind: SourceKind::VideoCamera(saved),
@@ -5053,84 +5107,120 @@ impl Studio {
             return;
         };
         let saved = saved.clone();
+        // There's nothing to choose between when only one camera is plugged in.
+        let only_camera = (!saved.enabled && !saved.network && saved.device.is_empty())
+            .then(|| self.camera_devices.first().filter(|_| self.camera_devices.len() == 1).map(|d| d.path.clone()))
+            .flatten();
+        let live = self.captures.camera_live(id).then(|| self.captures.camera_status(id));
+        let dimensions = self.captures.camera_dimensions(id);
+        self.camera_preview_ui(ui, id, saved.enabled, saved.network);
+        ui.add_space(6.);
         let draft = self
             .camera_drafts
             .entry(id)
             .or_insert_with(|| saved.clone());
-        let mut apply = false;
-        let mut stop = false;
-        egui::CollapsingHeader::new("Camera settings").default_open(true).show(ui, |ui| {
-            ui.label(self.captures.camera_status(id));
-            ui.label("Live preview appears on the canvas. Camera audio is not added to the mix.");
-            // One list of cameras; DroidCam's own settings show only when DroidCam is the choice.
+        // Choices start the camera or change it straight away; typing waits until it's finished.
+        let mut commit = false;
+        if let Some(path) = only_camera {
+            draft.device = path;
+            draft.enabled = true;
+            commit = true;
+        }
+        ui.horizontal(|ui| {
+            ui.label("Camera");
             let device_name = self.camera_devices.iter().find(|d| d.path == draft.device).map(|d| d.name.clone());
-            let droidcam_device = device_name.as_deref().is_some_and(|n| n.to_lowercase().contains("droidcam"));
+            egui::ComboBox::from_id_salt(("camera_device", id))
+                .selected_text(if draft.network { "Phone over Wi-Fi (DroidCam)".to_owned() } else if draft.enabled { device_name.unwrap_or_else(|| "Camera not found".into()) } else { "Choose a camera".to_owned() })
+                .show_ui(ui, |ui| {
+                    for device in &self.camera_devices {
+                        if ui.selectable_label(!draft.network && draft.enabled && draft.device == device.path, &device.name).on_hover_text(&device.path).clicked() {
+                            draft.network = false;
+                            draft.device = device.path.clone();
+                            draft.enabled = true;
+                            commit = true;
+                        }
+                    }
+                    ui.separator();
+                    if ui.selectable_label(draft.network, "Phone over Wi-Fi (DroidCam)").on_hover_text("A phone running DroidCam on the same network").clicked() {
+                        draft.network = true;
+                        commit = true;
+                    }
+                    if ui.selectable_label(!draft.network && !draft.enabled, "No camera").on_hover_text("Turns the camera off").clicked() {
+                        draft.network = false;
+                        draft.enabled = false;
+                        commit = true;
+                    }
+                });
+            if ui.small_button("⟳").on_hover_text("Look for cameras again").clicked() {
+                self.camera_devices = crate::camera::devices();
+            }
+        });
+        if self.camera_devices.is_empty() && !draft.network {
+            note(ui, "No camera found. Plug one in, then press ⟳.");
+        }
+        if draft.network {
             ui.horizontal(|ui| {
-                ui.label("Camera");
-                egui::ComboBox::from_id_salt(("camera_device", id))
-                    .selected_text(if draft.network { "DroidCam over Wi-Fi".to_owned() } else { device_name.clone().unwrap_or_else(|| "Select camera".into()) })
-                    .show_ui(ui, |ui| {
-                        for device in &self.camera_devices {
-                            if ui.selectable_label(!draft.network && draft.device == device.path, format!("{} ({})", device.name, device.path)).clicked() {
-                                draft.network = false;
-                                draft.device = device.path.clone();
-                            }
-                        }
-                        ui.separator();
-                        if ui.selectable_label(draft.network, "DroidCam over Wi-Fi").on_hover_text("A phone running DroidCam on the same network").clicked() {
-                            draft.network = true;
-                        }
-                    });
-                if ui.small_button("⟳").on_hover_text("Look for cameras again").clicked() {
-                    self.camera_devices = crate::camera::devices();
-                }
+                ui.label("Phone address");
+                commit |= ui.text_edit_singleline(&mut draft.host).lost_focus();
             });
+            ui.horizontal(|ui| {
+                ui.label("Port");
+                let port = ui.add(egui::DragValue::new(&mut draft.port).range(1..=65535));
+                commit |= port.drag_stopped() || port.lost_focus();
+            });
+            note(ui, "DroidCam on your phone shows both of these. Keep the phone and this computer on the same Wi-Fi.");
+        }
+        commit |= ui.checkbox(&mut draft.flip, "Mirror the picture").changed();
+        let mut reshape = false;
+        ui.add_space(4.);
+        egui::CollapsingHeader::new("More options").id_salt(("camera_more", id)).show(ui, |ui| {
+            if let Some(live) = &live {
+                note(ui, live.as_str());
+            }
             if draft.network {
-                ui.label("Phone Wi-Fi IP / hostname"); ui.text_edit_singleline(&mut draft.host);
-                ui.horizontal(|ui| { ui.label("Port"); ui.add(egui::DragValue::new(&mut draft.port).range(1..=65535)); });
-                ui.checkbox(&mut draft.legacy_url,"Use legacy DroidCam /video address");
-                ui.small("Open DroidCam on your phone and use the IP and port shown there. Keep both devices on the same network.");
+                commit |= ui.checkbox(&mut draft.legacy_url, "Use DroidCam's older /video address").changed();
             } else {
-                ui.collapsing("Device path",|ui| {ui.text_edit_singleline(&mut draft.device);});
-                ui.checkbox(&mut draft.auto_mode,"Auto detect resolution and FPS");
-                if draft.auto_mode && droidcam_device {
-                    ui.small("For DroidCam, change quality in its desktop client; Rosorah follows the published mode.");
-                } else if draft.auto_mode {
-                    ui.small("Uses the camera's available output.");
-                }
+                commit |= ui.checkbox(&mut draft.auto_mode, "Choose picture size and speed automatically").changed();
             }
             if draft.network || !draft.auto_mode {
-            egui::ComboBox::from_id_salt(("camera_size",id)).selected_text(format!("{} × {}",draft.width,draft.height)).show_ui(ui, |ui| {
-                for (w,h) in [(640,480),(1280,720),(1920,1080),(2560,1440),(3840,2160)] {
-                    if ui.selectable_label((draft.width,draft.height)==(w,h),format!("{w} × {h}")).clicked() { draft.width=w; draft.height=h; }
-                }
-            });
-            ui.horizontal(|ui| {ui.label("FPS"); for fps in [15,30,60] {ui.selectable_value(&mut draft.fps,fps,fps.to_string());}});
+                egui::ComboBox::from_id_salt(("camera_size", id)).selected_text(format!("{} × {}", draft.width, draft.height)).show_ui(ui, |ui| {
+                    for (w, h) in [(640, 480), (1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)] {
+                        if ui.selectable_label((draft.width, draft.height) == (w, h), format!("{w} × {h}")).clicked() {
+                            draft.width = w;
+                            draft.height = h;
+                            commit = true;
+                        }
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("FPS");
+                    for fps in [15, 30, 60] {
+                        commit |= ui.selectable_value(&mut draft.fps, fps, fps.to_string()).clicked();
+                    }
+                });
+                note(ui, if draft.network { "On Wi-Fi the phone sets its own speed; this is the most it will send." } else { "The camera has to support the size and speed you choose." });
             }
-            if draft.network {
-                ui.small("Wi-Fi FPS is a maximum; the phone controls its source rate.");
-            } else if !draft.auto_mode {
-                ui.small("Manual mode must match a resolution and frame rate supported by the camera.");
+            commit |= ui.checkbox(&mut draft.auto_aspect, "Keep the layer the same shape as the camera").changed();
+            if dimensions.is_some() {
+                reshape = ui.button("Fix the layer's shape now").clicked();
             }
-            ui.checkbox(&mut draft.auto_aspect,"Match camera aspect ratio automatically");
-            ui.small("Fits to the actual video when it connects or changes resolution. Keeps the layer width and position; locked layers stay fixed.");
-            ui.checkbox(&mut draft.flip,"Flip horizontally");
             ui.collapsing("Crop", |ui| {
-                for (i,label) in ["Left","Top","Right","Bottom"].iter().enumerate() {
-                    ui.horizontal(|ui| {ui.label(*label); ui.add(egui::DragValue::new(&mut draft.crop[i]).range(0..=4095).suffix(" px"));});
+                for (i, label) in ["Left", "Top", "Right", "Bottom"].iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(*label);
+                        let crop = ui.add(egui::DragValue::new(&mut draft.crop[i]).range(0..=4095).suffix(" px"));
+                        commit |= crop.drag_stopped() || crop.lost_focus();
+                    });
                 }
-                if ui.button("Reset crop").clicked() {draft.crop=[0;4];}
+                if ui.button("Reset crop").clicked() {
+                    draft.crop = [0; 4];
+                    commit = true;
+                }
             });
-            ui.horizontal(|ui| {
-                apply=ui.button(if saved.enabled {"Apply camera settings"} else {"Connect camera"}).clicked();
-                stop=ui.add_enabled(saved.enabled,egui::Button::new("Disconnect")).clicked();
-            });
-            ui.small("Connected cameras reopen with this project. Changes apply to every layer using this camera.");
+            note(ui, "Changes apply to every layer using this camera. Sound from the camera isn't added to your audio.");
         });
-        let mut aspect_changed = false;
-        if let Some([width, height]) = self.captures.camera_dimensions(id)
-            && ui.button("Match camera aspect ratio").clicked()
-        {
+        let mut changed = false;
+        if let Some([width, height]) = dimensions.filter(|_| reshape) {
             let canvas = &self.project.canvases[self.canvas];
             let scene_id = canvas.scene;
             let ratio = width as f32 / height as f32 * canvas.height as f32 / canvas.width as f32;
@@ -5143,30 +5233,34 @@ impl Studio {
                 && !layer.locked
             {
                 layer.rect[3] = layer.rect[2] / ratio;
-                aspect_changed = true;
+                changed = true;
             }
         }
-        if apply || stop {
-            draft.enabled = !stop;
-            let next = draft.clone();
-            let validation = next.validate().and_then(|_| {
-                if next.network && next.enabled {
-                    crate::camera::droidcam_url(&next).map(|_| ())
-                } else {
-                    Ok(())
-                }
-            });
-            match validation {
+        if commit {
+            let mut next = draft.clone();
+            // A phone camera starts once its address is usable.
+            let address = next.network.then(|| crate::camera::droidcam_url(&next));
+            if let Some(address) = &address {
+                next.enabled = address.is_ok();
+            }
+            // Only complain about an address once something has been typed.
+            let bad_address = address.and_then(Result::err).filter(|_| !next.host.trim().is_empty());
+            match next.validate() {
                 Ok(()) => {
-                    if let Some(source) = self.project.sources.iter_mut().find(|s| s.id == id) {
-                        source.kind = SourceKind::VideoCamera(next);
+                    if let Some(e) = bad_address {
+                        self.message = e.to_string();
                     }
-                    self.changed();
+                    if next != saved {
+                        if let Some(source) = self.project.sources.iter_mut().find(|s| s.id == id) {
+                            source.kind = SourceKind::VideoCamera(next);
+                        }
+                        changed = true;
+                    }
                 }
                 Err(e) => self.message = e.to_string(),
             }
         }
-        if aspect_changed {
+        if changed {
             self.changed();
         }
     }
@@ -6196,6 +6290,35 @@ impl Studio {
             }
         }
     }
+    /// The hidden sounds, each one a click from showing again.
+    fn hidden_sounds_menu(&mut self, ui: &mut egui::Ui) {
+        let hidden: Vec<(Id, String)> = self
+            .project
+            .preferences
+            .workspace
+            .hidden_sounds
+            .iter()
+            .map(|id| {
+                let name = self.project.preferences.workspace.sound_names.get(id).cloned().or_else(|| self.project.audio.iter().find(|c| c.id == *id).map(|c| c.name.clone()));
+                (*id, name.unwrap_or_else(|| if *id == ALERTS_STRIP { "Alerts".into() } else { "Sound".into() }))
+            })
+            .collect();
+        for (id, name) in &hidden {
+            if ui.button(name).clicked() {
+                self.project.preferences.workspace.hidden_sounds.remove(id);
+                self.dirty = true;
+                ui.close();
+            }
+        }
+        if hidden.len() > 1 {
+            ui.separator();
+            if ui.button("Show all").clicked() {
+                self.project.preferences.workspace.hidden_sounds.clear();
+                self.dirty = true;
+                ui.close();
+            }
+        }
+    }
     fn mixer_panel(&mut self, ui: &mut egui::Ui) {
         let track_names: Vec<String> = (0..6).map(|t| self.project.preferences.track_name(t)).collect();
         let view = self.audio.view();
@@ -6205,6 +6328,10 @@ impl Studio {
             if advanced && ui.button("Monitoring & sync…").clicked(){self.tools.audio=true;}
             note(ui, format!("Volumes for {}",self.project.scene(scene_id).map(|s|s.name.as_str()).unwrap_or("this scene")));
             self.add_sound_menu(ui, &view);
+            let hidden = self.project.preferences.workspace.hidden_sounds.len();
+            if hidden > 0 {
+                ui.menu_button(format!("{hidden} hidden"), |ui| self.hidden_sounds_menu(ui)).response.on_hover_text("Hidden sounds are still heard on stream. Choose one to show it again.");
+            }
             if !advanced {
                 return;
             }
@@ -6323,6 +6450,8 @@ impl Studio {
         let mut draw_channel = |ui: &mut egui::Ui, channel: &mut auroracast_core::AudioChannel| -> egui::Response {
             let mut grab = None;
             let shown_name = names.get(&channel.id).cloned().unwrap_or_else(|| channel.name.clone());
+            // Game audio and the alerts strip are Rosorah's own; deleted, they would only come back.
+            let removable = channel.id != crate::game_audio::CHANNEL && channel.id != ALERTS_STRIP;
             // Right-clicking anywhere on the strip that isn't a control opens its menu. The area sits
             // under the controls (placed first, at last frame's position) so they keep their clicks.
             let rect_key = egui::Id::new(("sound-strip-rect", channel.id));
@@ -6565,10 +6694,20 @@ impl Studio {
                         note(ui, "Rename tracks in Settings > Sound > Audio tracks.");
                     }
                     ui.add_space(10.);
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(egui::Button::new(RichText::new("Done").strong()).min_size(egui::vec2(80., 0.))).clicked() {
+                    ui.horizontal(|ui| {
+                        if ui.button("Hide").on_hover_text(SOUND_HIDE_HINT).clicked() {
+                            strip_action = Some((channel.id, SoundAction::Hide));
                             done = true;
                         }
+                        if ui.add_enabled(removable, egui::Button::new("Delete")).on_hover_text(SOUND_DELETE_HINT).on_disabled_hover_text(SOUND_KEPT_HINT).clicked() {
+                            strip_action = Some((channel.id, SoundAction::Delete(shown_name.clone())));
+                            done = true;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(egui::Button::new(RichText::new("Done").strong()).min_size(egui::vec2(80., 0.))).clicked() {
+                                done = true;
+                            }
+                        });
                     });
                     });
                     if done || modal.should_close() {
@@ -6585,12 +6724,10 @@ impl Studio {
                 if ui.button("Rename…").clicked() {
                     action = Some(SoundAction::Rename(shown_name.clone()));
                 }
-                if ui.button("Hide").on_hover_text("Removes it from this panel; it's still heard on stream").clicked() {
+                if ui.button("Hide").on_hover_text(SOUND_HIDE_HINT).clicked() {
                     action = Some(SoundAction::Hide);
                 }
-                // Game audio, the alerts strip and video sounds belong to captures and alerts.
-                let removable = channel.id != crate::game_audio::CHANNEL && channel.id != ALERTS_STRIP && channel.media_source.is_none();
-                if removable && ui.button("Delete").clicked() {
+                if ui.add_enabled(removable, egui::Button::new("Delete")).on_hover_text(SOUND_DELETE_HINT).on_disabled_hover_text(SOUND_KEPT_HINT).clicked() {
                     action = Some(SoundAction::Delete(shown_name.clone()));
                 }
                 if action.is_some() {
@@ -6671,9 +6808,14 @@ impl Studio {
             Some((id, SoundAction::Hide)) => {
                 self.project.preferences.workspace.hidden_sounds.insert(id);
                 self.dirty = true;
-                self.tell("Hidden. It's still heard on stream; right-click empty space in Sound to show it again.".into());
+                self.tell("Hidden. It's still heard on stream; \"hidden\" at the top of Sound shows it again.".into());
             }
             Some((id, SoundAction::Delete(name))) if id != crate::game_audio::CHANNEL && id != ALERTS_STRIP => {
+                // A video keeps playing, silently; otherwise its sound would come back with it.
+                let video = self.project.audio.iter().find(|c| c.id == id).and_then(|c| c.media_source);
+                if let Some(SourceKind::VideoFile(v)) = self.project.sources.iter_mut().find(|s| Some(s.id) == video).map(|s| &mut s.kind) {
+                    v.audio = false;
+                }
                 self.project.audio.retain(|c| c.id != id);
                 for volumes in self.project.preferences.scene_audio.values_mut() {
                     volumes.remove(&id);
@@ -6686,35 +6828,9 @@ impl Studio {
             _ => {}
         }
         empty_space.context_menu(|ui| {
-            let hidden: Vec<(Id, String)> = self
-                .project
-                .preferences
-                .workspace
-                .hidden_sounds
-                .iter()
-                .map(|id| {
-                    let name = self.project.preferences.workspace.sound_names.get(id).cloned().or_else(|| self.project.audio.iter().find(|c| c.id == *id).map(|c| c.name.clone()));
-                    (*id, name.unwrap_or_else(|| if *id == ALERTS_STRIP { "Alerts".into() } else { "Sound".into() }))
-                })
-                .collect();
-            ui.add_enabled_ui(!hidden.is_empty(), |ui| {
-                ui.menu_button("Show hidden sounds", |ui| {
-                    for (id, name) in &hidden {
-                        if ui.button(name).clicked() {
-                            self.project.preferences.workspace.hidden_sounds.remove(id);
-                            self.dirty = true;
-                            ui.close();
-                        }
-                    }
-                    if hidden.len() > 1 {
-                        ui.separator();
-                        if ui.button("Show all").clicked() {
-                            self.project.preferences.workspace.hidden_sounds.clear();
-                            self.dirty = true;
-                            ui.close();
-                        }
-                    }
-                });
+            let any_hidden = !self.project.preferences.workspace.hidden_sounds.is_empty();
+            ui.add_enabled_ui(any_hidden, |ui| {
+                ui.menu_button("Show hidden sounds", |ui| self.hidden_sounds_menu(ui));
             });
             ui.separator();
             ui.label(RichText::new("Sound panel").small().strong());
@@ -7402,6 +7518,20 @@ impl eframe::App for Studio {
                 ("click-away", 12) => input.events.push(button(true)),
                 ("click-away", 13) => input.events.push(button(false)),
                 _ => {}
+            }
+        }
+        // Screenshots: ROSORAH_DEMO_CLICKS="l:620,596;r:330,710" clicks those spots in turn, 8 frames apart.
+        if self.screenshot.is_some() && self.ui_frames >= 12 && let Ok(clicks) = std::env::var("ROSORAH_DEMO_CLICKS") {
+            let step = (self.ui_frames - 12) as usize;
+            if let Some(click) = clicks.split(';').nth(step / 8) && let Some((side, spot)) = click.split_once(':') && let Some((x, y)) = spot.split_once(',') {
+                let spot = egui::pos2(x.parse().unwrap_or(0.), y.parse().unwrap_or(0.));
+                let button = if side == "r" { egui::PointerButton::Secondary } else { egui::PointerButton::Primary };
+                match step % 8 {
+                    0..=2 => input.events.push(egui::Event::PointerMoved(spot)),
+                    3 => input.events.push(egui::Event::PointerButton { pos: spot, button, pressed: true, modifiers: Default::default() }),
+                    4 => input.events.push(egui::Event::PointerButton { pos: spot, button, pressed: false, modifiers: Default::default() }),
+                    _ => {}
+                }
             }
         }
         // `--page demo-drag`: press on the Sources tab, then carry it most of the way to the middle and hold.

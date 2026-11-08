@@ -61,8 +61,10 @@ pub struct Frame {
     /// instead of `rgba`.
     pub shared: Option<Arc<SharedImage>>,
 }
-/// One of a game's shared pictures on the graphics card: Vulkan memory exported by Rosorah's
-/// game layer as an opaque file descriptor. Every slot of an export has the same size and format.
+/// One of a game's shared pictures on the graphics card. On Linux, Vulkan memory exported by
+/// Rosorah's game layer as an opaque file descriptor; on Windows, a Direct3D 11 texture filled
+/// from Windows Graphics Capture and shared as an NT handle. Every slot of an export has the same
+/// size and format.
 pub struct SharedImage {
     /// Unique to this set of slots, so a renderer imports each set once.
     pub export: u64,
@@ -71,10 +73,12 @@ pub struct SharedImage {
     pub height: u32,
     /// The Vulkan format (B8G8R8A8_UNORM, R8G8B8A8_UNORM or A2B10G10R10_UNORM_PACK32).
     pub vk_format: i32,
-    /// Each slot's exported allocation size, and its memory.
+    /// Each slot's exported allocation size (Linux only), and its memory.
     pub sizes: Vec<u64>,
     #[cfg(unix)]
     pub memory: Arc<Vec<std::os::fd::OwnedFd>>,
+    #[cfg(windows)]
+    pub memory: Arc<Vec<std::os::windows::io::OwnedHandle>>,
     /// Called once nobody draws from this slot any more, so the game can write to it again.
     pub release: Box<dyn Fn() + Send + Sync>,
 }

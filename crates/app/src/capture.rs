@@ -474,6 +474,12 @@ impl Captures {
     pub fn camera_dimensions(&self, id: Id) -> Option<[u32; 2]> {
         self.engine.snapshot(id).and_then(|s| s.dimensions)
     }
+    pub fn camera_live(&self, id: Id) -> bool {
+        self.engine.snapshot(id).is_some_and(|s| s.phase == rosorah_capture::Phase::Live)
+    }
+    pub fn camera_failed(&self, id: Id) -> bool {
+        self.camera_errors.contains_key(&id) || self.engine.snapshot(id).is_some_and(|s| s.phase == rosorah_capture::Phase::Failed)
+    }
     pub fn camera_status(&self, id: Id) -> String {
         self.camera_errors
             .get(&id)
@@ -561,8 +567,8 @@ impl Captures {
         #[cfg(not(windows))]
         { let _ = id; Box::new(DesktopBackend) }
         #[cfg(windows)]
-        { if self.mode(id)==Target::Window { Box::new(rosorah_windows::window::WindowBackend{window:self.windows.get(&id).cloned()}) }
-          else if self.options.cursor { Box::new(rosorah_windows::window::MonitorBackend{id:self.monitors.get(&id).cloned().unwrap_or_default()}) }
+        { if self.mode(id)==Target::Window { Box::new(rosorah_windows::window::WindowBackend{window:self.windows.get(&id).cloned(),gpu:Some(auroracast_gpu::external::adapter)}) }
+          else if self.options.cursor { Box::new(rosorah_windows::window::MonitorBackend{id:self.monitors.get(&id).cloned().unwrap_or_default(),gpu:Some(auroracast_gpu::external::adapter)}) }
           else { Box::new(rosorah_windows::capture::ScreenBackend{monitor_id:self.monitors.get(&id).cloned().unwrap_or_default()}) } }
     }
     pub fn start(&mut self, id: Id) {
@@ -676,18 +682,9 @@ impl Captures {
 /// shared it there, uploaded otherwise. If a shared picture can't be used, sharing stops for this
 /// run and games send their frames through memory again.
 pub fn upload_frame(gpu: &mut auroracast_gpu::Compositor, id: Id, frame: &rosorah_capture::Frame) -> Result<()> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     if let Some(shared) = &frame.shared {
-        let picture = auroracast_gpu::external::SharedFrame {
-            export: shared.export,
-            slot: shared.slot,
-            width: shared.width,
-            height: shared.height,
-            vk_format: shared.vk_format,
-            sizes: &shared.sizes,
-            memory: &shared.memory,
-        };
-        return match gpu.upload_shared(id, &picture, Box::new(shared.clone())) {
+        return match upload_shared(gpu, id, shared) {
             Ok(()) => Ok(()),
             Err(e) => {
                 crate::capture_log::event(format!("Game capture on the graphics card stopped: {e:#}. Using shared memory instead."));
@@ -697,6 +694,21 @@ pub fn upload_frame(gpu: &mut auroracast_gpu::Compositor, id: Id, frame: &rosora
         };
     }
     gpu.upload(id, frame.width, frame.height, &frame.rgba)
+}
+/// Draws a picture shared on the graphics card into the source; it's handed back to whoever
+/// shared it once the GPU is done with it.
+#[cfg(any(target_os = "linux", windows))]
+pub fn upload_shared(gpu: &mut auroracast_gpu::Compositor, id: Id, shared: &std::sync::Arc<rosorah_capture::SharedImage>) -> Result<()> {
+    let picture = auroracast_gpu::external::SharedFrame {
+        export: shared.export,
+        slot: shared.slot,
+        width: shared.width,
+        height: shared.height,
+        vk_format: shared.vk_format,
+        sizes: &shared.sizes,
+        memory: &shared.memory,
+    };
+    gpu.upload_shared(id, &picture, Box::new(shared.clone()))
 }
 
 #[cfg(any(not(windows), test))]
