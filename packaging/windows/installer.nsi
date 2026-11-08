@@ -26,7 +26,7 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Rosorah Studio contributors"
 !define MUI_ABORTWARNING
 !define MUI_ICON "${PAYLOAD}/rosorah.ico"
 !define MUI_UNICON "${PAYLOAD}/rosorah.ico"
-!define MUI_WELCOMEPAGE_TEXT "This wizard installs Rosorah Studio ${VERSION} for your Windows account.$\r$\n$\r$\nGStreamer is included. Internet access is needed to download the remaining dependencies and Python for browser chat (about 140 MB). Official dependency installers may request administrator approval.$\r$\n$\r$\nClose any running Rosorah window before continuing."
+!define MUI_WELCOMEPAGE_TEXT "This wizard installs Rosorah Studio ${VERSION} for your Windows account.$\r$\n$\r$\nGStreamer and the browser for chat and web pages are included. Internet access is needed to download the remaining dependencies (about 120 MB). Official dependency installers may request administrator approval.$\r$\n$\r$\nClose any running Rosorah window before continuing."
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_COMPONENTS
 !insertmacro MUI_PAGE_INSTFILES
@@ -118,6 +118,9 @@ Section "Uninstall"
   Delete "$INSTDIR\runtime\python-3.13.16-amd64.exe"
   RMDir /r "$INSTDIR\runtime\ffmpeg-9.0.2-essentials_build"
   RMDir "$INSTDIR\runtime"
+  ; Python's compiled files, if a build left any to be written on first use.
+  RMDir /r "$INSTDIR\browser\__pycache__"
+  RMDir /r "$INSTDIR\browser-runtime"
   Delete "$INSTDIR\setup.log"
   ; The virtual camera, if it was set up, lives in Program Files; removing it needs permission.
   SetRegView 64

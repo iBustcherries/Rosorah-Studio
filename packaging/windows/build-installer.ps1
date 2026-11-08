@@ -6,9 +6,18 @@ Push-Location $root
 try {
     $bundlePath = (Resolve-Path $Bundle).Path
     if (-not (Test-Path (Join-Path $bundlePath 'rosorah-studio.exe'))) { throw 'Build the Windows application bundle first.' }
-    rustc --edition 2024 --target x86_64-pc-windows-msvc -C opt-level=s -C strip=symbols (Join-Path $PSScriptRoot 'launcher.rs') -o (Join-Path $bundlePath 'Rosorah.exe')
+    # The launcher carries the app icon (rosorah.rc), compiled with the Windows SDK's rc.exe.
+    $rc = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\rc.exe" | Sort-Object FullName | Select-Object -Last 1
+    $res = Join-Path $root 'target/rosorah.res'
+    New-Item -ItemType Directory -Force (Split-Path $res) | Out-Null
+    & $rc.FullName /nologo /fo $res (Join-Path $PSScriptRoot 'rosorah.rc')
+    if ($LASTEXITCODE) { throw 'Icon resource compilation failed' }
+    rustc --edition 2024 --target x86_64-pc-windows-msvc -C opt-level=s -C strip=symbols -C "link-arg=$res" (Join-Path $PSScriptRoot 'launcher.rs') -o (Join-Path $bundlePath 'Rosorah.exe')
     if ($LASTEXITCODE) { throw 'Launcher compilation failed' }
-    Copy-Item (Join-Path $PSScriptRoot 'setup.cmd') $bundlePath -Force
+    Remove-Item (Join-Path $bundlePath 'Rosorah.pdb') -ErrorAction SilentlyContinue
+    # cmd.exe misreads batch files without Windows (CRLF) line endings.
+    $cmd = (Get-Content -Raw (Join-Path $PSScriptRoot 'setup.cmd')) -replace "`r?`n", "`r`n"
+    [IO.File]::WriteAllText((Join-Path $bundlePath 'setup.cmd'), $cmd)
     Copy-Item (Join-Path $PSScriptRoot 'installed-readme.md') (Join-Path $bundlePath 'START-HERE.md') -Force
     Remove-Item (Join-Path $bundlePath 'SHA256SUMS.txt') -ErrorAction SilentlyContinue
     $lines = @()

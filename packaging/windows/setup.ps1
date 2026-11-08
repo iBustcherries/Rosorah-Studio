@@ -80,20 +80,5 @@ if (Test-Path $ffmpeg) {
     if (-not (Test-Path $ffmpeg)) { throw 'FFmpeg archive layout did not match' }
 }
 
-# 4. Python, for the browser chat reader. Installed for this user only; Rosorah looks here first.
-$python = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313'
-if (Test-Path (Join-Path $python 'python.exe')) {
-    Write-Output 'Python 3.13: already installed'
-} else {
-    Write-Output 'Python 3.13.16: installing...'
-    $p = Join-Path $runtime 'python-3.13.16-amd64.exe'
-    Get-Verified 'https://www.python.org/ftp/python/3.13.16/python-3.13.16-amd64.exe' $p 'FB4F9F5D438B2396DA0086DC70B935C530CB578E37ADC6D354F7AD2037FEE83B' $null
-    if (-not (Test-Signer $p 'Python Software Foundation')) { throw 'Python signature verification failed' }
-    $arguments = @('/quiet', 'InstallAllUsers=0', 'PrependPath=1', 'Include_test=0', 'Include_doc=0', 'Include_tcltk=0', 'Shortcuts=0', 'AssociateFiles=0', ('TargetDir="' + $python + '"'))
-    $r = Start-Process $p -ArgumentList $arguments -Wait -PassThru
-    if ($r.ExitCode -notin @(0, 3010)) { throw "Python install did not complete: $($r.ExitCode)" }
-    if (-not (Test-Path (Join-Path $python 'python.exe'))) { throw 'Python was not installed where expected' }
-}
-
 # Installers are no longer needed once everything is in place.
-Remove-Item -ErrorAction SilentlyContinue (Join-Path $runtime 'vc_redist.x64.exe'), (Join-Path $runtime 'gstreamer-1.26.10.msi'), (Join-Path $runtime 'ffmpeg-9.0.2.zip'), (Join-Path $runtime 'python-3.13.16-amd64.exe')
+Remove-Item -ErrorAction SilentlyContinue (Join-Path $runtime 'vc_redist.x64.exe'), (Join-Path $runtime 'gstreamer-1.26.10.msi'), (Join-Path $runtime 'ffmpeg-9.0.2.zip')

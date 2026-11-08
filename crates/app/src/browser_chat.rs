@@ -120,6 +120,24 @@ const PYSIDE6_VERSION: &str = "6.12.0";
 pub(crate) fn runtime_ready_marker() -> PathBuf {
     venv().join(format!("rosorah-runtime-{PYSIDE6_VERSION}.ready"))
 }
+/// The browser runtime the installer ships next to Rosorah, so nothing is downloaded: on Windows a
+/// Python with PySide6 (and so Chromium) in `browser-runtime`, on Linux PySide6 for the system
+/// Python in `browser-runtime/site-packages`. A development build has none and downloads one.
+pub(crate) fn bundled_runtime() -> Option<PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.join("browser-runtime");
+    dir.join("rosorah-runtime.version").is_file().then_some(dir)
+}
+/// Whether chat, web panels and browser sources can start.
+pub(crate) fn runtime_ready() -> bool {
+    bundled_runtime().is_some() || runtime_ready_marker().is_file()
+}
+/// What the helpers need in their environment to find a bundled runtime.
+pub(crate) fn runtime_env() -> Vec<(&'static str, std::ffi::OsString)> {
+    match bundled_runtime() {
+        Some(dir) if cfg!(not(windows)) => vec![("PYTHONPATH", dir.join("site-packages").into()), ("PYTHONNOUSERSITE", "1".into())],
+        _ => Vec::new(),
+    }
+}
 pub(crate) fn venv() -> PathBuf {
     #[cfg(windows)]
     { auroracast_core::platform::config_root().join("rosorah-studio/browser-runtime") }
@@ -127,7 +145,13 @@ pub(crate) fn venv() -> PathBuf {
     { std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(||PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share")).join("rosorah-studio/browser-runtime") }
 }
 pub(crate) fn python_relative() -> &'static str { if cfg!(windows) { "Scripts/python.exe" } else { "bin/python" } }
-pub(crate) fn python() -> PathBuf { venv().join(python_relative()) }
+pub(crate) fn python() -> PathBuf {
+    match bundled_runtime() {
+        Some(dir) if cfg!(windows) => dir.join("python.exe"),
+        Some(_) => PathBuf::from("/usr/bin/python3"),
+        None => venv().join(python_relative()),
+    }
+}
 /// Python used to create the chat runtime. On Windows the installer puts Python 3.13 in the
 /// user's Programs folder; using it directly avoids the Microsoft Store "python" placeholder
 /// and PATH changes that only apply after signing out.
@@ -248,7 +272,7 @@ impl BrowserChat {
         self.setup.is_some()
     }
     pub fn setup(&mut self) {
-        if self.setup.is_some() {
+        if self.setup.is_some() || bundled_runtime().is_some() {
             return;
         }
         let (tx, rx) = mpsc::sync_channel(1);
@@ -411,6 +435,7 @@ impl BrowserChat {
             .env_remove("LD_LIBRARY_PATH")
             .env_remove("QT_PLUGIN_PATH")
             .env_remove("QT_QPA_PLATFORM_PLUGIN_PATH")
+            .envs(runtime_env())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -509,7 +534,7 @@ impl BrowserChat {
         }
         if (self.accounts_connected || self.runtime_wanted)
             && (!python().is_file()
-                || !runtime_ready_marker().is_file())
+                || !runtime_ready())
             && !self.setup_attempted
             && self.setup_retry.ready(Instant::now())
         {

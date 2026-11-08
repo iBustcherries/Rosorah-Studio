@@ -10,10 +10,10 @@ from the application.
 
 ## What setup installs
 
-The installer includes GStreamer. If they are missing, it also installs the Microsoft
-Visual C++ Runtime, FFmpeg, and Python 3.13 for your account (browser chat and web page
-sources use Python). These downloads need internet access, and the official installers
-may ask for administrator permission. Your graphics drivers are not changed.
+The installer includes GStreamer and the browser that chat, web panels and browser sources
+use (Chromium, through Qt WebEngine). If they are missing, it also installs the Microsoft
+Visual C++ Runtime and FFmpeg. These downloads need internet access, and the official
+installers may ask for administrator permission. Your graphics drivers are not changed.
 
 If setup stops part way, `setup.log` in this folder says why. Run the Setup EXE again to retry.
 

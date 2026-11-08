@@ -6,7 +6,7 @@ rm -f /etc/apt/apt.conf.d/docker-clean
 apt-get update -qq
 apt-get install -y -qq --no-install-recommends ca-certificates curl build-essential pkg-config \
     libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libdrm-dev \
-    g++-multilib libvulkan-dev libgl-dev rsync >/dev/null
+    g++-multilib libvulkan-dev libgl-dev rsync python3-venv >/dev/null
 export PATH="/root/.cargo/bin:$PATH" CARGO_TARGET_DIR=/work/target
 if ! command -v cargo >/dev/null; then
     curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal --default-toolchain 1.99.0 --no-modify-path
@@ -30,6 +30,9 @@ mkdir -p "$stage/browser" "$pkg/usr/bin" "$pkg/usr/share/applications" "$pkg/DEB
 cp "$CARGO_TARGET_DIR/release/rosorah-studio" "$stage/"
 cp -r browser/. "$stage/browser/"
 rm -rf "$stage/browser/__pycache__"
+echo "== Bundling the browser runtime (Chromium for chat, web panels and browser sources)"
+python3 -m venv /work/bundle-venv
+/work/bundle-venv/bin/python packaging/bundle-browser-runtime.py linux "$stage/browser-runtime"
 cp -r fonts "$stage/fonts"
 cp packaging/install-renderer.py "$stage/"
 # Twitch/YouTube sign-in registrations; kept out of git (see .gitignore).
@@ -61,7 +64,13 @@ Version: ${debversion}-${DEB_REVISION:-1}
 Architecture: amd64
 Maintainer: iBustcherries <102161061+iBustcherries@users.noreply.github.com>
 Installed-Size: ${size}
-Depends: libc6 (>= 2.39), libgstreamer1.0-0, libgstreamer-plugins-base1.0-0, libdrm2, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-libav, gstreamer1.0-pipewire, pipewire-bin, python3, python3-venv, ffmpeg
+Depends: libc6 (>= 2.39), libgstreamer1.0-0, libgstreamer-plugins-base1.0-0, libdrm2, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-libav, gstreamer1.0-pipewire, pipewire-bin, python3 (>= 3.10), ffmpeg,
+ libnss3, libnspr4, libasound2t64, libdbus-1-3, libudev1, libexpat1, libfontconfig1, libfreetype6, libgbm1, libegl1, libgl1,
+ libglib2.0-0t64, libbrotli1, libgssapi-krb5-2, libzstd1, zlib1g, libxkbcommon0, libxkbcommon-x11-0, libxkbfile1,
+ libwayland-client0, libwayland-cursor0, libwayland-egl1, libx11-6, libx11-xcb1, libxcomposite1, libxdamage1, libxext6,
+ libxfixes3, libxrandr2, libxtst6, libxcb1, libxcb-cursor0, libxcb-dri3-0, libxcb-glx0, libxcb-icccm4, libxcb-image0,
+ libxcb-keysyms1, libxcb-randr0, libxcb-render0, libxcb-render-util0, libxcb-shape0, libxcb-shm0, libxcb-sync1,
+ libxcb-util1, libxcb-xfixes0, libxcb-xkb1
 Recommends: gstreamer1.0-plugins-bad, gstreamer1.0-vaapi, xdg-utils
 Section: video
 Priority: optional

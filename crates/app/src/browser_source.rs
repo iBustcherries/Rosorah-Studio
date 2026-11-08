@@ -14,7 +14,7 @@ use std::{
 };
 use tokio::sync::watch;
 pub fn ready() -> bool {
-    crate::browser_chat::runtime_ready_marker().is_file()
+    crate::browser_chat::runtime_ready()
 }
 pub fn valid_url(url: &str) -> bool {
     reqwest::Url::parse(url).is_ok_and(|u| {
@@ -78,6 +78,7 @@ impl Backend for BrowserBackend {
             .env_remove("LD_LIBRARY_PATH")
             .env_remove("QT_PLUGIN_PATH")
             .env_remove("QT_QPA_PLATFORM_PLUGIN_PATH")
+            .envs(crate::browser_chat::runtime_env())
             .env("QT_SCALE_FACTOR", "1")
             .env("QT_AUTO_SCREEN_SCALE_FACTOR", "0")
             .stdin(Stdio::piped())

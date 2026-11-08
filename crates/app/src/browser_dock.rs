@@ -39,6 +39,7 @@ impl Page {
             .env_remove("LD_LIBRARY_PATH")
             .env_remove("QT_PLUGIN_PATH")
             .env_remove("QT_QPA_PLATFORM_PLUGIN_PATH")
+            .envs(crate::browser_chat::runtime_env())
             .env("QT_SCALE_FACTOR", "1")
             .env("QT_AUTO_SCREEN_SCALE_FACTOR", "0")
             .stdin(Stdio::piped())

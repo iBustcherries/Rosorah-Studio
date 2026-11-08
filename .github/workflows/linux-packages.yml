@@ -1,0 +1,81 @@
+name: Linux packages
+# Builds the .deb and .rpm for a release branch with the same scripts used locally, then installs
+# the .deb on a stock Ubuntu and runs the browser helpers on its bundled Chromium under Wayland.
+on:
+  push:
+    branches: ['release/**']
+  workflow_dispatch:
+jobs:
+  deb:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Tools for the Spout bridge (a Windows program the package carries)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld llvm
+          cargo install --locked cargo-xwin
+      - name: Sign-in registrations
+        env:
+          ACCOUNTS: ${{ secrets.ROSORAH_ACCOUNTS_DEFAULTS }}
+        run: test -n "$ACCOUNTS" && printf '%s' "$ACCOUNTS" > packaging/accounts-defaults.json
+      - run: packaging/deb/build-deb.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb
+          path: dist/*.deb
+          if-no-files-found: error
+
+  deb-on-ubuntu:
+    # A stock Ubuntu 24.04: the package's dependencies and its bundled browser, sandbox included.
+    needs: deb
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: deb
+      - name: Install the package
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ./rosorah-studio_*.deb sway grim wtype
+      - run: cargo build --locked -p rosorah-activation --bin rosorah-activation-token
+      - name: Browser helpers on the bundled runtime, Wayland
+        env:
+          PYTHONPATH: /opt/rosorah-studio/browser-runtime/site-packages
+          PYTHONNOUSERSITE: '1'
+          ROSORAH_ACTIVATION_TOKEN_TOOL: ${{ github.workspace }}/target/debug/rosorah-activation-token
+        run: scripts/browser-session-test.sh wayland 1 /usr/bin/python3
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-on-ubuntu-session
+          path: session-artifacts
+          if-no-files-found: ignore
+
+  rpm:
+    runs-on: ubuntu-24.04
+    container: registry.fedoraproject.org/fedora:44
+    steps:
+      - name: Build tools
+        run: |
+          dnf install -y --setopt=install_weak_deps=False git rpm-build gcc gcc-c++ make pkgconf-pkg-config \
+            glib2-devel gstreamer1-devel gstreamer1-plugins-base-devel python3 glibc-devel.i686 \
+            libstdc++-devel.i686 vulkan-headers libglvnd-devel libdrm-devel clang lld llvm curl
+          curl -sSf https://sh.rustup.rs | sh -s -- -y -q --profile minimal --default-toolchain 1.99.0
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v4
+      - run: cargo install --locked cargo-xwin
+      - name: Sign-in registrations
+        env:
+          ACCOUNTS: ${{ secrets.ROSORAH_ACCOUNTS_DEFAULTS }}
+        run: test -n "$ACCOUNTS" && printf '%s' "$ACCOUNTS" > packaging/accounts-defaults.json
+      - run: packaging/rpm/build-rpm.sh
+      - name: The package installs on Fedora
+        run: dnf install -y --setopt=install_weak_deps=False ./dist/*.rpm && test -f /opt/rosorah-studio/browser-runtime/rosorah-runtime.version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm
+          path: dist/*.rpm
+          if-no-files-found: error

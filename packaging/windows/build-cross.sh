@@ -74,7 +74,10 @@ cp "$out/rosorah-studio.exe" "$out/rosorah-windows-probe.exe" "$bundle/"
 cp "$root/target-windows/camera/$target/release/rosorah_camera.dll" "$bundle/rosorah-camera.dll"
 cp "$CARGO_TARGET_DIR/$target/release/rosorah-launcher.exe" "$bundle/Rosorah.exe"
 cp -r browser "$bundle/browser"
-rm -rf "$bundle/browser/__pycache__"
+rm -rf "$bundle/browser/__pycache__" "$bundle/browser"/test_*
+# Chromium for chat, web panels and browser sources, so nothing is downloaded on first use.
+python3 -m venv "$work/bundle-venv"
+"$work/bundle-venv/bin/python" packaging/bundle-browser-runtime.py windows "$bundle/browser-runtime"
 cp -r fonts "$bundle/fonts"
 # Twitch/YouTube sign-in registrations; kept out of git (see .gitignore).
 if [ -f packaging/accounts-defaults.json ]; then cp packaging/accounts-defaults.json "$bundle/"; else echo "WARNING: packaging/accounts-defaults.json is missing, so Twitch and YouTube sign-in will be unavailable in this package." >&2; fi
