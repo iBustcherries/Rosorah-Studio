@@ -68,7 +68,9 @@ class Helper:
                 self.cv.notify_all()
     def read_lines(self):
         for line in self.proc.stdout:
-            with self.cv:self.lines.append(json.loads(line));self.cv.notify_all()
+            try:item=json.loads(line)
+            except ValueError:item={'type':'not json','text':line.decode(errors='replace')[:500]}
+            with self.cv:self.lines.append(item);self.cv.notify_all()
     def click(self,x,y):
         # As Rosorah's panel sends them: the pointer arrives, then a press and a release a moment apart.
         for kind in ('move','press','release'):self.send({'type':kind,'x':x,'y':y,'button':'left'});time.sleep(0.05)
@@ -167,7 +169,7 @@ class ChatTests(SessionTest):
     def chat(self,*args):
         env=helper_env(False);env['XDG_DATA_HOME']=tempfile.mkdtemp()
         c=self.start('chat_browser.py',args=args,env=env)
-        self.assertTrue(c.wait(lambda c:any(l.get('type')=='status' for l in c.lines)),'chat never started')
+        self.assertTrue(c.wait(lambda c:any(l.get('type')=='status' for l in c.lines)),f'chat never started; exit {c.proc.poll()}; stdout {c.lines}; stderr {c.stderr()}')
         return c
     @unittest.skipUnless(SWAY,'needs sway')
     def test_background_start_shows_nothing_until_asked(self):
