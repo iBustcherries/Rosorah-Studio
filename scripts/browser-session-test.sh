@@ -50,7 +50,9 @@ break clearenv
 commands 1-4
 silent
 info symbol $pc
-bt 12
+x/s $rdi
+x/s $rsi
+bt 4
 continue
 end
 run browser/chat_browser.py --background </dev/null >/dev/null 2>&1
