@@ -38,6 +38,11 @@ esac
 if [ -n "${ROSORAH_SESSION_PROBE:-}" ] && command -v gdb >/dev/null; then
     # Starts background chat repeatedly under gdb and keeps the backtrace of any crash.
     export XDG_DATA_HOME=$(mktemp -d)
+    # Every change to the environment once Qt has loaded, with who made it.
+    gdb -q -batch -ex 'set pagination off' -ex 'set breakpoint pending on'         -ex 'break setenv' -ex 'break unsetenv' -ex 'break putenv' -ex 'break clearenv'         -ex 'commands 1-4
+bt 12
+continue
+end' -ex 'run browser/chat_browser.py --background </dev/null >/dev/null 2>&1' --args "$python"         >"$ROSORAH_SESSION_ARTIFACTS/env-writes.txt" 2>&1 || true
     for i in $(seq "$ROSORAH_SESSION_PROBE"); do
         gdb -q -batch -ex 'set pagination off' -ex 'handle SIGPIPE nostop noprint'             -ex 'run browser/chat_browser.py --background </dev/null >/dev/null 2>&1'             -ex 'info threads' -ex 'thread apply all bt 25' --args "$python"             >"$ROSORAH_SESSION_ARTIFACTS/probe-$i.txt" 2>&1 || true
         if grep -q 'SIGSEGV\|SIGABRT' "$ROSORAH_SESSION_ARTIFACTS/probe-$i.txt"; then echo "probe $i crashed"; else rm "$ROSORAH_SESSION_ARTIFACTS/probe-$i.txt"; fi
