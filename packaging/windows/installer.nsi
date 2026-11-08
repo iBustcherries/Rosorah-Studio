@@ -67,7 +67,8 @@ Section "Rosorah Studio (required)" Core
   Delete "$INSTDIR\run.cmd"
   Delete "$INSTDIR\release-0.31-preview6.md"
   SetOutPath "$INSTDIR"
-  File /r "${PAYLOAD}/*"
+  ; A backslash: makensis on Windows finds nothing with "dir/*"; on Linux it reads either.
+  File /r "${PAYLOAD}\*"
   WriteUninstaller "$INSTDIR\Uninstall.exe"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RosorahStudio" "DisplayName" "Rosorah Studio"
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\RosorahStudio" "DisplayVersion" "${VERSION}"

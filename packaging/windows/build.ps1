@@ -43,9 +43,12 @@ try {
     else { Write-Warning 'packaging/accounts-defaults.json is missing, so Twitch and YouTube sign-in will be unavailable in this build.' }
     # GStreamer's runtime installer, bundled so setup never depends on its download server.
     $msi = Join-Path $root 'target/gstreamer-1.26.10.msi'
-    if (-not (Test-Path $msi) -or (Get-FileHash $msi -Algorithm SHA256).Hash -ne 'A863BF3FAA49E9F33BD3CC42967B473482D4DC98655ED95CBA1AC59F26FB0CFB') {
-        & curl.exe -sSfL --retry 5 -o $msi 'https://gstreamer.freedesktop.org/data/pkg/windows/1.26.10/msvc/gstreamer-1.0-msvc-x86_64-1.26.10.msi'
-        if ((Get-FileHash $msi -Algorithm SHA256).Hash -ne 'A863BF3FAA49E9F33BD3CC42967B473482D4DC98655ED95CBA1AC59F26FB0CFB') { throw 'GStreamer runtime download does not match its checksum' }
+    $sum = 'A863BF3FAA49E9F33BD3CC42967B473482D4DC98655ED95CBA1AC59F26FB0CFB'
+    # Its server often cuts downloads short: resume until the file is whole.
+    for ($attempt = 1; -not ((Test-Path $msi) -and (Get-FileHash $msi -Algorithm SHA256).Hash -eq $sum); $attempt++) {
+        if ($attempt -gt 8) { throw 'GStreamer runtime download does not match its checksum' }
+        & curl.exe -sSfL --retry 5 --retry-delay 3 -C - -o $msi 'https://gstreamer.freedesktop.org/data/pkg/windows/1.26.10/msvc/gstreamer-1.0-msvc-x86_64-1.26.10.msi'
+        if ($LASTEXITCODE -eq 0 -and (Get-FileHash $msi -Algorithm SHA256).Hash -ne $sum) { Remove-Item $msi }
     }
     New-Item -ItemType Directory -Path (Join-Path $Output 'runtime') | Out-Null
     Copy-Item $msi (Join-Path $Output 'runtime/gstreamer-1.26.10.msi')
