@@ -15,6 +15,8 @@ wayland)
     unset DISPLAY
     cat >"$XDG_RUNTIME_DIR/sway.conf" <<EOF
 xwayland disable
+# Do what KDE and GNOME do with a valid token: focus the window (sway's default only marks it).
+focus_on_window_activation focus
 output HEADLESS-1 resolution 1920x1080 scale $scale
 EOF
     WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 \

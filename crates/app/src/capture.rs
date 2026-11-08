@@ -159,7 +159,8 @@ impl Captures {
     }
     pub fn browser_command(&self, id: Id, kind: &str) {
         if let Some(tx) = self.browser_commands.get(&id) {
-            let _ = tx.try_send(serde_json::json!({"type":kind}));
+            let command = serde_json::json!({"type":kind});
+            let _ = tx.try_send(if kind == "interact" { crate::browser_chat::with_activation(command) } else { command });
         }
     }
     /// Tells every page about streaming, recording and the current scene when they change.

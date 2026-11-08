@@ -103,6 +103,7 @@ def main():
     from PySide6.QtWidgets import QApplication
     from PySide6.QtWebEngineCore import QWebEnginePage,QWebEngineProfile,QWebEngineScript,QWebEngineSettings
     from PySide6.QtWebEngineWidgets import QWebEngineView
+    from window_focus import APP_ID,bring_forward
     class Inbox(QObject):line=Signal(str)
     class Page(QWebEnginePage):
         def javaScriptConsoleMessage(self,*args):pass
@@ -113,7 +114,7 @@ def main():
     class View(QWebEngineView):
         def closeEvent(self,event):
             event.ignore();self.hide();self.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen,True);self.show();self.page().setVisible(True)
-    app=QApplication([]);app.setQuitOnLastWindowClosed(False)
+    app=QApplication([]);app.setQuitOnLastWindowClosed(False);app.setDesktopFileName(APP_ID)
     view=View();view.setWindowTitle('Rosorah · Interact with browser source');view.setFixedSize(w,h)
     view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen,True)
     view.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground,True)
@@ -174,7 +175,7 @@ def main():
         elif kind=='forget':
             profile.cookieStore().deleteAllCookies();profile.clearHttpCache();profile.clearAllVisitedLinks();view.reload()
             out.note('Sign-ins for this source were cleared')
-        elif kind=='interact':view.hide();view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen,False);view.showNormal();view.activateWindow()
+        elif kind=='interact':view.hide();view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen,False);bring_forward(view,message.get('activation'))
     inbox.line.connect(command)
     def read():
         for line in sys.stdin:

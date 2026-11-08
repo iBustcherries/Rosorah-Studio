@@ -8,6 +8,23 @@ use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
+/// Wayland only lets a helper's window come forward with a token from Rosorah's own window, so
+/// commands that open one carry it. Elsewhere there is none and the command is unchanged.
+pub(crate) fn with_activation(mut command: Value) -> Value {
+    if let Some(token) = rosorah_activation::token() {
+        command["activation"] = token.into();
+    }
+    command
+}
+/// Remembers Rosorah's window on Wayland, which activation tokens are asked for.
+pub(crate) fn remember_window(cc: &eframe::CreationContext<'_>) {
+    use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
+    if let (Ok(RawWindowHandle::Wayland(window)), Ok(RawDisplayHandle::Wayland(display))) =
+        (cc.window_handle().map(|h| h.as_raw()), cc.display_handle().map(|h| h.as_raw()))
+    {
+        rosorah_activation::remember(display.display.as_ptr(), window.surface.as_ptr());
+    }
+}
 #[derive(Default)]
 pub struct BrowserChat {
     pub rich: crate::chat_render::RichChat,
@@ -386,6 +403,8 @@ impl BrowserChat {
         command.arg(script);
         if !visible {
             command.arg("--background");
+        } else if let Some(token) = rosorah_activation::token() {
+            command.env("XDG_ACTIVATION_TOKEN", token);
         }
         let mut child = command
             .env_remove("LD_LIBRARY_PATH")
@@ -440,6 +459,7 @@ impl BrowserChat {
         Ok(())
     }
     pub fn send(&self, v: Value) {
+        let v = if matches!(v["type"].as_str(), Some("show" | "open_platform")) { with_activation(v) } else { v };
         if let Some(tx) = &self.tx {
             let _ = tx.try_send(v);
         }

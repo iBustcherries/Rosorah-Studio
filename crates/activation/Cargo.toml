@@ -1,0 +1,16 @@
+[package]
+license.workspace = true
+name = "rosorah-activation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Wayland activation tokens, so helper windows Rosorah opens come to the front"
+
+[[bin]]
+name = "rosorah-activation-token"
+path = "src/main.rs"
+
+# libwayland is loaded at run time, as winit does, so nothing links against it.
+[target.'cfg(target_os = "linux")'.dependencies]
+wayland-client = { version = "0.31", features = ["system", "dlopen"] }
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }

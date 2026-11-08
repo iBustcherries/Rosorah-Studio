@@ -3016,6 +3016,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rosorah-activation"
+version = "0.53.0"
+dependencies = [
+ "wayland-client",
+ "wayland-protocols",
+]
+
+[[package]]
 name = "rosorah-camera"
 version = "0.53.0"
 dependencies = [
@@ -3055,8 +3063,10 @@ dependencies = [
  "mlua",
  "pollster",
  "qrcode",
+ "raw-window-handle",
  "reqwest",
  "rfd",
+ "rosorah-activation",
  "rosorah-capture",
  "rosorah-windows",
  "serde",

@@ -10,6 +10,8 @@ WAYLAND=bool(os.environ.get('WAYLAND_DISPLAY'))
 SWAY=WAYLAND and bool(os.environ.get('SWAYSOCK')) and shutil.which('swaymsg') is not None
 SHOTS=Path(os.environ.get('ROSORAH_SESSION_ARTIFACTS',tempfile.gettempdir()))
 APP_ID='io.rosorah.Studio'
+# Prints an activation token, standing in for Rosorah asking the compositor for one (crates/activation).
+TOKEN_TOOL=os.environ.get('ROSORAH_ACTIVATION_TOKEN_TOOL','')
 
 # A transparent overlay with a red square and a bar that changes every frame, and a web panel
 # whose left half turns blue when clicked and whose title follows what is typed in its box.
@@ -65,18 +67,22 @@ class Helper:
     def read_lines(self):
         for line in self.proc.stdout:
             with self.cv:self.lines.append(json.loads(line));self.cv.notify_all()
+    def click(self,x,y):
+        # As Rosorah's panel sends them: the pointer arrives, then a press and a release a moment apart.
+        for kind in ('move','press','release'):self.send({'type':kind,'x':x,'y':y,'button':'left'});time.sleep(0.05)
     def wait(self,test,timeout=30):
         with self.cv:return self.cv.wait_for(lambda:test(self),timeout)
     def pixel(self,x,y):
         w,h,data=self.frame;i=(y*w+x)*4;return tuple(data[i:i+4])
     def stderr(self):
-        self.log.flush();return Path(self.log.name).read_text(errors='replace')[-4000:]
+        return Path(self.log.name).read_text(errors='replace')[-4000:]
     def close(self):
         if self.proc.poll() is None:
             try:self.send({'type':'quit'})
             except (BrokenPipeError,OSError):pass
             try:self.proc.wait(5)
             except subprocess.TimeoutExpired:self.proc.kill();self.proc.wait()
+        for f in (self.proc.stdin,self.proc.stdout,self.log):f.close()
 
 def windows(pid=None):
     """Windows the compositor shows: title, app id, focus, and whether they are on screen."""
@@ -92,6 +98,13 @@ def wait_for(test,timeout=15):
         if (result:=test()):return result
         time.sleep(0.2)
     return test()
+def opening(message):
+    """A command that opens a window, with the activation token Rosorah attaches on Wayland."""
+    if WAYLAND and TOKEN_TOOL:
+        token=subprocess.run([TOKEN_TOOL],capture_output=True,text=True)
+        assert token.returncode==0 and token.stdout.strip(),'no activation token: '+token.stderr
+        message=dict(message,activation=token.stdout.strip())
+    return message
 def screenshot(name):
     if WAYLAND and shutil.which('grim'):subprocess.run(['grim',str(SHOTS/(name+'.png'))],capture_output=True)
 
@@ -122,7 +135,7 @@ class SourceTests(SessionTest):
     @unittest.skipUnless(SWAY,'needs sway')
     def test_interact_window_opens_in_front(self):
         s=self.source();self.assertTrue(s.wait(lambda s:s.frame),f'no frame; notes {s.notes}')
-        self.blocker();s.send({'type':'interact'})
+        self.blocker();s.send(opening({'type':'interact'}))
         shown=wait_for(lambda:[w for w in windows(s.proc.pid) if w['visible']]);screenshot('source-interact')
         self.assertTrue(shown,'Interact opened no window')
         self.assertEqual(shown[0]['app_id'],APP_ID)
@@ -132,11 +145,11 @@ class SourceTests(SessionTest):
 class PanelTests(SessionTest):
     def test_frames_clicks_and_typing(self):
         p=self.start('dock_browser.py',{'url':url('/panel.html'),'width':400,'height':300,'zoom':1.0,'storage':tempfile.mkdtemp()},magic=b'RSDK')
-        self.assertTrue(p.wait(lambda p:p.frame and p.pixel(100,150)[:3]==(255,255,255)),f'no panel frame; notes {p.notes}')
+        self.assertTrue(p.wait(lambda p:'panel ready' in p.titles and p.frame and p.pixel(100,150)[:3]==(255,255,255)),f'no panel frame; notes {p.notes}')
         self.assertEqual(p.frame[:2],(400,300))
-        for kind in ('press','release'):p.send({'type':kind,'x':100,'y':150,'button':'left'})
+        p.click(100,150)
         self.assertTrue(p.wait(lambda p:p.pixel(100,150)[2]>200 and p.pixel(100,150)[0]<60,10),f'click did not reach the page: {p.pixel(100,150)}')
-        for kind in ('press','release'):p.send({'type':kind,'x':300,'y':150,'button':'left'})
+        p.click(300,150)
         for ch in 'abc':p.send({'type':'text','text':ch})
         self.assertTrue(p.wait(lambda p:'typed:abc' in p.titles,10),f'typing did not reach the page; titles {p.titles}')
         if SWAY:self.assertEqual(windows(p.proc.pid),[],'a web panel put a window on screen')
@@ -151,25 +164,25 @@ class ChatTests(SessionTest):
     def test_background_start_shows_nothing_until_asked(self):
         c=self.chat('--background');time.sleep(3)
         self.assertEqual(windows(c.proc.pid),[],'background chat put a window on screen')
-        c.send({'type':'show'})
+        c.send(opening({'type':'show'}))
         shown=wait_for(lambda:windows(c.proc.pid));screenshot('chat-show')
         self.assertTrue(shown,'show opened no window');self.assertEqual(shown[0]['app_id'],APP_ID)
         self.assertTrue(wait_for(lambda:any(w['focused'] for w in windows(c.proc.pid)),5),'chat opened without focus')
     @unittest.skipUnless(SWAY,'needs sway')
     def test_show_brings_an_open_chat_window_forward(self):
         c=self.chat();self.assertTrue(wait_for(lambda:windows(c.proc.pid)),'chat window never opened')
-        self.blocker();c.send({'type':'show'})
+        self.blocker();c.send(opening({'type':'show'}))
         self.assertTrue(wait_for(lambda:any(w['focused'] for w in windows(c.proc.pid)),5),'show left the chat window behind another app')
     @unittest.skipUnless(SWAY,'needs sway')
     def test_hidden_platform_page_opens_in_front(self):
         # Kick's page stays laid out off screen; opening it from Rosorah must bring it up focused.
         c=self.chat('--background');c.send({'type':'sources','kick':'rosorahtest'});time.sleep(2)
         self.assertEqual(windows(c.proc.pid),[],'the hidden Kick page put a window on screen')
-        self.blocker();c.send({'type':'open_platform','platform':'Kick'})
+        self.blocker();c.send(opening({'type':'open_platform','platform':'Kick'}))
         shown=wait_for(lambda:[w for w in windows(c.proc.pid) if w['title']=='Rosorah · Kick chat']);screenshot('chat-kick')
         self.assertTrue(shown,'the Kick page did not open');self.assertEqual(shown[0]['app_id'],APP_ID)
         self.assertTrue(wait_for(lambda:any(w['focused'] for w in windows(c.proc.pid)),5),'the Kick page opened without focus')
 
 if __name__=='__main__':
-    print('session:', 'Wayland' if WAYLAND else 'X11', '· window checks', 'on' if SWAY else 'off', file=sys.stderr)
+    print('session:', 'Wayland' if WAYLAND else 'X11' if os.environ.get('DISPLAY') else sys.platform, '· window checks', 'on' if SWAY else 'off', '· activation tokens', 'on' if WAYLAND and TOKEN_TOOL else 'off', file=sys.stderr)
     unittest.main()

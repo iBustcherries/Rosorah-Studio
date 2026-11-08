@@ -302,6 +302,7 @@ fn main() -> Result<()> {
         "Rosorah Studio",
         options,
         Box::new(move |cc| {
+            browser_chat::remember_window(cc);
             let mut studio = studio::Studio::new(cc, project, project_path, screenshot, page);
             if let Some(notice) = notice {
                 studio.notice(notice);
