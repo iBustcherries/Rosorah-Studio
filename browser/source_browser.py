@@ -103,7 +103,8 @@ def main():
     from PySide6.QtWidgets import QApplication
     from PySide6.QtWebEngineCore import QWebEnginePage,QWebEngineProfile,QWebEngineScript,QWebEngineSettings
     from PySide6.QtWebEngineWidgets import QWebEngineView
-    from window_focus import APP_ID,bring_forward
+    from desktop_session import APP_ID,bring_forward,prepare
+    prepare()
     class Inbox(QObject):line=Signal(str)
     class Page(QWebEnginePage):
         def javaScriptConsoleMessage(self,*args):pass

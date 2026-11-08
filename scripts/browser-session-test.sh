@@ -36,31 +36,15 @@ x11)
 esac
 "$python" -c 'from PySide6.QtWidgets import QApplication;a=QApplication([]);print("Qt platform:",a.platformName())'
 if [ -n "${ROSORAH_SESSION_PROBE:-}" ] && command -v gdb >/dev/null; then
-    # Starts background chat repeatedly under gdb and keeps the backtrace of any crash.
+    # Starts background chat repeatedly under gdb and keeps the backtrace of any crash. Startup
+    # crashes are rare races (EGL_PLATFORM, see browser/desktop_session.py), so one try isn't enough.
     export XDG_DATA_HOME=$(mktemp -d)
-    # Every change to the environment, with who made it.
-    cat >"$XDG_RUNTIME_DIR/env-writes.gdb" <<'GDB'
-set pagination off
-set breakpoint pending on
-handle SIGPIPE nostop noprint
-break setenv
-break unsetenv
-break putenv
-break clearenv
-commands 1-4
-silent
-info symbol $pc
-x/s $rdi
-x/s $rsi
-bt 4
-continue
-end
-run browser/chat_browser.py --background </dev/null >/dev/null 2>&1
-GDB
-    gdb -q -batch -x "$XDG_RUNTIME_DIR/env-writes.gdb" --args "$python" >"$ROSORAH_SESSION_ARTIFACTS/env-writes.txt" 2>&1 || true
     for i in $(seq "$ROSORAH_SESSION_PROBE"); do
-        gdb -q -batch -ex 'set pagination off' -ex 'handle SIGPIPE nostop noprint'             -ex 'run browser/chat_browser.py --background </dev/null >/dev/null 2>&1'             -ex 'info threads' -ex 'thread apply all bt 25' --args "$python"             >"$ROSORAH_SESSION_ARTIFACTS/probe-$i.txt" 2>&1 || true
-        if grep -q 'SIGSEGV\|SIGABRT' "$ROSORAH_SESSION_ARTIFACTS/probe-$i.txt"; then echo "probe $i crashed"; else rm "$ROSORAH_SESSION_ARTIFACTS/probe-$i.txt"; fi
+        log=$ROSORAH_SESSION_ARTIFACTS/probe-$i.txt
+        gdb -q -batch -ex 'set pagination off' -ex 'handle SIGPIPE nostop noprint' \
+            -ex 'run browser/chat_browser.py --background </dev/null >/dev/null 2>&1' \
+            -ex 'thread apply all bt 25' --args "$python" >"$log" 2>&1 || true
+        if grep -q 'SIGSEGV\|SIGABRT' "$log"; then echo "chat start $i crashed"; crashed=1; else rm "$log"; fi
     done
 fi
-exec "$python" browser/test_session.py -v
+"$python" browser/test_session.py -v && exit "${crashed:-0}"

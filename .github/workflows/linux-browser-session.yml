@@ -34,7 +34,7 @@ jobs:
       - name: Run the helpers in the session
         env:
           ROSORAH_ACTIVATION_TOKEN_TOOL: ${{ github.workspace }}/target/debug/rosorah-activation-token
-          ROSORAH_SESSION_PROBE: '20'
+          ROSORAH_SESSION_PROBE: '30'
         run: scripts/browser-session-test.sh ${{ matrix.session }} ${{ matrix.scale }} ~/runtime/bin/python
       - if: always()
         uses: actions/upload-artifact@v4

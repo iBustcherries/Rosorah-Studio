@@ -17,12 +17,14 @@ def main():
     from PySide6.QtWidgets import QApplication
     from PySide6.QtWebEngineCore import QWebEnginePage,QWebEngineProfile,QWebEngineSettings
     from PySide6.QtWebEngineWidgets import QWebEngineView
+    from desktop_session import APP_ID,prepare
+    prepare()
     class Inbox(QObject):line=Signal(str)
     class Page(QWebEnginePage):
         def javaScriptConsoleMessage(self,*args):pass
         # Links that open a new window load in the panel instead.
         def createWindow(self,*args):return self
-    app=QApplication([]);app.setQuitOnLastWindowClosed(False);app.setDesktopFileName('io.rosorah.Studio')
+    app=QApplication([]);app.setQuitOnLastWindowClosed(False);app.setDesktopFileName(APP_ID)
     view=QWebEngineView()
     view.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen,True)
     # One saved profile for every web panel, apart from the chat window's accounts, so sign-ins stick.

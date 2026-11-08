@@ -5,7 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import QUrl, QTimer, Signal, QObject, Slot, QFile, QIODevice, Qt
 from PySide6.QtWebChannel import QWebChannel
 from emotes import Images, safe_url
-from window_focus import APP_ID, bring_forward
+from desktop_session import APP_ID, bring_forward, prepare
 from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget, QToolBar
 from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineScript, QWebEngineSettings
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -304,6 +304,7 @@ def main():
     for flag in ['--disable-background-timer-throttling','--disable-renderer-backgrounding']:
         if flag not in flags:flags+=' '+flag
     os.environ['QTWEBENGINE_CHROMIUM_FLAGS']=flags.strip()
+    prepare()
     app=QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False);app.setDesktopFileName(APP_ID)
     window=Window()
