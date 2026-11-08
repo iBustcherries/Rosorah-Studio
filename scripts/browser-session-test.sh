@@ -20,7 +20,7 @@ focus_on_window_activation focus
 output HEADLESS-1 resolution 1920x1080 scale $scale
 EOF
     WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 \
-        sway -c "$XDG_RUNTIME_DIR/sway.conf" >"$ROSORAH_SESSION_ARTIFACTS/sway.log" 2>&1 &
+        sway -d -c "$XDG_RUNTIME_DIR/sway.conf" >"$ROSORAH_SESSION_ARTIFACTS/sway.log" 2>&1 &
     for _ in $(seq 50); do [ -S "$XDG_RUNTIME_DIR/wayland-1" ] && break; sleep 0.2; done
     export WAYLAND_DISPLAY=wayland-1
     export SWAYSOCK=$(ls "$XDG_RUNTIME_DIR"/sway-ipc.*.sock)

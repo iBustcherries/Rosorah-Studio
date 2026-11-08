@@ -40,6 +40,7 @@ def helper_env(scaled=True):
     # The same environment Rosorah gives its helpers.
     env={k:v for k,v in os.environ.items() if k not in ('LD_LIBRARY_PATH','QT_PLUGIN_PATH','QT_QPA_PLATFORM_PLUGIN_PATH')}
     if scaled:env.update(QT_SCALE_FACTOR='1',QT_AUTO_SCREEN_SCALE_FACTOR='0')
+    if os.environ.get('ROSORAH_SESSION_DEBUG'):env['QT_LOGGING_RULES']='qt.qpa.wayland*=true'
     return env
 
 class Helper:
@@ -89,7 +90,7 @@ def windows(pid=None):
     tree=json.loads(subprocess.run(['swaymsg','-t','get_tree','-r'],capture_output=True,text=True,check=True).stdout);found=[]
     def walk(node):
         if node.get('pid') and node.get('type') in ('con','floating_con') and (pid is None or node['pid']==pid):
-            found.append({'title':node.get('name'),'app_id':node.get('app_id'),'focused':node.get('focused'),'visible':node.get('visible'),'pid':node['pid']})
+            found.append({'title':node.get('name'),'app_id':node.get('app_id'),'focused':node.get('focused'),'visible':node.get('visible'),'urgent':node.get('urgent'),'pid':node['pid']})
         for child in node.get('nodes',[])+node.get('floating_nodes',[]):walk(child)
     walk(tree);return found
 def wait_for(test,timeout=15):
@@ -172,7 +173,7 @@ class ChatTests(SessionTest):
     def test_show_brings_an_open_chat_window_forward(self):
         c=self.chat();self.assertTrue(wait_for(lambda:windows(c.proc.pid)),'chat window never opened')
         self.blocker();c.send(opening({'type':'show'}))
-        self.assertTrue(wait_for(lambda:any(w['focused'] for w in windows(c.proc.pid)),5),'show left the chat window behind another app')
+        self.assertTrue(wait_for(lambda:any(w['focused'] for w in windows(c.proc.pid)),5),f'show left the chat window behind another app: {windows()}')
     @unittest.skipUnless(SWAY,'needs sway')
     def test_hidden_platform_page_opens_in_front(self):
         # Kick's page stays laid out off screen; opening it from Rosorah must bring it up focused.
