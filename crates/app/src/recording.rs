@@ -179,6 +179,15 @@ impl AudioOutlet {
         let p = self.1.lock().unwrap();
         self.3.lock().unwrap().channels(p.0, &p.1, self.2)
     }
+    /// The scene this output's canvas shows now.
+    pub fn scene(&self) -> Option<Id> {
+        let p = self.1.lock().unwrap();
+        p.1.canvases.iter().find(|c| c.id == self.2).map(|c| c.scene)
+    }
+    /// Tells this output apart from others while it lives.
+    pub fn key(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
 
     pub fn tracks(&self) -> usize {
         self.0.audio_channels / 2

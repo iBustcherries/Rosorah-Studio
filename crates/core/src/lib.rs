@@ -189,6 +189,13 @@ pub struct Hotkey {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AudioFilters {
+    /// AI noise removal (RNNoise): keeps voices, removes background noise. `isolation_strength`
+    /// (0…1) blends it with the untouched sound.
+    pub voice_isolation: bool,
+    pub isolation_strength: f32,
+    /// Removes rumble, hum and desk bumps below `low_cut_hz`.
+    pub low_cut: bool,
+    pub low_cut_hz: f32,
     /// Silences the strip below `gate_open` (mic hiss between words, keyboard noise).
     pub gate: bool,
     pub gate_open: f32,
@@ -219,6 +226,10 @@ pub struct AudioFilters {
 impl Default for AudioFilters {
     fn default() -> Self {
         Self {
+            voice_isolation: false,
+            isolation_strength: 1.,
+            low_cut: false,
+            low_cut_hz: 80.,
             gate: false,
             gate_open: -45.,
             gate_release: 150.,
@@ -244,7 +255,7 @@ impl Default for AudioFilters {
 }
 impl AudioFilters {
     pub fn active(&self) -> bool {
-        self.gate || self.compressor || self.limiter || self.expander || self.eq || self.mono || self.balance != 0.
+        self.voice_isolation || self.low_cut || self.gate || self.compressor || self.limiter || self.expander || self.eq || self.mono || self.balance != 0.
     }
 }
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]

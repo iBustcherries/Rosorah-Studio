@@ -46,6 +46,7 @@ ab_glyph = "0.2"
 qrcode = { version = "0.14.1", default-features = false }
 raw-window-handle = "0.6"
 rosorah-activation = { path = "../activation" }
+nnnoiseless = { version = "0.5.2", default-features = false }
 
 
 [target.'cfg(windows)'.dependencies]

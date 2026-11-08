@@ -53,6 +53,8 @@ pub struct View {
 struct Control {
     channels: Arc<Vec<AudioChannel>>,
     preview_channels: Arc<Vec<AudioChannel>>,
+    /// The scene `preview_channels` belong to, so the Music strip can glide when it changes.
+    preview_scene: Option<Id>,
     media: crate::video::AudioBus,
     monitor_device: String,
     targets: Arc<BTreeMap<Id, String>>,
@@ -112,7 +114,9 @@ impl Audio {
         self.control.lock().unwrap().media = bus;
     }
     pub fn scene(&self, project: &auroracast_core::Project, scene: Id) {
-        self.control.lock().unwrap().preview_channels = Arc::new(project.audio_for_scene(scene));
+        let mut c = self.control.lock().unwrap();
+        c.preview_channels = Arc::new(project.audio_for_scene(scene));
+        c.preview_scene = Some(scene);
     }
 
     pub fn follow_capture(&self, reader: rosorah_capture::FrameReader) {
@@ -896,6 +900,53 @@ fn capture_worker(
     live.lock().unwrap().clear();
 }
 
+/// How long the Music strip takes to reach its level in a newly chosen scene.
+const MUSIC_GLIDE: Duration = Duration::from_millis(1500);
+/// The Music strip's level in one mix, gliding when the scene changes instead of jumping.
+/// Moving its slider within a scene still takes effect at once; other strips never glide.
+#[derive(Default)]
+struct MusicGlide {
+    scene: Option<Id>,
+    /// Per strip: the gain used last, and the glide under way (from, to, started).
+    strips: BTreeMap<Id, (f32, Option<(f32, f32, Instant)>)>,
+}
+impl MusicGlide {
+    /// `channels` with music strips part of the way to their level, or `None` when nothing glides.
+    fn apply(&mut self, scene: Option<Id>, channels: &[AudioChannel], music: impl Fn(&AudioChannel) -> bool, now: Instant) -> Option<Vec<AudioChannel>> {
+        let switched = self.scene.is_some() && scene != self.scene;
+        self.scene = scene;
+        let mut changed: Option<Vec<AudioChannel>> = None;
+        for (i, ch) in channels.iter().enumerate() {
+            if !music(ch) {
+                continue;
+            }
+            let target = ch.gain();
+            let (used, glide) = self.strips.entry(ch.id).or_insert((target, None));
+            if switched && (*used - target).abs() > 1e-4 {
+                *glide = Some((*used, target, now));
+            }
+            let gain = match *glide {
+                Some((from, to, start)) if (to - target).abs() < 1e-6 && now - start < MUSIC_GLIDE => {
+                    let t = (now - start).as_secs_f32() / MUSIC_GLIDE.as_secs_f32();
+                    from + (to - from) * t * t * (3. - 2. * t)
+                }
+                _ => {
+                    *glide = None;
+                    target
+                }
+            };
+            *used = gain;
+            if (gain - target).abs() > 1e-6 {
+                let list = changed.get_or_insert_with(|| channels.to_vec());
+                list[i].muted = false;
+                list[i].gain_db = if gain > 0. { 20. * gain.log10() } else { -100. };
+            }
+        }
+        self.strips.retain(|id, _| channels.iter().any(|c| c.id == *id));
+        changed
+    }
+}
+
 fn read_inputs(c: &Control, live: &[LiveInput]) -> BTreeMap<Id, Vec<f32>> {
     let mut pcms: BTreeMap<Id, Vec<f32>> = BTreeMap::new();
     for input in live.iter().filter(|s| s.binding.current(c)) {
@@ -922,6 +973,7 @@ fn worker(control: Arc<Mutex<Control>>, view: Arc<Mutex<View>>, stop: Arc<Atomic
     let mut chains: BTreeMap<Id, crate::audio_fx::Chain> = BTreeMap::new();
     let mut monitor: Option<Monitor> = None;
     let mut monitor_retry = Instant::now();
+    let mut glides: BTreeMap<usize, MusicGlide> = BTreeMap::new();
     while !stop.load(Ordering::Relaxed) {
         let block_start = next;
         let (c, record) = {
@@ -1043,8 +1095,15 @@ fn worker(control: Arc<Mutex<Control>>, view: Arc<Mutex<View>>, stop: Arc<Atomic
         }
         // Each output gets the tracks it carries: six for a multitrack recording, Track 1 and the
         // VOD track for a Twitch stream with VOD audio, otherwise Track 1 alone.
+        let is_music = |ch: &AudioChannel| {
+            c.targets.get(&ch.id).is_some_and(|t| t == crate::app_audio::MUSIC) || ch.name.to_lowercase().contains("music")
+        };
+        let now = Instant::now();
+        glides.retain(|key, _| *key == usize::MAX || c.outlet.iter().chain(c.streaming_outlets.iter()).chain(c.shared_outlet.iter()).any(|o| o.key() == *key));
         for outlet in c.outlet.iter().chain(c.streaming_outlets.iter()).chain(c.shared_outlet.iter()) {
             let channels = outlet.channels();
+            let glided = glides.entry(outlet.key()).or_default().apply(outlet.scene(), &channels, is_music, now);
+            let channels: &[AudioChannel] = glided.as_deref().unwrap_or(&channels);
             if let [0] = outlet.track_map() {
                 if let Ok(pcm) = mix_audio(&channels, &refs, 0, SAMPLES) {
                     outlet.push(block_start, pcm);
@@ -1085,9 +1144,11 @@ fn worker(control: Arc<Mutex<Control>>, view: Arc<Mutex<View>>, stop: Arc<Atomic
                 v.monitor_status = "Monitoring off".into();
             }
         }
+        let preview = glides.entry(usize::MAX).or_default().apply(c.preview_scene, &c.preview_channels, is_music, now);
         if let Some(m) = &monitor {
-            let mut channels: Vec<_> = c
-                .preview_channels
+            let mut channels: Vec<_> = preview
+                .as_deref()
+                .unwrap_or(&c.preview_channels)
                 .iter()
                 .filter(|ch| ch.monitor)
                 .cloned()
@@ -1441,3 +1502,40 @@ mod immutable_control_tests {
 
 #[cfg(windows)]
 include!("platform_windows/audio.rs");
+
+#[cfg(test)]
+mod music_glide_tests {
+    use super::*;
+    fn strip(id: Id, name: &str, gain_db: f32) -> AudioChannel {
+        AudioChannel { id, name: name.into(), gain_db, muted: false, tracks: auroracast_core::new_tracks(true), delay_ms: 0, monitor: false, monitor_only: false, noise_suppression: Default::default(), media_source: None }
+    }
+    fn gain_of(list: &Option<Vec<AudioChannel>>, plain: &[AudioChannel], id: Id) -> f32 {
+        list.as_deref().unwrap_or(plain).iter().find(|c| c.id == id).unwrap().gain()
+    }
+    #[test]
+    fn music_glides_between_scenes_and_follows_its_slider_at_once() {
+        let music = |c: &AudioChannel| c.name.contains("Music");
+        let mut glide = MusicGlide::default();
+        let t0 = Instant::now();
+        let scene1 = [strip(1, "Music", -20.), strip(2, "Mic", 0.)];
+        assert!(glide.apply(Some(10), &scene1, music, t0).is_none());
+        // A new scene: Music starts where it was and eases up; the mic jumps.
+        let scene2 = [strip(1, "Music", 0.), strip(2, "Mic", -10.)];
+        let start = glide.apply(Some(20), &scene2, music, t0 + Duration::from_millis(10));
+        assert!((gain_of(&start, &scene2, 1) - 0.1).abs() < 0.01);
+        assert_eq!(gain_of(&start, &scene2, 2), scene2[1].gain());
+        let mid = glide.apply(Some(20), &scene2, music, t0 + Duration::from_millis(760));
+        let halfway = gain_of(&mid, &scene2, 1);
+        assert!(halfway > 0.4 && halfway < 0.7, "{halfway}");
+        assert!(glide.apply(Some(20), &scene2, music, t0 + Duration::from_millis(1600)).is_none(), "arrived");
+        // Moving the slider within the scene takes effect at once.
+        let dragged = [strip(1, "Music", -6.), strip(2, "Mic", -10.)];
+        assert!(glide.apply(Some(20), &dragged, music, t0 + Duration::from_millis(1700)).is_none());
+        // Into a scene where Music is muted, it fades out rather than cutting.
+        let mut quiet = dragged.clone();
+        quiet[0].muted = true;
+        let fading = glide.apply(Some(30), &quiet, music, t0 + Duration::from_millis(1710));
+        assert!(gain_of(&fading, &quiet, 1) > 0.4);
+        assert_eq!(gain_of(&glide.apply(Some(30), &quiet, music, t0 + Duration::from_millis(3300)), &quiet, 1), 0.);
+    }
+}

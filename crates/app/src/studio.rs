@@ -6655,7 +6655,7 @@ impl Studio {
                                 changed |= ui.selectable_value(&mut channel.noise_suppression, mode, mode.label()).changed();
                             }
                         });
-                        note(ui, "Reduces steady background noise like fans or hum.");
+                        note(ui, "Reduces steady background noise like fans or hum. For the clearest voice, try Voice isolation under Filters instead.");
                     }
                     if channel.id != ALERTS_STRIP {
                         ui.add_space(6.);
@@ -6663,6 +6663,8 @@ impl Studio {
                         let f = audio_filters.entry(channel.id).or_default();
                         let before = f.clone();
                         ui.horizontal_wrapped(|ui| {
+                            ui.checkbox(&mut f.voice_isolation, "Voice isolation").on_hover_text("AI noise removal: keeps your voice and removes background noise (keyboard, fans, room noise). Works best with Noise suppression off.");
+                            ui.checkbox(&mut f.low_cut, "Low cut").on_hover_text("Removes rumble, hum and desk bumps below the voice");
                             ui.checkbox(&mut f.gate, "Noise gate");
                             ui.checkbox(&mut f.compressor, "Compressor");
                             ui.checkbox(&mut f.limiter, "Limiter");
@@ -6670,6 +6672,13 @@ impl Studio {
                             ui.checkbox(&mut f.eq, "EQ");
                             ui.checkbox(&mut f.mono, "Mono");
                         });
+                        if f.voice_isolation {
+                            ui.add(egui::Slider::new(&mut f.isolation_strength, 0.0..=1.0).text("Isolation strength").custom_formatter(|v, _| format!("{:.0}%", v * 100.)))
+                                .on_hover_text("Lower it if your voice sounds processed; the rest is your untouched sound");
+                        }
+                        if f.low_cut {
+                            ui.add(egui::Slider::new(&mut f.low_cut_hz, 40.0..=200.0).text("Cut below").suffix(" Hz").logarithmic(true));
+                        }
                         if f.gate {
                             ui.add(egui::Slider::new(&mut f.gate_open, -80.0..=0.0).text("Gate opens above").suffix(" dB"));
                             ui.add(egui::Slider::new(&mut f.gate_release, 20.0..=1000.0).text("Closes over").suffix(" ms").logarithmic(true));
