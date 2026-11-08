@@ -156,7 +156,8 @@ class SourceTests(SessionTest):
 class PanelTests(SessionTest):
     def test_frames_clicks_and_typing(self):
         p=self.start('dock_browser.py',{'url':url('/panel.html'),'width':400,'height':300,'zoom':1.0,'storage':tempfile.mkdtemp()},magic=b'RSDK')
-        self.assertTrue(p.wait(lambda p:'panel ready' in p.titles and p.frame and p.pixel(100,150)[:3]==(255,255,255)),f'no panel frame; notes {p.notes}')
+        self.assertTrue(p.wait(lambda p:'panel ready' in p.titles and p.frame and p.pixel(100,150)[:3]==(255,255,255)),
+            f'no panel frame; exit {p.proc.poll()}; notes {p.notes}; titles {p.titles}; frames {p.frames}; size {p.frame and p.frame[:2]}; pixel {p.frame and p.pixel(100,150)}')
         self.assertEqual(p.frame[:2],(400,300))
         p.click(100,150)
         self.assertTrue(p.wait(lambda p:p.pixel(100,150)[2]>200 and p.pixel(100,150)[0]<60,10),f'click did not reach the page: {p.pixel(100,150)}')
