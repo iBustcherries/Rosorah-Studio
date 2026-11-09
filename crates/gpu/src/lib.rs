@@ -155,6 +155,13 @@ struct DelayRing {
     frames: VecDeque<(Instant, SharedSource)>,
     spare: Vec<SharedSource>,
 }
+impl DelayRing {
+    /// How many frames a delayed source keeps: 64, or fewer for big pictures, so a 4K source
+    /// shared at full size stays within 1 GB of graphics memory.
+    fn limit(width: u32, height: u32) -> usize {
+        ((1usize << 30) / (width as usize * height as usize * 4).max(1)).clamp(2, 64)
+    }
+}
 struct TransitionFrame {
     /// Held so the old scene's picture lives as long as the transition draws it.
     _texture: wgpu::Texture,
@@ -523,7 +530,7 @@ impl Compositor {
         if let Some(delay) = self.delays.get(&id).copied() {
             let ring = self.rings.entry(id).or_insert_with(|| DelayRing { frames: VecDeque::new(), spare: Vec::new() });
             // Frames older than needed are recycled; at most 64 are kept (about 2 s at 30 fps).
-            while ring.frames.len() > 1 && (ring.frames.len() >= 64 || ring.frames[1].0.elapsed() > delay) {
+            while ring.frames.len() > 1 && (ring.frames.len() >= DelayRing::limit(width, height) || ring.frames[1].0.elapsed() > delay) {
                 let (_, old) = ring.frames.pop_front().unwrap();
                 ring.spare.push(old);
             }
@@ -589,7 +596,7 @@ impl Compositor {
         let target = if self.delays.contains_key(&id) {
             let delay = self.delays[&id];
             let ring = self.rings.entry(id).or_insert_with(|| DelayRing { frames: VecDeque::new(), spare: Vec::new() });
-            while ring.frames.len() > 1 && (ring.frames.len() >= 64 || ring.frames[1].0.elapsed() > delay) {
+            while ring.frames.len() > 1 && (ring.frames.len() >= DelayRing::limit(width, height) || ring.frames[1].0.elapsed() > delay) {
                 let (_, old) = ring.frames.pop_front().unwrap();
                 ring.spare.push(old);
             }
@@ -1169,6 +1176,17 @@ pub fn test_pattern(width: u32, height: u32, frame: u32) -> Vec<u8> {
     rgba
 }
 
+#[cfg(test)]
+mod delay_ring_tests {
+    use super::*;
+    #[test]
+    fn big_delayed_pictures_keep_fewer_frames() {
+        assert_eq!(DelayRing::limit(1920, 1080), 64);
+        assert_eq!(DelayRing::limit(2560, 1440), 64);
+        assert_eq!(DelayRing::limit(3840, 2160), 32);
+        assert_eq!(DelayRing::limit(0, 0), 64);
+    }
+}
 #[cfg(test)]
 mod transition_tests {
     use super::*;

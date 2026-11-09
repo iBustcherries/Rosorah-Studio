@@ -109,8 +109,11 @@ pub fn windows() -> Result<Vec<Window>> {
 }
 fn graphics_process(pid: u32) -> bool {
     unsafe {
-        let Ok(h) = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid) else {
-            return false;
+        let h = match CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid) {
+            Ok(h) => h,
+            // Anti-cheat (Call of Duty's Ricochet, Easy Anti-Cheat, Vanguard) hides a game's
+            // modules; a full-screen window whose modules are locked away is a game.
+            Err(e) => return e.code() == ERROR_ACCESS_DENIED.to_hresult(),
         };
         let h = Handle(h);
         let mut entry = MODULEENTRY32W {
