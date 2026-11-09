@@ -132,7 +132,9 @@ impl Codecs {
                     ]);
                 }
                 #[cfg(windows)]
-                Acceleration::Amf => { cmd.args(["-pix_fmt","nv12","-usage","lowlatency","-quality","balanced","-rc","cbr"]); }
+                // AMF's low latency mode ignores -g and makes only the first frame a keyframe;
+                // Twitch and Kick never show a stream without one every 2 s (YouTube does).
+                Acceleration::Amf => { cmd.args(["-pix_fmt","nv12","-usage","lowlatency","-quality","balanced","-rc","cbr","-forced_idr","1","-force_key_frames","expr:gte(t,n_forced*2)"]); }
                 Acceleration::Software => {
                     cmd.args([
                         "-pix_fmt",
@@ -202,7 +204,8 @@ impl Codecs {
             }
             #[cfg(windows)]
             Acceleration::Amf => {
-                cmd.args(["-pix_fmt","nv12","-usage","lowlatency","-quality","balanced","-rc","cqp","-qp_i","23","-qp_p","23","-bf","0","-g"]).arg((fps*2).to_string());
+                // -g alone gives one keyframe per file in low latency mode (see the stream arguments).
+                cmd.args(["-pix_fmt","nv12","-usage","lowlatency","-quality","balanced","-rc","cqp","-qp_i","23","-qp_p","23","-bf","0","-forced_idr","1","-force_key_frames","expr:gte(t,n_forced*2)","-g"]).arg((fps*2).to_string());
             }
             Acceleration::Software => {
                 // x264 takes NV12 as it is; the other software encoders want planar 4:2:0.
