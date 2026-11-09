@@ -2,7 +2,7 @@
 use ab_glyph::{Font, FontArc, PxScale, ScaleFont, point};
 use auroracast_core::{
     Id, Platform,
-    widgets::{FontFace, GoalStyle, Kind, Period, ScoreLayout, Settings, Theme},
+    widgets::{FontFace, GoalStyle, Kind, Period, ScoreLayout, Settings, Theme, Visualizer},
 };
 use rosorah_capture::{Backend, Frame, Producer};
 use std::{
@@ -579,6 +579,10 @@ impl Backend for Renderer {
         let mut fade_from: Option<Frame> = None;
         let mut fade_start = Instant::now();
         let epoch = Instant::now();
+        // Long track names slide and the visualizer moves; both need smooth frames.
+        let mut music_moving = false;
+        let mut song = String::new();
+        let mut song_start = Instant::now();
         while !*cancel.borrow() {
             let (settings, lines, revision, media) = {
                 let mut s = self.0.lock().unwrap();
@@ -617,6 +621,15 @@ impl Backend for Renderer {
                 fade_start = Instant::now();
                 music_identity = identity.clone();
             }
+            if let Some(t) = &track
+                && format!("{}|{}|{}", t.title, t.artist, t.album) != song
+            {
+                song = format!("{}|{}|{}", t.title, t.artist, t.album);
+                song_start = Instant::now();
+            }
+            if track.is_none() {
+                music_moving = false;
+            }
             let fading = fade_from.is_some() && fade_start.elapsed() < Duration::from_millis(250);
             if !fading {
                 fade_from = None;
@@ -627,7 +640,9 @@ impl Backend for Renderer {
                 || (settings.kind == Kind::Sports && settings.sports.layout == ScoreLayout::Ticker);
             let chat = settings.kind == Kind::Chat;
             let animate = animate || (chat && chat_animated(&lines));
-            let tick = if animate {
+            let tick = if music_moving {
+                epoch.elapsed().as_millis() / 33
+            } else if animate {
                 epoch.elapsed().as_millis() / 50
             } else if chat {
                 crate::chat_render::canvas_revision() as u128
@@ -641,7 +656,14 @@ impl Backend for Renderer {
             let key = (revision, lines.clone(), tick, identity);
             if previous.as_ref() != Some(&key) {
                 let mut frame = if settings.kind == Kind::NowPlaying && settings.music.automatic {
-                    polished_music(&settings, track.as_ref())
+                    let bands = if settings.music.visualizer != Visualizer::Off && track.as_ref().is_some_and(|t| t.playing) {
+                        crate::visualizer::levels()
+                    } else {
+                        None
+                    };
+                    let (frame, moving) = polished_music_at(&settings, track.as_ref(), song_start.elapsed().as_secs_f32(), bands.as_ref());
+                    music_moving = moving;
+                    frame
                 } else {
                     render_frame(
                         &settings,
@@ -687,7 +709,7 @@ impl Backend for Renderer {
             }
             // Chat messages coming and going move smoothly.
             let moving = (chat || settings.kind == Kind::AlertBox) && lines.contains(ROW_ANIM[0]);
-            std::thread::sleep(Duration::from_millis(if moving { 30 } else if animate { 50 } else { 100 }));
+            std::thread::sleep(Duration::from_millis(if moving || music_moving { 30 } else if animate { 50 } else { 100 }));
         }
         Ok(())
     }
@@ -1533,6 +1555,18 @@ pub fn controls(ui: &mut eframe::egui::Ui, s: &mut Settings) {
         ui.checkbox(&mut s.music.large_artwork, "Large artwork layout");
         ui.checkbox(&mut s.music.progress, "Show playback progress");
         ui.checkbox(&mut s.music.animate, "Fade between tracks");
+        ui.horizontal(|ui| {
+            ui.label("Visualizer");
+            egui::ComboBox::from_id_salt("music-visualizer")
+                .selected_text(s.music.visualizer.label())
+                .show_ui(ui, |ui| {
+                    for &v in Visualizer::ALL {
+                        ui.selectable_value(&mut s.music.visualizer, v, v.label());
+                    }
+                });
+        })
+        .response
+        .on_hover_text("Moves with the music under the timeline. Follows your Music sound strip, or the stream's sound if you don't have one.");
         ui.separator();
         ui.strong("Artist & album text");
         music_font_row(ui, "Artist", &mut s.music.artist_font, &mut s.music.artist_size);
@@ -2028,5 +2062,48 @@ mod readme {
         let subject = auroracast_core::AlertSubject { kind: Some(auroracast_core::EventKind::Raid), platform: Some(Platform::Twitch), author: "NovaRaider".into() };
         place(polished_alert(&alert, &format!("{}NovaRaider is raiding with 42 viewers!", alert_head(&subject))), 300, 700);
         canvas.save(format!("{dir}/stream.png")).unwrap();
+    }
+}
+#[cfg(test)]
+mod music_motion_tests {
+    use super::*;
+    fn settings(visualizer: Visualizer) -> Settings {
+        let mut s = Settings { kind: Kind::NowPlaying, layout_width: 900, layout_height: 300, ..Default::default() };
+        s.music.visualizer = visualizer;
+        s
+    }
+    #[test]
+    fn long_titles_slide_and_short_ones_stay_put() {
+        let mut track = crate::music::sample();
+        let s = settings(Visualizer::Off);
+        let (still, moving) = polished_music_at(&s, Some(&track), 0., None);
+        assert!(!moving);
+        assert_eq!(still.rgba, polished_music_at(&s, Some(&track), 6., None).0.rgba);
+        track.title = "A very long song title that cannot possibly fit inside this widget at all".into();
+        let (start, moving) = polished_music_at(&s, Some(&track), 0., None);
+        assert!(moving);
+        assert_eq!(start.rgba, polished_music_at(&s, Some(&track), 2., None).0.rgba, "waits at the start");
+        assert_ne!(start.rgba, polished_music_at(&s, Some(&track), 6., None).0.rgba, "then slides");
+    }
+    #[test]
+    fn every_visualizer_draws_and_follows_the_music() {
+        let track = crate::music::sample();
+        let loud = crate::visualizer::sample(1.);
+        for &v in Visualizer::ALL {
+            let s = settings(v);
+            let (rest, _) = polished_music_at(&s, Some(&track), 0., None);
+            let (live, moving) = polished_music_at(&s, Some(&track), 0., Some(&loud));
+            if v == Visualizer::Off {
+                assert!(!moving);
+                assert_eq!(rest.rgba, live.rgba);
+            } else {
+                assert!(moving, "{v:?}");
+                assert_ne!(rest.rgba, live.rgba, "{v:?} should move with the music");
+            }
+            if let Ok(dir) = std::env::var("ROSORAH_VISUALIZER_QA") {
+                std::fs::create_dir_all(&dir).unwrap();
+                image::save_buffer(std::path::Path::new(&dir).join(format!("{v:?}.png")), &live.rgba, live.width, live.height, image::ColorType::Rgba8).unwrap();
+            }
+        }
     }
 }

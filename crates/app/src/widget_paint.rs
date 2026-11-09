@@ -186,7 +186,7 @@ fn dilate(mask: &[f32], w: usize, h: usize, radius: u32) -> Vec<f32> {
 pub fn preview(s: &Settings, sample: bool) -> anyhow::Result<Frame> {
     if s.kind == Kind::NowPlaying {
         if sample {
-            return Ok(polished_music(s, Some(&crate::music::sample())));
+            return Ok(polished_music_at(s, Some(&crate::music::sample()), 0., Some(&crate::visualizer::sample(0.))).0);
         }
         if s.music.automatic {
             return Ok(polished_music(s, crate::music::current(&s.music).as_ref()));

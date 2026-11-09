@@ -82,6 +82,7 @@ mod updates;
 mod studio;
 mod video;
 mod virtual_camera;
+mod visualizer;
 mod widgets;
 mod window_memory;
 mod workspace;
@@ -124,6 +125,37 @@ fn gstreamer_root() -> Option<PathBuf> {
     candidates.extend(machine(r"SOFTWARE\GStreamer1.0\x86_64", "InstallDir").map(|d| d.join(r"1.0\msvc_x86_64")));
     candidates.push(PathBuf::from(r"C:\gstreamer\1.0\msvc_x86_64"));
     candidates.into_iter().find(|g| g.join(r"bin\gstreamer-1.0-0.dll").is_file())
+}
+
+/// Gives the window its large icon for the taskbar and Alt+Tab. eframe only sets it on whichever
+/// window is active at startup, which misses Rosorah's when the launcher starts it in the background.
+#[cfg(windows)]
+fn taskbar_icon(cc: &eframe::CreationContext<'_>) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn LoadImageW(instance: *mut std::ffi::c_void, name: *const u16, kind: u32, cx: i32, cy: i32, flags: u32) -> *mut std::ffi::c_void;
+        fn SendMessageW(hwnd: isize, msg: u32, wparam: usize, lparam: isize) -> isize;
+        fn GetSystemMetrics(index: i32) -> i32;
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleW(name: *const u16) -> *mut std::ffi::c_void;
+    }
+    let Ok(RawWindowHandle::Win32(window)) = cc.window_handle().map(|h| h.as_raw()) else { return };
+    // The icon built into the exe (resource 1, from packaging/windows/rosorah.rc), at each size Windows asks for.
+    const WM_SETICON: u32 = 0x0080;
+    const IMAGE_ICON: u32 = 1;
+    for (kind, metric) in [(1usize, 11), (0, 49)] {
+        // Safety: plain Win32 calls on our own window; a missing icon resource just returns null.
+        unsafe {
+            let size = GetSystemMetrics(metric);
+            let icon = LoadImageW(GetModuleHandleW(std::ptr::null()), 1 as *const u16, IMAGE_ICON, size, size, 0);
+            if !icon.is_null() {
+                SendMessageW(window.hwnd.get(), WM_SETICON, kind, icon as isize);
+            }
+        }
+    }
 }
 
 /// Puts GStreamer and the bundled FFmpeg on the search path, so starting rosorah-studio.exe directly
@@ -312,6 +344,8 @@ fn main() -> Result<()> {
         options,
         Box::new(move |cc| {
             browser_chat::remember_window(cc);
+            #[cfg(windows)]
+            taskbar_icon(cc);
             let mut studio = studio::Studio::new(cc, project, project_path, screenshot, page);
             if let Some(notice) = notice {
                 studio.notice(notice);

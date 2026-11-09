@@ -1020,6 +1020,27 @@ fn worker(control: Arc<Mutex<Control>>, view: Arc<Mutex<View>>, stop: Arc<Atomic
             .map(|(id, p)| (*id, p[0].max(p[1])))
             .collect();
         let refs: Vec<_> = pcms.iter().map(|(id, p)| (*id, p.as_slice())).collect();
+        // The Now playing visualizer follows the music strips, or the stream's sound without one.
+        if crate::visualizer::wanted() {
+            let music: Vec<&[f32]> = refs
+                .iter()
+                .filter(|(id, _)| c.targets.get(id).is_some_and(|t| t == crate::app_audio::MUSIC))
+                .map(|(_, p)| *p)
+                .collect();
+            if music.is_empty() {
+                if let Ok(pcm) = mix_audio(&c.channels, &refs, 0, SAMPLES) {
+                    crate::visualizer::push(&pcm);
+                }
+            } else {
+                let mut pcm = vec![0.; SAMPLES];
+                for strip in music {
+                    for (out, s) in pcm.iter_mut().zip(strip) {
+                        *out += s;
+                    }
+                }
+                crate::visualizer::push(&pcm);
+            }
+        }
         // Each output gets the tracks it carries: six for a multitrack recording, Track 1 and the
         // VOD track for a Twitch stream with VOD audio, otherwise Track 1 alone.
         for outlet in c.outlet.iter().chain(c.streaming_outlets.iter()).chain(c.shared_outlet.iter()) {

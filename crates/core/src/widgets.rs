@@ -217,6 +217,7 @@ choices!(GoalStyle, Bar, Bar=>"Horizontal bar", Vertical=>"Vertical bar", Ring=>
 choices!(Period, Manual, Manual=>"Manual reset", Stream=>"Per stream", Week=>"Weekly", Month=>"Monthly", Deadline=>"Until date");
 choices!(League, Nba, Nfl=>"NFL", Nba=>"NBA");
 choices!(ScoreLayout, Cards, Cards=>"Rotating cards", Board=>"Scoreboard", Ticker=>"Scrolling ticker");
+choices!(Visualizer, Timeline, Off=>"Off", Timeline=>"Timeline (fills with the song)", Bars=>"Bars", Mirrored=>"Mirrored bars", Wave=>"Wave", Blocks=>"LED blocks");
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Sports {
@@ -439,6 +440,8 @@ pub struct Music {
     pub album_size: u32,
     /// Automatic detection only shows tracks from music apps and sites.
     pub music_apps_only: bool,
+    /// Moves with the music under the timeline.
+    pub visualizer: Visualizer,
 }
 impl Default for Music {
     fn default() -> Self {
@@ -456,6 +459,7 @@ impl Default for Music {
             album_font: String::new(),
             album_size: 0,
             music_apps_only: true,
+            visualizer: Visualizer::Timeline,
         }
     }
 }

@@ -2479,8 +2479,15 @@ fn polished_alert(s: &Settings, text: &str) -> Frame {
 // ---------- Now playing ----------
 
 fn polished_music(s: &Settings, track: Option<&crate::music::Track>) -> Frame {
+    let bands = if s.music.visualizer != Visualizer::Off && track.is_some_and(|t| t.playing) { crate::visualizer::levels() } else { None };
+    polished_music_at(s, track, 0., bands.as_ref()).0
+}
+
+/// The widget `clock` seconds after the track started (long lines slide along), with the
+/// visualizer showing `bands` (resting when `None`). Also says whether anything on it moves.
+fn polished_music_at(s: &Settings, track: Option<&crate::music::Track>, clock: f32, bands: Option<&[f32; crate::visualizer::BANDS]>) -> (Frame, bool) {
     let mut p = design_canvas(s);
-    let Some(t) = track else { return p.finish() };
+    let Some(t) = track else { return (p.finish(), false) };
     let mut l = Look::new(s);
     if s.music.artwork_colors && t.accent[3] > 0 {
         l = l.with_accent(t.accent);
@@ -2496,8 +2503,19 @@ fn polished_music(s: &Settings, track: Option<&crate::music::Track>) -> Frame {
     p.shadow_rr(ax, ay + art * 0.04, art, art, ar, art * 0.1, [0, 0, 0, 150]);
     match &t.artwork {
         Some(f) if f.width > 0 && f.height > 0 => {
-            let img = image::RgbaImage::from_raw(f.width, f.height, f.rgba.clone()).unwrap_or_default();
-            let scaled = image::imageops::resize(&img, art.round().max(1.) as u32, art.round().max(1.) as u32, image::imageops::FilterType::Triangle);
+            let size = art.round().max(1.) as u32;
+            // The cover only needs scaling once per track and size, not on every animated frame.
+            thread_local! {
+                static SCALED: std::cell::RefCell<Option<(usize, u32, image::RgbaImage)>> = const { std::cell::RefCell::new(None) };
+            }
+            let key = Arc::as_ptr(f) as usize;
+            let scaled = SCALED.with_borrow_mut(|cached| {
+                if !cached.as_ref().is_some_and(|(k, s, _)| *k == key && *s == size) {
+                    let img = image::RgbaImage::from_raw(f.width, f.height, f.rgba.clone()).unwrap_or_default();
+                    *cached = Some((key, size, image::imageops::resize(&img, size, size, image::imageops::FilterType::Triangle)));
+                }
+                cached.as_ref().unwrap().2.clone()
+            });
             for (px, py, c) in scaled.enumerate_pixels() {
                 let d = rr_distance(px as f32 + 0.5, py as f32 + 0.5, 0., 0., art, art, ar);
                 p.blend(ax.round() as i32 + px as i32, ay.round() as i32 + py as i32, c.0, (0.5 - d).clamp(0., 1.));
@@ -2524,7 +2542,17 @@ fn polished_music(s: &Settings, track: Option<&crate::music::Track>) -> Frame {
     let artist_size = if s.music.artist_size > 0 { s.music.artist_size as f32 } else { (title_size * 0.62).max(12.) };
     let label = (title_size * 0.38).clamp(12., 18.);
     let compact = space < title_size * 3.4;
-    let mut y = top + if portrait { title_size } else { (space - title_size * 2.6 - if s.music.progress && t.length > 0. { title_size } else { 0. }) / 2. };
+    let progress = s.music.progress && t.length > 0.;
+    let text_h = title_size * 2.6 + if progress { title_size } else { 0. };
+    // The visualizer goes under the timeline when there's room for it, or becomes the timeline.
+    let bh = (title_size * 0.17).clamp(5., 12.);
+    let timeline = s.music.visualizer == Visualizer::Timeline && progress;
+    let viz_h = if timeline { (title_size * 0.8).clamp(14., 64.) } else { (title_size * 0.95).clamp(16., 80.) };
+    let viz_room = if timeline { viz_h - bh } else { viz_h + label * 0.9 };
+    let viz = s.music.visualizer != Visualizer::Off && !compact && space >= text_h + viz_room;
+    let reserve = if viz { viz_room } else { 0. };
+    let resting = [0.; crate::visualizer::BANDS];
+    let mut y = top + if portrait { title_size } else { (space - text_h - reserve) / 2. };
     if !compact {
         // Equaliser bars beside the status.
         let bars = [0.55, 1., 0.7, 0.85];
@@ -2537,36 +2565,204 @@ fn polished_music(s: &Settings, track: Option<&crate::music::Track>) -> Frame {
     } else {
         y += title_size * 0.5;
     }
-    l.text(&mut p, Role::Title, &t.title, x, y, title_size, l.fg, width);
+    // Lines too long to fit slide along instead of being cut short.
+    let mut moving = false;
+    let length = l.width(Role::Title, &t.title, title_size);
+    moving |= sliding_line(&mut p, x, y, width, length, title_size, clock, |p, x, room| {
+        l.text(p, Role::Title, &t.title, x, y, title_size, l.fg, room);
+    });
     y += artist_size * 1.4;
     // A chosen artist or album font is used as is; one that can't be read falls back to the theme's.
     match crate::fonts::load(&s.music.artist_font) {
-        Some(f) => p.line_font(&t.artist, x, y, width, artist_size, l.sec, &f, false),
+        Some(f) => {
+            let length = measure(&f, artist_size, &t.artist, 0.);
+            moving |= sliding_line(&mut p, x, y, width, length, artist_size, clock, |p, x, room| p.line_font(&t.artist, x, y, room, artist_size, l.sec, &f, false));
+        }
         None => {
-            l.text(&mut p, Role::Body, &t.artist, x, y, artist_size, l.sec, width);
+            let length = l.width(Role::Body, &t.artist, artist_size);
+            moving |= sliding_line(&mut p, x, y, width, length, artist_size, clock, |p, x, room| {
+                l.text(p, Role::Body, &t.artist, x, y, artist_size, l.sec, room);
+            });
         }
     }
     if s.music.show_album && !t.album.is_empty() {
         let album_size = if s.music.album_size > 0 { s.music.album_size as f32 } else { (artist_size * 0.82).max(11.) };
         y += album_size * 1.35;
         match crate::fonts::load(&s.music.album_font) {
-            Some(f) => p.line_font(&t.album, x, y, width, album_size, l.ter, &f, false),
+            Some(f) => {
+                let length = measure(&f, album_size, &t.album, 0.);
+                moving |= sliding_line(&mut p, x, y, width, length, album_size, clock, |p, x, room| p.line_font(&t.album, x, y, room, album_size, l.ter, &f, false));
+            }
             None => {
-                l.text(&mut p, Role::Caption, &t.album, x, y, album_size, l.ter, width);
+                let length = l.width(Role::Caption, &t.album, album_size);
+                moving |= sliding_line(&mut p, x, y, width, length, album_size, clock, |p, x, room| {
+                    l.text(p, Role::Caption, &t.album, x, y, album_size, l.ter, room);
+                });
             }
         }
     }
-    if s.music.progress && t.length > 0. && space > title_size * 3. {
-        let bh = (title_size * 0.17).clamp(5., 12.);
-        let by = (y + title_size * 0.9).min(if portrait { area.bottom() - label * 2.2 } else { area.bottom() - label * 2. - bh });
-        l.bar(&mut p, Area { x, y: by, w: width, h: bh }, t.progress());
+    let mut viz_top = y + label;
+    if progress && space > title_size * 3. {
+        let by = (y + title_size * 0.9).min(if portrait { area.bottom() - label * 2.2 } else { area.bottom() - label * 2. - bh } - reserve);
+        let bh = if timeline && viz {
+            // Grey bars that move with the music, filling with the track's colour as it plays.
+            music_visualizer(&mut p, &l, Visualizer::Timeline, Area { x, y: by, w: width, h: viz_h }, bands.unwrap_or(&resting), t.progress());
+            moving |= bands.is_some();
+            viz_h
+        } else {
+            l.bar(&mut p, Area { x, y: by, w: width, h: bh }, t.progress());
+            bh
+        };
         let secs = (t.progress() as f64 * t.length) as u64;
         let total = t.length as u64;
         let ty = by + bh + label * 1.5;
         l.text(&mut p, Role::Caption, &format!("{}:{:02}", secs / 60, secs % 60), x, ty, label, l.ter, width / 2.);
         l.text_in(&mut p, Role::Caption, &format!("{}:{:02}", total / 60, total % 60), Area { x, y: ty, w: width, h: label }, ty, label, l.ter, 1.);
+        viz_top = ty + label * 0.9;
     }
-    p.finish()
+    if viz && !timeline {
+        let h = viz_h.min(area.bottom() - viz_top);
+        if h >= 10. {
+            // Without a track length there is no timeline to fill, so Timeline shows plain bars.
+            let style = if s.music.visualizer == Visualizer::Timeline { Visualizer::Bars } else { s.music.visualizer };
+            music_visualizer(&mut p, &l, style, Area { x, y: viz_top, w: width, h }, bands.unwrap_or(&resting), 0.);
+            moving |= bands.is_some();
+        }
+    }
+    (p.finish(), moving)
+}
+
+/// One line of text that slides left, pausing at the start of each pass, when it is wider than
+/// `w`. `draw` paints the line from a left edge with the room it may use. Returns whether it moves.
+#[allow(clippy::too_many_arguments)]
+fn sliding_line(p: &mut Paint, x: f32, baseline: f32, w: f32, length: f32, size: f32, clock: f32, draw: impl Fn(&mut Paint, f32, f32)) -> bool {
+    if length <= w + 0.5 {
+        draw(p, x, w);
+        return false;
+    }
+    let speed = (size * 0.9).max(24.);
+    let gap = (size * 2.5).max(48.);
+    let cycle = length + gap;
+    let pause = 2.5;
+    let offset = ((clock % (pause + cycle / speed) - pause).max(0.) * speed).min(cycle);
+    let mut clip = Paint { pixels: vec![0; p.pixels.len()], width: p.width, height: p.height };
+    for start in [x - offset, x - offset + cycle] {
+        if start < x + w {
+            draw(&mut clip, start, length + size);
+        }
+    }
+    // Soft edges, except on the left while the line rests at its start.
+    let feather = (size * 0.8).clamp(8., 32.);
+    let left = feather * (offset / feather).min(1.);
+    let rows = (baseline - size * 1.6).max(0.) as i32..(baseline + size * 0.8).min(p.height as f32) as i32;
+    for py in rows {
+        for px in x.max(0.) as i32..(x + w).min(p.width as f32) as i32 {
+            let o = ((py as u32 * p.width + px as u32) * 4) as usize;
+            let c = [clip.pixels[o], clip.pixels[o + 1], clip.pixels[o + 2], clip.pixels[o + 3]];
+            if c[3] > 0 {
+                let fx = px as f32 + 0.5;
+                let edge = if left > 0. { ((fx - x) / left).clamp(0., 1.) } else { 1. };
+                p.blend(px, py, c, edge.min(((x + w - fx) / feather).clamp(0., 1.)));
+            }
+        }
+    }
+    true
+}
+
+/// The music visualizer: band levels from low notes on the left to high ones on the right.
+/// `played` (0 to 1) is how far the Timeline style is filled in.
+fn music_visualizer(p: &mut Paint, l: &Look, style: Visualizer, a: Area, bands: &[f32; crate::visualizer::BANDS], played: f32) {
+    let n_bands = bands.len();
+    // A band level anywhere along the width (0 to 1), eased between bands.
+    let level = |at: f32| {
+        let f = at.clamp(0., 1.) * (n_bands - 1) as f32;
+        let i = f.floor() as usize;
+        let t = f - i as f32;
+        let t = t * t * (3. - 2. * t);
+        bands[i] * (1. - t) + bands[(i + 1).min(n_bands - 1)] * t
+    };
+    let bright = lighten(l.accent, 0.3);
+    let dim = fade(l.accent, 0.5);
+    match style {
+        Visualizer::Off => {}
+        Visualizer::Timeline => {
+            let gap = (a.w / 200.).clamp(2., 3.);
+            let n = ((a.w + gap) / ((a.h * 0.16).clamp(3., 7.) + gap)).floor().clamp(16., 128.) as usize;
+            let bw = (a.w + gap) / n as f32 - gap;
+            let grey = fade(l.fg, 0.28);
+            let filled = a.x + a.w * played.clamp(0., 1.);
+            for i in 0..n {
+                let bx = a.x + i as f32 * (bw + gap);
+                // Even at rest the bars keep some height, so the timeline always reads.
+                let bh = (a.h * (0.12 + 0.88 * level((i as f32 + 0.5) / n as f32))).max(3.);
+                let r = if l.square() { 0. } else { (bw / 2.).min(bh / 2.) };
+                let c = if bx + bw / 2. <= filled { l.accent } else { grey };
+                p.fill_rr(bx, a.y + (a.h - bh) / 2., bw, bh, r, c, c);
+            }
+        }
+        Visualizer::Bars | Visualizer::Mirrored => {
+            let gap = (a.w / 160.).clamp(2., 4.);
+            let n = ((a.w + gap) / ((a.h * 0.14).clamp(4., 10.) + gap)).floor().clamp(12., 96.) as usize;
+            let bw = (a.w + gap) / n as f32 - gap;
+            for i in 0..n {
+                let v = level((i as f32 + 0.5) / n as f32);
+                let bx = a.x + i as f32 * (bw + gap);
+                let bh = (v * a.h).max(bw.min(3.));
+                let r = if l.square() { 0. } else { (bw / 2.).min(bh / 2.) };
+                if style == Visualizer::Bars {
+                    p.fill_rr(bx, a.bottom() - bh, bw, bh, r, bright, dim);
+                } else {
+                    // Brightest at the centre line, fading towards the tips.
+                    let by = a.y + (a.h - bh) / 2.;
+                    let (ox, oy) = (bx.floor(), by.floor());
+                    let cw = (bx + bw - ox).ceil() as u32 + 1;
+                    let mut bar = Paint { pixels: vec![0; (cw * ((by + bh - oy).ceil() as u32 + 1) * 4) as usize], width: cw, height: (by + bh - oy).ceil() as u32 + 1 };
+                    bar.fill_rr(bx - ox, by - oy, bw, bh, r, [255; 4], [255; 4]);
+                    for (i, px) in bar.pixels.chunks_exact(4).enumerate() {
+                        if px[3] > 0 {
+                            let (lx, ly) = (i as u32 % cw, i as u32 / cw);
+                            let along = ((oy + ly as f32 + 0.5 - (by + bh / 2.)).abs() / (bh / 2.)).clamp(0., 1.);
+                            p.blend(ox as i32 + lx as i32, oy as i32 + ly as i32, mix(bright, dim, along), px[3] as f32 / 255.);
+                        }
+                    }
+                }
+            }
+        }
+        Visualizer::Wave => {
+            // A smooth shape mirrored about the centre line, brighter towards its edge.
+            let mid = a.y + a.h / 2.;
+            for px in a.x as i32..a.right().ceil() as i32 {
+                let fx = px as f32 + 0.5;
+                let half = (level((fx - a.x) / a.w) * a.h / 2.).max(1.);
+                for py in (mid - half - 1.) as i32..=(mid + half + 1.) as i32 {
+                    let d = (py as f32 + 0.5 - mid).abs();
+                    let cover = (half - d + 0.5).clamp(0., 1.);
+                    if cover > 0. {
+                        let rim = (1. - (half - d) / 2.5).clamp(0., 1.);
+                        p.blend(px, py, mix(mix(dim, l.accent, d / half), bright, rim), cover);
+                    }
+                }
+            }
+        }
+        Visualizer::Blocks => {
+            let gap = (a.h / 24.).clamp(1.5, 3.);
+            let bw = (a.h * 0.2).clamp(6., 16.);
+            let n = ((a.w + gap) / (bw + gap)).floor().max(8.) as usize;
+            let bw = (a.w + gap) / n as f32 - gap;
+            let rows = ((a.h + gap) / (bw * 0.45 + gap)).floor().clamp(4., 16.) as usize;
+            let cell = (a.h + gap) / rows as f32 - gap;
+            let r = if l.square() { 0. } else { (cell * 0.25).min(3.) };
+            for i in 0..n {
+                let lit = (level((i as f32 + 0.5) / n as f32) * rows as f32).round() as usize;
+                let bx = a.x + i as f32 * (bw + gap);
+                for row in 0..rows {
+                    let by = a.bottom() - (row + 1) as f32 * (cell + gap) + gap;
+                    let c = if row < lit { mix(l.accent, bright, row as f32 / rows as f32) } else { fade(l.fg, 0.07) };
+                    p.fill_rr(bx, by, bw, cell, r, c, c);
+                }
+            }
+        }
+    }
 }
 
 // ---------- Goals ----------
