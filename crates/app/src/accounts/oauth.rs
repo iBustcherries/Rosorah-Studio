@@ -177,6 +177,9 @@ fn loopback(
     while Instant::now() < deadline && !cancel.load(Ordering::Relaxed) {
         match listener.accept() {
             Ok((mut stream, _)) => {
+                // Windows hands out connections non-blocking like their listener, and a browser
+                // may connect before it sends the request: wait for it instead of failing.
+                stream.set_nonblocking(false)?;
                 stream.set_read_timeout(Some(Duration::from_secs(2)))?;
                 stream.set_write_timeout(Some(Duration::from_secs(2)))?;
                 let mut bytes = [0u8; 8192];
@@ -187,6 +190,10 @@ fn loopback(
                         Ok(n) => count += n,
                         Err(_) => break,
                     }
+                }
+                if count == 0 {
+                    // An idle connection the browser opened ahead of time; the request comes on another.
+                    continue;
                 }
                 let request = String::from_utf8_lossy(&bytes[..count]);
                 let target = request
