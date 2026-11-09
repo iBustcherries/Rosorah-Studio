@@ -157,6 +157,14 @@ pub(crate) fn python() -> PathBuf {
 /// Python used to create the chat runtime. On Windows the installer puts Python 3.13 in the
 /// user's Programs folder; using it directly avoids the Microsoft Store "python" placeholder
 /// and PATH changes that only apply after signing out.
+/// The Python that runs Rosorah's own helper scripts (imports, project bundles): on Windows the
+/// one shipped in `browser-runtime`, since most Windows computers have none installed.
+pub(crate) fn helper_python() -> PathBuf {
+    match bundled_runtime() {
+        Some(dir) if cfg!(windows) => dir.join("python.exe"),
+        _ => system_python(),
+    }
+}
 pub(crate) fn system_python() -> PathBuf {
     #[cfg(windows)]
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
@@ -866,6 +874,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn automatically_launches_hidden_collects_and_recovers_without_open_button() {
         let folder = std::env::temp_dir().join(format!(
             "rosorah-chat-auto-{}-{}",

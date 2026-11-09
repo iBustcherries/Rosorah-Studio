@@ -30,8 +30,7 @@ fn resolve_fonts(preview:&mut Preview){
 }
 pub fn read(path:PathBuf,media_folder:String)->Result<crate::utilities::Finished>{
  let data=serde_json::json!({"path":path,"media_folder":media_folder,"project":Project::default()});
- let mut child=std::process::Command::new(crate::browser_chat::system_python()).arg("-c").arg(include_str!("../../../packaging/import_external.py")).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().context("Python 3 is required for backup imports")?;
- child.stdin.take().unwrap().write_all(&serde_json::to_vec(&data)?)?;let out=child.wait_with_output()?;
+ let out=crate::utilities::python_helper("import",include_str!("../../../packaging/import_external.py"),&serde_json::to_vec(&data)?).context("Python 3 is required for backup imports")?;
  let value:serde_json::Value=serde_json::from_slice(&out.stdout).context("Could not read the backup")?;
  ensure!(out.status.success(),"{}",value["error"].as_str().unwrap_or("Import failed"));
  let mut preview:Preview=serde_json::from_value(value)?;resolve_fonts(&mut preview);preview.project.validate()?;
@@ -74,7 +73,11 @@ mod tests {
         std::fs::write(dir.join("profiles/Main/events/events.json"), r#"{"mainEvents":[{"name":"Follow","eventId":"follow","sourceId":"twitch","effects":{"list":[
             {"type":"firebot:chat","message":"Thanks $username!"},{"type":"firebot:update-counter","counterId":"c1","mode":"increment","value":"1"},
             {"type":"ebiggz:obs-change-scene","sceneName":"Inner"}]}}]}"#).unwrap();
-        let Ok(crate::utilities::Finished::External(p)) = super::read(dir.clone(), String::new()) else { panic!("import failed") };
+        let p = match super::read(dir.clone(), String::new()) {
+            Ok(crate::utilities::Finished::External(p)) => p,
+            Ok(_) => panic!("import gave no project"),
+            Err(e) => panic!("import failed: {e:#}"),
+        };
         let main = &p.project.scenes[0];
         assert_eq!(main.name, "Main");
         let source = |name: &str| p.project.sources.iter().find(|s| s.name == name).unwrap();

@@ -11,9 +11,24 @@ pub fn picker(save:bool,folder:bool,title:&str)->Result<PathBuf>{
  crate::desktop::pick(if folder{crate::desktop::Pick::Folder}else if save{crate::desktop::Pick::Save}else{crate::desktop::Pick::Open},title,"Rosorah-project.zip")?.context("Selection cancelled")
 }
 
+/// Runs one of the Python helpers built into Rosorah with `input` on its stdin. The script goes in
+/// a file, since Windows turns down command lines over 32,767 characters and the import helper is
+/// longer; on Windows the Python shipped with Rosorah runs it, so none has to be installed.
+pub fn python_helper(name:&str,script:&str,input:&[u8])->Result<std::process::Output>{
+ use std::io::Write;
+ static RUNS:std::sync::atomic::AtomicU32=std::sync::atomic::AtomicU32::new(0);
+ let file=std::env::temp_dir().join(format!("rosorah-{name}-{}-{}.py",std::process::id(),RUNS.fetch_add(1,std::sync::atomic::Ordering::Relaxed)));
+ std::fs::write(&file,script)?;
+ let run=||->std::io::Result<std::process::Output>{
+  let mut child=std::process::Command::new(crate::browser_chat::helper_python()).arg("-I").arg(&file).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn()?;
+  child.stdin.take().expect("stdin is piped").write_all(input)?;child.wait_with_output()
+ };
+ let out=run();let _=std::fs::remove_file(&file);Ok(out?)
+}
+
 pub fn bundle(project:Option<auroracast_core::Project>,path:PathBuf,parent:Option<PathBuf>)->Result<Finished>{
- use std::io::Write;let data=if let Some(project)=project{serde_json::json!({"mode":"export","project":project,"path":path})}else{serde_json::json!({"mode":"import","path":path,"parent":parent.context("Choose an import folder")?})};
- let mut child=std::process::Command::new(crate::browser_chat::system_python()).arg("-c").arg(include_str!("../../../packaging/project_bundle.py")).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().context("Python 3 is needed for project bundles")?;child.stdin.take().unwrap().write_all(&serde_json::to_vec(&data)?)?;let out=child.wait_with_output()?;let value:serde_json::Value=serde_json::from_slice(&out.stdout).context("Project bundle helper failed")?;ensure!(out.status.success(),"{}",value["error"].as_str().unwrap_or("Bundle operation failed"));let file=PathBuf::from(value["path"].as_str().context("Missing result path")?);
+ let data=if let Some(project)=project{serde_json::json!({"mode":"export","project":project,"path":path})}else{serde_json::json!({"mode":"import","path":path,"parent":parent.context("Choose an import folder")?})};
+ let out=python_helper("bundle",include_str!("../../../packaging/project_bundle.py"),&serde_json::to_vec(&data)?).context("Python 3 is needed for project bundles")?;let value:serde_json::Value=serde_json::from_slice(&out.stdout).context("Project bundle helper failed")?;ensure!(out.status.success(),"{}",value["error"].as_str().unwrap_or("Bundle operation failed"));let file=PathBuf::from(value["path"].as_str().context("Missing result path")?);
  if data["mode"]=="import"{Ok(Finished::Imported(auroracast_core::Project::load(&file)?,file))}else{Ok(Finished::Saved(file))}
 }
 pub fn marker(path:&Path)->PathBuf{path.with_extension("mkv.recording.json")}
