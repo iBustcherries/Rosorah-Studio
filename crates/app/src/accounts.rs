@@ -626,6 +626,25 @@ fn transient(error: &anyhow::Error) -> bool {
 fn revoked(error: &anyhow::Error) -> bool {
     ["HTTP 400", "HTTP 401"].iter().any(|s| error.to_string().contains(s))
 }
+/// Whether the platform turns this access token down. Network trouble counts as accepted, so
+/// the session's own retries handle it.
+fn rejected(platform: Platform, client: &Client, config: &ClientConfig, token: &Token) -> bool {
+    let check = match platform {
+        Platform::Twitch => services::validate_twitch(client, config, token).map(drop),
+        Platform::YouTube => json(
+            client
+                .get("https://oauth2.googleapis.com/tokeninfo")
+                .query(&[("access_token", &token.access)]),
+        )
+        .map(drop),
+        Platform::Kick => match kick::introspect(client, token) {
+            Ok(v) => return v["data"]["active"] != true,
+            Err(e) => Err(e),
+        },
+        _ => Ok(()),
+    };
+    check.is_err_and(|e| revoked(&e))
+}
 /// Saves a renewed sign-in even while Rosorah is closing: the platform has already
 /// replaced the old refresh token, so losing this save would lose the account.
 fn keep(platform: Platform, config: &ClientConfig, token: &Token) -> Result<()> {
@@ -682,8 +701,9 @@ fn run(
     let had_saved = saved.is_some();
     let mut token = match saved {
         // A saved sign-in with time left is used as is; renewing at every start replaces
-        // the refresh token each time for no benefit.
-        Some(old) if old.expiry > now() / 1000 + 300 => old,
+        // the refresh token each time for no benefit. One the platform turns down is renewed:
+        // a clock change or a token cut short leaves the saved expiry wrong.
+        Some(old) if old.expiry > now() / 1000 + 300 && !rejected(platform, &client, &config, &old) => old,
         Some(old) => match retry_network(cancel, tx, || {
             oauth::refresh(&client, &config, platform, &old)
         }) {
@@ -746,7 +766,11 @@ fn run(
             }
         }
         if platform == Platform::Twitch && validate.elapsed() > Duration::from_secs(3000) {
-            if services::validate_twitch(&client, &config, &token).is_err() {
+            if let Err(e) = services::validate_twitch(&client, &config, &token) {
+                if revoked(&e) {
+                    // Turned down before its saved expiry: renew it now instead.
+                    token.expiry = 0;
+                }
                 let _ = tx.try_send(Event::Status(
                     "Account validation failed; use Sign out / Sign in if it persists".into(),
                 ));

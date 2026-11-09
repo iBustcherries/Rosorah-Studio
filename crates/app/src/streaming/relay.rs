@@ -514,8 +514,11 @@ fn connection(
         "error",
         "-stats_period",
         "0.25",
+        // Room to read past the first keyframe: FFmpeg learns the multitrack (VOD) audio's sample
+        // rate only from its first frames, and a smaller window ends inside a big keyframe
+        // ("sample rate not set"). Probing still stops as soon as every track is known.
         "-probesize",
-        "32768",
+        "5000000",
         "-analyzeduration",
         "1",
         "-f",

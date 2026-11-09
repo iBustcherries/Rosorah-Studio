@@ -153,9 +153,13 @@ fn emotes(client: &Client, slug: &str) -> Result<Vec<crate::chat_render::Emote>>
     Ok(list)
 }
 
+pub(super) fn introspect(client: &Client, token: &Token) -> Result<Value> {
+    json(client.post("https://id.kick.com/oauth/token/introspect").bearer_auth(&token.access))
+}
+
 pub(super) fn session(client: &Client, config: &ClientConfig, mut token: Token,
     tx: &mpsc::SyncSender<Event>, commands: mpsc::Receiver<Command>, cancel: &AtomicBool) -> Result<()> {
-    let identity = json(client.post("https://id.kick.com/oauth/token/introspect").bearer_auth(&token.access))?;
+    let identity = introspect(client, &token)?;
     ensure!(identity["data"]["active"] == true && identity["data"]["client_id"].as_str() == Some(config.id.as_str()),
         "Kick session is invalid or belongs to another application");
     let mut channel = retry_network(cancel, tx, || refresh_channel(client, &token, tx))?;
