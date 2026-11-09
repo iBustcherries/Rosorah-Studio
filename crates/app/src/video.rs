@@ -287,7 +287,12 @@ mod tests {
         assert_eq!(s.dimensions, Some([160, 90]));
         engine.stop(40);
         assert!(engine.reader().latest()[0].1.is_none());
-        std::fs::remove_file(path)?;
+        // The player closes the file as it winds down; Windows keeps it locked until then.
+        let end = std::time::Instant::now() + Duration::from_secs(3);
+        while let Err(e) = std::fs::remove_file(&path) {
+            anyhow::ensure!(std::time::Instant::now() < end, "The stopped video still holds its file: {e}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
         Ok(())
     }
 }

@@ -19,7 +19,8 @@ jobs:
       - name: Sign-in registrations
         env:
           ACCOUNTS: ${{ secrets.ROSORAH_ACCOUNTS_DEFAULTS }}
-        run: test -n "$ACCOUNTS" && printf '%s' "$ACCOUNTS" > packaging/accounts-defaults.json
+        # Without the secret the package still builds; its Connect buttons then ask for an app registration.
+        run: if [ -n "$ACCOUNTS" ]; then printf '%s' "$ACCOUNTS" > packaging/accounts-defaults.json; fi
       - run: packaging/deb/build-deb.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -70,7 +71,8 @@ jobs:
       - name: Sign-in registrations
         env:
           ACCOUNTS: ${{ secrets.ROSORAH_ACCOUNTS_DEFAULTS }}
-        run: test -n "$ACCOUNTS" && printf '%s' "$ACCOUNTS" > packaging/accounts-defaults.json
+        # Without the secret the package still builds; its Connect buttons then ask for an app registration.
+        run: if [ -n "$ACCOUNTS" ]; then printf '%s' "$ACCOUNTS" > packaging/accounts-defaults.json; fi
       - run: packaging/rpm/build-rpm.sh
       - name: The package installs on Fedora
         run: dnf install -y --setopt=install_weak_deps=False ./dist/*.rpm && test -f /opt/rosorah-studio/browser-runtime/rosorah-runtime.version

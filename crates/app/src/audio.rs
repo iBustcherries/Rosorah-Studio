@@ -1194,6 +1194,7 @@ fn worker(control: Arc<Mutex<Control>>, view: Arc<Mutex<View>>, stop: Arc<Atomic
 mod tests {
     use super::*;
     #[test]
+    #[cfg(not(windows))]
     fn selects_only_audio_and_excludes_self() {
         let g = serde_json::json!([{"type":"PipeWire:Interface:Node","id":5,"info":{"props":{"media.class":"Stream/Output/Audio","node.name":"game","object.serial":10,"application.process.id":123}}},{"type":"PipeWire:Interface:Node","id":6,"info":{"props":{"media.class":"Audio/Source","node.name":"rosorah-audio-test","object.serial":11}}}]);
         let d = devices(&g);

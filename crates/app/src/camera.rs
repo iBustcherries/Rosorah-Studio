@@ -623,6 +623,8 @@ mod tests {
             while !done.load(Ordering::Relaxed) && Instant::now() < deadline {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // Windows hands out connections non-blocking like their listener.
+                        stream.set_nonblocking(false)?;
                         stream.set_read_timeout(Some(Duration::from_secs(1)))?;
                         stream.set_write_timeout(Some(Duration::from_secs(1)))?;
                         let mut request = [0; 2048];

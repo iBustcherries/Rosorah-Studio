@@ -7,7 +7,7 @@ the version the app pins, trimmed by prune-browser-runtime.py.
   linux <dir>    PySide6 in <dir>/site-packages for the system Python (runs on Linux)
 
 Rosorah finds it as browser-runtime next to its executable (crates/app/src/browser_chat.rs)."""
-import hashlib, re, shutil, subprocess, sys, urllib.request, zipfile
+import hashlib, os, re, shutil, subprocess, sys, urllib.request, zipfile
 from pathlib import Path
 
 PYTHON = '3.13.16'
@@ -51,9 +51,12 @@ shutil.rmtree(site / 'bin', ignore_errors=True)
 
 if target == 'windows' and sys.platform == 'win32':
     python = out / 'python.exe'
-    sign = subprocess.run(['powershell', '-NoProfile', '-Command', f"(Get-AuthenticodeSignature '{python}').SignerCertificate.Subject"], capture_output=True, text=True)
-    if 'O=Python Software Foundation' not in sign.stdout:
-        sys.exit('Embeddable Python signature check failed')
+    # Windows PowerShell can't load its own modules with PowerShell 7's module path (CI runs pwsh).
+    env = {k: v for k, v in os.environ.items() if k.upper() != 'PSMODULEPATH'}
+    sign = subprocess.run(['powershell', '-NoProfile', '-Command', f"$s = Get-AuthenticodeSignature '{python}'; \"$($s.Status) $($s.SignerCertificate.Subject)\""],
+                          capture_output=True, text=True, env=env)
+    if not sign.stdout.startswith('Valid ') or 'O=Python Software Foundation' not in sign.stdout:
+        sys.exit(f'Embeddable Python signature check failed: {(sign.stdout + sign.stderr).strip()}')
     # Compiled now, so Python writes nothing into the install folder that the uninstaller misses.
     run(python, '-m', 'compileall', '-q', '-j', '0', site, *([out.parent / 'browser'] if (out.parent / 'browser').is_dir() else []))
     run(python, '-c', 'from PySide6.QtWebEngineWidgets import QWebEngineView; from PySide6.QtWebEngineCore import qWebEngineChromiumVersion as v; '

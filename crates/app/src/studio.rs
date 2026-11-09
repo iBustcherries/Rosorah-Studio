@@ -7518,7 +7518,7 @@ mod local_chat_time_tests {
         if std::env::var(CHILD).as_deref() != Ok("1") {
             let result=std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact","studio::local_chat_time_tests::timestamps_use_system_timezone_and_daylight_saving"])
-                .env(CHILD,"1").env("TZ","America/New_York").output().unwrap();
+                .env(CHILD,"1").env("TZ",if cfg!(windows){"Eastern Standard Time"}else{"America/New_York"}).output().unwrap();
             assert!(
                 result.status.success(),
                 "{}",

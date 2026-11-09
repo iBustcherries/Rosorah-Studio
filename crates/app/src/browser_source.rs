@@ -239,7 +239,7 @@ mod tests {
         assert!(valid_url("http://localhost:3000"));
         assert!(!valid_url("file:///etc/passwd"));
         assert!(!valid_url("javascript:alert(1)"));
-        assert!(valid_source("file:///home/me/overlay.html"));
+        assert!(valid_source(if cfg!(windows) { "file:///C:/Users/me/overlay.html" } else { "file:///home/me/overlay.html" }));
         assert!(!valid_source("file://server/share/overlay.html"));
         assert!(!valid_source("javascript:alert(1)"));
     }
