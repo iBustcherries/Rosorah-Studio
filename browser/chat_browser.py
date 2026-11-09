@@ -2,10 +2,11 @@
 """Isolated browser chat. JSON lines only over parent-owned stdin/stdout; no local HTTP port."""
 import json, os, re, sys, threading, time
 from pathlib import Path
-from PySide6.QtCore import QUrl, QTimer, Signal, QObject, Slot, QFile, QIODevice, Qt
+from PySide6.QtCore import QUrl, QTimer, Signal, QObject, Slot, QFile, QIODevice, Qt, QDateTime
+from PySide6.QtNetwork import QNetworkCookie
 from PySide6.QtWebChannel import QWebChannel
 from emotes import Images, safe_url
-import no_passkeys
+import firefox_cookies, no_passkeys
 from desktop_session import APP_ID, bring_forward, prepare
 from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget, QToolBar
 from PySide6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage, QWebEngineScript, QWebEngineSettings
@@ -126,6 +127,7 @@ class Window(QMainWindow):
             if self.ready:self.combined.page().runJavaScript('window.postResult('+json.dumps(msg)+')')
         elif typ=='type_message':self.type_message(str(msg.get('text','')),str(msg.get('request',''))[:100])
         elif typ=='diagnose':self.diagnose(str(msg.get('platform','')))
+        elif typ=='import_firefox':self.import_firefox()
         elif typ=='invite_action' and msg.get('action') in ('accept','decline','forget') and DASHBOARD in self.sources:
             call='forget()' if msg['action']=='forget' else 'answer('+json.dumps(msg['action'])+')'
             self.sources[DASHBOARD].page().runJavaScript('window.__rosorah&&window.__rosorah.'+call,WORLD)
@@ -195,6 +197,23 @@ class Window(QMainWindow):
         if picker and platform in self.sources:
             selector={'Twitch':'[data-a-target="emote-picker-button"]','YouTube':'#emoji-picker-button button, #emoji-picker-button','Kick':'[data-testid="emote-picker-button"], button[aria-label*="emote" i]'}.get(platform,'#emoji-picker-button')
             self.sources[platform].page().runJavaScript('document.querySelector('+json.dumps(selector)+')?.click()',WORLD)
+    def import_firefox(self):
+        # Twitch refuses to log in from this browser on Windows, so your Firefox login is copied in.
+        try:cookies=firefox_cookies.twitch_login()
+        except Exception as e:return emit({'type':'firefox_import','ok':False,'text':"Could not read Firefox's cookies: "+str(e)[:200]})
+        if not cookies:return emit({'type':'firefox_import','ok':False,'text':'No Twitch login found in Firefox. Log in on twitch.tv in Firefox, then try again.'})
+        store=self.profile.cookieStore()
+        same={1:QNetworkCookie.SameSite.Lax,2:QNetworkCookie.SameSite.Strict}
+        for c in cookies:
+            k=QNetworkCookie(c['name'].encode(),(c['value'] or '').encode())
+            k.setDomain(c['host']);k.setPath(c['path'] or '/');k.setSecure(bool(c['isSecure']));k.setHttpOnly(bool(c['isHttpOnly']))
+            k.setExpirationDate(QDateTime.fromSecsSinceEpoch(int(firefox_cookies.expiry_seconds(c))))
+            k.setSameSitePolicy(same.get(c['sameSite'],QNetworkCookie.SameSite.None_ if c['isSecure'] else QNetworkCookie.SameSite.Default))
+            store.setCookie(k,QUrl('https://'+c['host'].lstrip('.')+'/'))
+        login=next((c['value'] for c in cookies if c['name']=='login'),'')
+        emit({'type':'firefox_import','ok':True,'text':'Signed in to Twitch'+(' as '+login if login else '')+' with your Firefox login.'})
+        # Twitch pages open now start again signed in.
+        QTimer.singleShot(800,lambda:[self.sources[s].setUrl(QUrl(self.address(s,self.last[s]))) for s in list(self.sources) if platform_of(s)=='Twitch' and s in self.last])
     def post_message(self,platform,text,request):
         if platform not in ('Twitch','YouTube','Kick','TikTok') or not isinstance(text,str) or not isinstance(request,str) or len(request)>100:return
         if not text.strip() or len(text)>{'YouTube':200,'TikTok':150}.get(platform,500):return

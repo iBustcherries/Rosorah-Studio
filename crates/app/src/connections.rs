@@ -145,6 +145,18 @@ impl Studio {
                 .checkbox(&mut self.stream_config.costream_invites, "Show co-stream invites under Chat")
                 .on_hover_text("Rosorah keeps your Twitch Stream Manager open in the background and offers invites with Accept and Decline")
                 .changed();
+            ui.horizontal(|ui| {
+                ui.label("Accept invites in");
+                let current = if self.stream_config.invite_browser.is_empty() { "Default browser" } else { self.stream_config.invite_browser.as_str() };
+                egui::ComboBox::from_id_salt("invite-browser").selected_text(current).show_ui(ui, |ui| {
+                    save |= ui.selectable_value(&mut self.stream_config.invite_browser, String::new(), "Default browser").changed();
+                    for b in crate::web_browsers::installed() {
+                        save |= ui.selectable_value(&mut self.stream_config.invite_browser, b.name.to_owned(), b.name).changed();
+                    }
+                });
+            })
+            .response
+            .on_hover_text("Accept opens Twitch's Stream Together page here, where you join with camera and mic");
             if self.stream_config.costream_invites {
                 if self.browser_chat.dashboard_signin {
                     ui.colored_label(crate::appearance::current().warning, "Sign in to Twitch once so Rosorah can see invites.");
@@ -155,6 +167,18 @@ impl Studio {
                     }
                     self.browser_chat.send(serde_json::json!({"type":"open_platform","platform":"Twitch dashboard"}));
                 }
+                if ui.button("Import Twitch login from Firefox").on_hover_text("Copies your twitch.tv login from Firefox into Rosorah's chat browser. Only Twitch's cookies are read, and only when you press this.").clicked() {
+                    if !self.browser_chat.running() {
+                        let _ = self.browser_chat.start();
+                    }
+                    self.browser_chat.firefox_import = None;
+                    self.browser_chat.send(serde_json::json!({"type":"import_firefox"}));
+                }
+                if let Some((ok, text)) = &self.browser_chat.firefox_import {
+                    let look = crate::appearance::current();
+                    ui.colored_label(if *ok { look.good } else { look.warning }, text);
+                }
+                note(ui, "If Twitch says your browser isn't supported when you sign in here, log in on twitch.tv in Firefox and use Import Twitch login from Firefox.");
                 note(ui, "Twitch has no invite API, so Rosorah reads the invite from your Stream Manager page. If Twitch changes that page, use Open Stream Manager to answer.");
             }
         });

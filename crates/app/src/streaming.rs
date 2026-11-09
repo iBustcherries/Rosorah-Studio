@@ -89,6 +89,8 @@ pub struct Config {
     pub costream_channels: String,
     /// Watch the Twitch Stream Manager for co-stream invites and offer them under Chat.
     pub costream_invites: bool,
+    /// The browser Accept opens a co-stream invite in (a name from web_browsers); empty is the default browser.
+    pub invite_browser: String,
     /// Make the YouTube broadcast public as the stream starts going to YouTube.
     pub youtube_public: bool,
     /// "I'm live" posts to Discord and Bluesky; its two secrets live in the keyring.
@@ -134,6 +136,7 @@ impl Default for Config {
             tiktok_send: false,
             costream_channels: String::new(),
             costream_invites: true,
+            invite_browser: String::new(),
             youtube_public: false,
             announce: Default::default(),
             remote: Default::default(),

@@ -5448,7 +5448,7 @@ impl Studio {
                     // with camera and mic; that works even after Twitch's pop-up has closed.
                     if !invite.link.is_empty() {
                         if ui.add(egui::Button::new(RichText::new("Accept").strong().color(on_accent(accent))).fill(accent)).on_hover_text("Opens Stream Together on Twitch in your browser").clicked() {
-                            let _ = crate::desktop::open(&invite.link);
+                            let _ = crate::web_browsers::open(&self.stream_config.invite_browser, &invite.link);
                             self.browser_chat.forget_invite();
                         }
                     } else if invite.gone.is_some() {

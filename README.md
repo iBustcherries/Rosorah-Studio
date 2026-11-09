@@ -13,8 +13,7 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
 
 - **The browser is built in:** chat, web panels and browser sources use Chromium 140 (Qt
   WebEngine 6.12), shipped inside the installer and packages. Nothing is downloaded the first
-  time they start, and Twitch's sign-in no longer says your browser isn't supported, including
-  when connecting co-streaming.
+  time they start.
 - **No Windows Security passkey pop-up:** Twitch's sign-in page goes straight to your password.
 - **YouTube stream key:** the stream panel says "choose a broadcast…" until a broadcast is linked,
   and a selected broadcast with no stream key says so and how to link one.

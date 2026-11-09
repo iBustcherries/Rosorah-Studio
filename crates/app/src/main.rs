@@ -83,6 +83,7 @@ mod studio;
 mod video;
 mod virtual_camera;
 mod visualizer;
+mod web_browsers;
 mod widgets;
 mod window_memory;
 mod workspace;

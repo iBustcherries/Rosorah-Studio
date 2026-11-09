@@ -68,6 +68,8 @@ pub struct BrowserChat {
     pub invite: Option<Invite>,
     /// The Stream Manager page wants you signed in to Twitch in the chat browser.
     pub dashboard_signin: bool,
+    /// How the last "Import Twitch login from Firefox" went: worked, and what to tell you.
+    pub firefox_import: Option<(bool, String)>,
     /// Last page-structure report requested from the chat browser (no message text).
     pub diagnostic: Option<String>,
     page_results: Vec<Value>,
@@ -649,6 +651,9 @@ impl BrowserChat {
                             gone: gone.then(|| was.and_then(|o| o.gone).unwrap_or_else(std::time::Instant::now)),
                             text,
                         });
+                    }
+                    Some("firefox_import") => {
+                        self.firefox_import = Some((v["ok"].as_bool().unwrap_or(false), v["text"].as_str().unwrap_or("").chars().take(300).collect()));
                     }
                     Some("status") => {
                         self.status = v["text"]
