@@ -3,7 +3,7 @@ use anyhow::{Context,Result,ensure};
 pub enum Finished {External(crate::external_import::Preview),Saved(PathBuf),Imported(auroracast_core::Project,PathBuf),Located(u64,PathBuf)}
 #[derive(Default)]pub struct Tools {
  pub external_preview:Option<crate::external_import::Preview>,pub media_folder:String,
- pub open:bool,pub compatibility:bool,pub audio:bool,pub performance:bool,pub guide:Option<usize>,pub test_until:Option<Instant>,pub test_pending:bool,
+ pub open:bool,pub compatibility:bool,pub performance:bool,pub guide:Option<usize>,pub test_until:Option<Instant>,pub test_pending:bool,
  pub job:Option<mpsc::Receiver<Result<Finished,String>>>,pub status:String,pub file:String,pub folder:String,pub recording_file:String,
 }
 impl Tools {pub fn spawn(&mut self,work:impl FnOnce()->Result<Finished>+Send+'static){let(tx,rx)=mpsc::channel();self.job=Some(rx);self.status="Working…".into();std::thread::spawn(move||{let _=tx.send(work().map_err(|e|format!("{e:#}")));});}}

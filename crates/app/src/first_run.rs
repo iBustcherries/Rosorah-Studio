@@ -142,7 +142,7 @@ impl Studio {
         let view = self.audio.view();
         let scene = self.project.canvases[0].scene;
         let Some(mic) = self.project.mixer_channels(scene).into_iter().find(|c| c.media_source.is_none() && c.name.to_lowercase().contains("mic")) else {
-            ui.label("Add your microphone in the Sound panel: open Options, then Refresh inputs.");
+            ui.label("Add your microphone in the Sound panel with + Add sound.");
             return;
         };
         ui.label("Choose your microphone, then say something. The bar should move.");
@@ -169,9 +169,12 @@ impl Studio {
                 }
             });
         }
-        if ui.button("Hear yourself in headphones…").clicked() {
-            self.tools.audio = true;
-        }
+        ui.horizontal(|ui| {
+            ui.label("Hear yourself in");
+            if self.headphones_picker(ui, &view) {
+                self.changed();
+            }
+        });
         ui.ctx().request_repaint_after(Duration::from_millis(50));
     }
     /// Builds ready-made scenes. On first run they replace the demo scenes; otherwise they are added.

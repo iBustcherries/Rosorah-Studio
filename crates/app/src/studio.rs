@@ -1821,10 +1821,6 @@ impl Studio {
         }
         if self.advanced() {
             ui.separator();
-            if ui.button("Monitoring & sync…").clicked() {
-                self.tools.audio = true;
-                ui.close();
-            }
             if ui.button("Project & recording tools…").clicked() {
                 self.tools.open = true;
                 ui.close();
@@ -2134,6 +2130,27 @@ impl Studio {
                     }
                 });
             }
+            // A second microphone, a capture card's sound or any other input, each on its own strip.
+            ui.menu_button("Another device…", |ui| {
+                let used: Vec<&String> = self.audio.selected.values().collect();
+                let inputs: Vec<_> = view.devices.iter().filter(|d| d.kind == "Audio/Source" && !used.contains(&&d.serial)).collect();
+                if inputs.is_empty() {
+                    note(ui, "Every device is already in Sound. Plug one in, then choose Look for new devices.");
+                } else {
+                    note(ui, "Microphones, capture cards and other inputs");
+                }
+                for d in inputs {
+                    if ui.button(&d.label).clicked() {
+                        let id = self.project.id();
+                        let name = device_strip_name(&d.label);
+                        self.project.audio.push(auroracast_core::AudioChannel { monitor_only: false, id, name, gain_db: 0., muted: false, tracks: auroracast_core::new_tracks(false), delay_ms: 0, monitor: false, noise_suppression: Default::default(), media_source: None });
+                        self.audio.selected.insert(id, d.serial.clone());
+                        self.audio.enabled.insert(id, true);
+                        self.changed();
+                        ui.close();
+                    }
+                }
+            });
             // Its own strip for one app's sound, followed by name so it's back after a restart.
             ui.menu_button("An application…", |ui| {
                 let followed: Vec<String> = self.audio.selected.values().filter_map(|t| crate::app_audio::followed_app(t)).map(str::to_owned).collect();
@@ -2167,6 +2184,34 @@ impl Studio {
                 self.audio.refresh();
             }
         });
+    }
+    /// The one place headphones are chosen: Settings > Sound and the first-run guide.
+    pub(crate) fn headphones_picker(&mut self, ui: &mut egui::Ui, view: &crate::audio::View) -> bool {
+        let before = self.project.preferences.monitor_device.clone();
+        let listed = |target: &str| view.devices.iter().find(|d| d.kind == "Audio/Sink" && d.target == target).map(|d| d.label.clone());
+        let current = listed(&before).unwrap_or_else(|| match before.as_str() {
+            "" => "Off".into(),
+            crate::audio::DEFAULT_MONITOR => "System default output".into(),
+            _ => "Device not found".into(),
+        });
+        egui::ComboBox::from_id_salt("headphones").selected_text(current).show_ui(ui, |ui| {
+            let device = &mut self.project.preferences.monitor_device;
+            ui.selectable_value(device, String::new(), "Off");
+            if listed(crate::audio::DEFAULT_MONITOR).is_none() {
+                ui.selectable_value(device, crate::audio::DEFAULT_MONITOR.into(), "System default output");
+            }
+            for d in view.devices.iter().filter(|d| d.kind == "Audio/Sink") {
+                ui.selectable_value(device, d.target.clone(), &d.label);
+            }
+        });
+        if !before.is_empty() && !view.monitor_status.is_empty() {
+            note(ui, view.monitor_status.as_str());
+        }
+        let changed = before != self.project.preferences.monitor_device;
+        if changed {
+            self.audio.monitor_device(&self.project.preferences.monitor_device);
+        }
+        changed
     }
     fn advanced(&self) -> bool {
         self.project.preferences.workspace.advanced
@@ -6355,48 +6400,15 @@ impl Studio {
         let view = self.audio.view();
         let scene_id = self.project.canvases[self.canvas].scene;
         let advanced = self.advanced();
+        // Headphones live in Settings > Sound and the rest in each strip's ⚙, so the top stays this short.
         ui.horizontal_wrapped(|ui| {
-            if advanced && ui.button("Monitoring & sync…").clicked(){self.tools.audio=true;}
             note(ui, format!("Volumes for {}",self.project.scene(scene_id).map(|s|s.name.as_str()).unwrap_or("this scene")));
             self.add_sound_menu(ui, &view);
             let hidden = self.project.preferences.workspace.hidden_sounds.len();
             if hidden > 0 {
                 ui.menu_button(format!("{hidden} hidden"), |ui| self.hidden_sounds_menu(ui)).response.on_hover_text("Hidden sounds are still heard on stream. Choose one to show it again.");
             }
-            if !advanced {
-                return;
-            }
-            ui.menu_button("Options",|ui| {
-                if ui.button("Refresh inputs").clicked(){self.audio.refresh();}
-        if advanced { ui.collapsing("Advanced audio",|ui|{
-            let old=self.project.preferences.monitor_device.clone();
-            // A submenu, not a dropdown: a dropdown inside this menu would close the menu when clicked.
-            let current=view.devices.iter().find(|d|d.target==old).map(|d|d.label.clone()).unwrap_or(if old==crate::audio::DEFAULT_MONITOR{"System default output".into()}else{"Monitoring off".into()});
-            ui.menu_button(format!("Monitoring: {current}"),|ui|{ui.selectable_value(&mut self.project.preferences.monitor_device,String::new(),"Monitoring off");ui.selectable_value(&mut self.project.preferences.monitor_device,crate::audio::DEFAULT_MONITOR.into(),"System default output");for d in view.devices.iter().filter(|d|d.kind=="Audio/Sink"){ui.selectable_value(&mut self.project.preferences.monitor_device,d.target.clone(),&d.label);}});
-            ui.small(&view.monitor_status);ui.small("Use headphones. Monitoring a desktop mix back to the same output can create feedback.");
-            if ui.checkbox(&mut self.project.preferences.multitrack_recording,"Record six separate audio tracks in standalone MKV").changed()||old!=self.project.preferences.monitor_device{self.changed();}
-            if ui.button("Separate game, microphone and music tracks").clicked(){for c in &mut self.project.audio{c.tracks=[false;6];c.tracks[0]=true;let t=if c.id==crate::game_audio::CHANNEL{1}else if c.name.to_lowercase().contains("mic"){2}else{3};c.tracks[t]=true;}self.project.preferences.multitrack_recording=true;self.changed();}
-            ui.small("Track 1 is the stream mix. Route mic/game to other tracks below. The shared stream recording remains Track 1 only.");
-        }); }
-                ui.small("Volume and mute are saved separately for each scene.");
-            });
         });
-        if advanced { ui.horizontal(|ui| {
-            let old = self.project.preferences.workspace.vertical_audio;
-            ui.selectable_value(
-                &mut self.project.preferences.workspace.vertical_audio,
-                false,
-                "Horizontal",
-            );
-            ui.selectable_value(
-                &mut self.project.preferences.workspace.vertical_audio,
-                true,
-                "Vertical",
-            );
-            if old != self.project.preferences.workspace.vertical_audio {
-                self.dirty = true;
-            }
-        }); }
         let vertical_audio = advanced && self.project.preferences.workspace.vertical_audio;
         self.audio
             .monitor_device(&self.project.preferences.monitor_device);
@@ -6881,8 +6893,9 @@ impl Studio {
                     self.dirty = true;
                 }
             }
-            if ui.button("Monitoring & sync…").clicked() {
-                self.tools.audio = true;
+            if ui.button("Headphones…").on_hover_text("Choose where you hear the stream, in Settings > Sound").clicked() {
+                self.page = Page::Settings;
+                self.settings = Settings::Audio;
                 ui.close();
             }
             if ui.button("Look for new devices").clicked() {
@@ -7053,14 +7066,12 @@ impl Studio {
                         ui.set_width(ui.available_width());
                         ui.strong("Hear yourself");
                         note(ui,"Pick your headphones to hear what goes into the stream. Use headphones, not speakers, or viewers will hear an echo.");
-                        let before=self.project.preferences.monitor_device.clone();
-                        egui::ComboBox::from_id_salt("settings-headphones").selected_text(view.devices.iter().find(|d|d.target==before).map_or("Off",|d|d.label.as_str())).show_ui(ui,|ui|{ui.selectable_value(&mut self.project.preferences.monitor_device,String::new(),"Off");for d in view.devices.iter().filter(|d|d.kind=="Audio/Sink"){ui.selectable_value(&mut self.project.preferences.monitor_device,d.target.clone(),&d.label);}});
-                        if before!=self.project.preferences.monitor_device{self.audio.monitor_device(&self.project.preferences.monitor_device);changed=true;}
-                        if ui.button("Headphones & audio sync…").on_hover_text("Choose what you hear, and delay sound that arrives before the picture").clicked(){self.tools.audio=true;}
+                        changed|=self.headphones_picker(ui,&view);
+                        note(ui,"Which sounds you hear, and a delay for sound that arrives before the picture, are in each sound's ⚙ in the Sound panel.");
                     });
                     if self.advanced() {
                         ui.add_space(16.);
-                        card().show(ui,|ui|{ui.strong("Audio tracks");note(ui,"Assign each channel to up to six independent output tracks. Click a track's name to rename it. Track 1 is what your viewers hear.");egui::Grid::new("routing").striped(true).spacing([24.,16.]).show(ui,|ui|{ui.strong("Source");for (n,name) in self.project.preferences.track_names.iter_mut().enumerate(){changed|=ui.add_sized([92.,24.],egui::TextEdit::singleline(name).hint_text(format!("Track {}",n+1)).char_limit(32)).on_hover_text("Click to rename this track").changed();}ui.end_row();for channel in &mut self.project.audio{ui.label(&channel.name);for route in &mut channel.tracks{changed|=ui.checkbox(route,"").changed();}ui.end_row();}});ui.add_space(16.);note(ui,"Game audio follows automatic capture. Choose other inputs in Sound. Live video recordings use Track 1, including volume and mute. Enable separate tracks in Advanced audio to include Tracks 2–6 in standalone recordings. Monitoring is opt-in in the mixer.");});
+                        card().show(ui,|ui|{ui.strong("Audio tracks");note(ui,"Assign each channel to up to six independent output tracks. Click a track's name to rename it. Track 1 is what your viewers hear.");egui::Grid::new("routing").striped(true).spacing([24.,16.]).show(ui,|ui|{ui.strong("Source");for (n,name) in self.project.preferences.track_names.iter_mut().enumerate(){changed|=ui.add_sized([92.,24.],egui::TextEdit::singleline(name).hint_text(format!("Track {}",n+1)).char_limit(32)).on_hover_text("Click to rename this track").changed();}ui.end_row();for channel in &mut self.project.audio{ui.label(&channel.name);for route in &mut channel.tracks{changed|=ui.checkbox(route,"").changed();}ui.end_row();}});ui.add_space(16.);changed|=ui.checkbox(&mut self.project.preferences.multitrack_recording,"Record each track separately").changed();note(ui,"Recordings then keep all six tracks, so you can fix the mix afterwards. Off: recordings have Track 1 only, what your viewers hear.");});
                     }
                 },
             }
@@ -7509,6 +7520,28 @@ fn format_time(ms: u64, twenty_four: bool) -> String {
         .unwrap_or_else(|| "—".into())
 }
 
+/// A strip name from a device label: Windows wraps the device in its role, "Microphone (Live Gamer MINI)".
+fn device_strip_name(label: &str) -> String {
+    label
+        .strip_suffix(')')
+        .and_then(|l| l.split_once(" ("))
+        .map(|(_, device)| device.trim())
+        .filter(|device| !device.is_empty())
+        .unwrap_or(label)
+        .to_owned()
+}
+#[cfg(test)]
+mod device_strip_name_tests {
+    use super::*;
+    #[test]
+    fn strips_are_named_after_the_device() {
+        assert_eq!(device_strip_name("Microphone (Live Gamer MINI)"), "Live Gamer MINI");
+        assert_eq!(device_strip_name("Line In (2- USB Audio Device)"), "2- USB Audio Device");
+        assert_eq!(device_strip_name("Live Gamer MINI Analog Stereo"), "Live Gamer MINI Analog Stereo");
+        assert_eq!(device_strip_name("System default microphone"), "System default microphone");
+        assert_eq!(device_strip_name("Microphone ()"), "Microphone ()");
+    }
+}
 #[cfg(test)]
 mod local_chat_time_tests {
     use super::*;
