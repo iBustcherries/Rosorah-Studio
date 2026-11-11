@@ -9,7 +9,16 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
 **[Download the latest release](https://github.com/iBustcherries/RosorahStudio-releases/releases/latest)**
 · Windows 10/11 installer, Fedora `.rpm`, Ubuntu/Debian `.deb`
 
-## What's new in 0.54.0
+## What's new in 0.55.0
+
+- **Chat no longer stops mid-stream on Windows:** a chat message with a curly apostrophe (’),
+  an accented letter or a dash disconnected Rosorah's chat, and it kept failing on every
+  restart. Every character now comes through, emoji and other languages included.
+- **Hear a sound in your headphones from its ⚙:** "Play it in my headphones" is there in Simple
+  mode too, picks your computer's default output if no headphones are chosen, and says where
+  the sound plays.
+
+## 0.54.0
 
 - **Capture card and second-microphone sound:** **+ Add sound → Another device…** gives any
   microphone or capture input (a console through a capture card, for example) its own strip.
@@ -29,14 +38,6 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
   and you can import your Twitch login from Firefox for co-streaming invites.
 - **YouTube stream key:** a selected broadcast with no stream key says so and how to link one.
 - **Fixes** for OBS/Firebot import on Windows, font names, Wayland browser windows and more.
-
-## 0.53.0
-
-- **Game capture on the graphics card (Linux):** Vulkan games' frames, including Windows games
-  through Proton, go straight to Rosorah on the graphics card instead of through main memory.
-  In a 1440p test this cut Rosorah's CPU use for game capture by about 85% and kept the full
-  60 fps. Used automatically when the game and Rosorah share a GPU and driver; otherwise capture
-  works as before.
 
 ## Screenshots
 
