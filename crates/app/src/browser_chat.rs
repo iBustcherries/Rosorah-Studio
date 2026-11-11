@@ -133,12 +133,15 @@ pub(crate) fn bundled_runtime() -> Option<PathBuf> {
 pub(crate) fn runtime_ready() -> bool {
     bundled_runtime().is_some() || runtime_ready_marker().is_file()
 }
-/// What the helpers need in their environment to find a bundled runtime.
+/// What the helpers need in their environment to find a bundled runtime. They always talk UTF-8:
+/// on Windows Python otherwise writes chat text in the old code page, and a curly apostrophe
+/// arrived as a line Rosorah couldn't read, which stopped chat.
 pub(crate) fn runtime_env() -> Vec<(&'static str, std::ffi::OsString)> {
-    match bundled_runtime() {
-        Some(dir) if cfg!(not(windows)) => vec![("PYTHONPATH", dir.join("site-packages").into()), ("PYTHONNOUSERSITE", "1".into())],
-        _ => Vec::new(),
+    let mut env = vec![("PYTHONUTF8", "1".into())];
+    if let Some(dir) = bundled_runtime().filter(|_| cfg!(not(windows))) {
+        env.extend([("PYTHONPATH", dir.join("site-packages").into()), ("PYTHONNOUSERSITE", "1".into())]);
     }
+    env
 }
 pub(crate) fn venv() -> PathBuf {
     #[cfg(windows)]
@@ -467,15 +470,16 @@ impl BrowserChat {
         std::thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
             loop {
-                let mut line = String::new();
-                match reader.read_line(&mut line) {
+                // Read as bytes, so a line that isn't UTF-8 is skipped instead of ending chat.
+                let mut line = Vec::new();
+                match reader.read_until(b'\n', &mut line) {
                     Ok(0) | Err(_) => break,
                     _ => (),
                 };
                 if line.len() > 131072 {
                     break;
                 }
-                if let Ok(v) = serde_json::from_str(&line) {
+                if let Ok(v) = serde_json::from_slice(&line) {
                     if events.send(v).is_err() {
                         break;
                     }

@@ -6488,6 +6488,8 @@ impl Studio {
         let mut music_apps_changed = false;
         // Each strip's filters, edited in its Sound settings window.
         let audio_filters = &mut self.project.preferences.audio_filters;
+        // Where listened-to sounds play; a strip's listen switch picks a default when there's none.
+        let monitor_device = &mut self.project.preferences.monitor_device;
         let mut refresh = false;
         // Draws one strip; returns what picks it up for reordering (its grip and name).
         let mut draw_channel = |ui: &mut egui::Ui, channel: &mut auroracast_core::AudioChannel| -> egui::Response {
@@ -6722,20 +6724,42 @@ impl Studio {
                             audio_filters.remove(&channel.id);
                         }
                     }
+                    ui.add_space(6.);
+                    ui.label(RichText::new("Hear it yourself").strong());
+                    if ui.checkbox(&mut channel.monitor, "Play it in my headphones").changed() {
+                        if !channel.monitor {
+                            channel.monitor_only = false;
+                        } else if monitor_device.is_empty() {
+                            // Listening needs somewhere to play; until headphones are chosen, the default output.
+                            *monitor_device = crate::audio::DEFAULT_MONITOR.into();
+                        }
+                        changed = true;
+                    }
+                    if channel.monitor {
+                        let output = match monitor_device.as_str() {
+                            "" => None,
+                            crate::audio::DEFAULT_MONITOR => Some("your computer's default speakers or headphones".to_owned()),
+                            target => Some(view.devices.iter().find(|d| d.kind == "Audio/Sink" && d.target == target).map_or_else(|| "headphones that aren't plugged in".to_owned(), |d| d.label.clone())),
+                        };
+                        match output {
+                            Some(output) => note(ui, format!("Plays through {output}. Change it in Settings > Sound.")),
+                            None => {
+                                ui.colored_label(ui.visuals().warn_fg_color, "No headphones are chosen, so you won't hear it.");
+                                if ui.button("Use my computer's default output").clicked() {
+                                    *monitor_device = crate::audio::DEFAULT_MONITOR.into();
+                                    changed = true;
+                                }
+                            }
+                        }
+                        if advanced {
+                            changed |= ui.checkbox(&mut channel.monitor_only, "Only in my headphones (not on stream or in recordings)").changed();
+                        }
+                    }
                     if advanced {
                         ui.add_space(6.);
-                        ui.label(RichText::new("Timing and monitoring").strong());
+                        ui.label(RichText::new("Timing").strong());
                         changed |= ui.add(egui::DragValue::new(&mut channel.delay_ms).range(0..=2000).suffix(" ms audio delay")).changed();
-                        note(ui, "Delay this audio to match a late camera, e.g. DroidCam. Applies to recording and streaming.");
-                        if ui.checkbox(&mut channel.monitor, "Listen on monitoring output").changed() {
-                            if !channel.monitor {
-                                channel.monitor_only = false;
-                            }
-                            changed = true;
-                        }
-                        if channel.monitor {
-                            changed |= ui.checkbox(&mut channel.monitor_only, "Monitor only (exclude from stream / recording)").changed();
-                        }
+                        note(ui, "Delay this audio to match a late camera or capture card. Applies to recording and streaming.");
                         ui.add_space(6.);
                         ui.label(RichText::new("Audio tracks").strong());
                         ui.horizontal_wrapped(|ui| {
