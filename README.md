@@ -11,14 +11,24 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
 
 ## What's new in 0.54.0
 
+- **Capture card and second-microphone sound:** **+ Add sound → Another device…** gives any
+  microphone or capture input (a console through a capture card, for example) its own strip.
+- **Simpler Sound settings:** headphones are chosen in Settings → Sound; each sound's delay,
+  listening and tracks are in its ⚙. Voice isolation and Low cut filters, Hide and Delete for
+  sounds, and the Music strip glides between scenes.
 - **The browser is built in:** chat, web panels and browser sources use Chromium 140 (Qt
   WebEngine 6.12), shipped inside the installer and packages. Nothing is downloaded the first
   time they start.
-- **No Windows Security passkey pop-up:** Twitch's sign-in page goes straight to your password.
-- **YouTube stream key:** the stream panel says "choose a broadcast…" until a broadcast is linked,
-  and a selected broadcast with no stream key says so and how to link one.
-- **Wayland:** chat, Kick, TikTok and Stream Manager pages and Interact windows open in front with
-  focus and show as Rosorah, and a rare startup crash of browser windows on Wayland is fixed.
+- **Game capture on the graphics card (Windows)**, and games with anti-cheat are found by
+  automatic game capture.
+- **Cameras start as soon as you choose one**, with a live preview in Layer Properties.
+- **Now playing** gets sliding long names and a music visualizer.
+- **Twitch and Kick go live with AMD graphics** (the encoder now sends regular keyframes), and
+  streams with a Twitch VOD track no longer fail to start.
+- **Sign-ins:** expired ones renew themselves, Twitch's sign-in has no Windows passkey pop-up,
+  and you can import your Twitch login from Firefox for co-streaming invites.
+- **YouTube stream key:** a selected broadcast with no stream key says so and how to link one.
+- **Fixes** for OBS/Firebot import on Windows, font names, Wayland browser windows and more.
 
 ## 0.53.0
 
@@ -27,14 +37,6 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
   In a 1440p test this cut Rosorah's CPU use for game capture by about 85% and kept the full
   60 fps. Used automatically when the game and Rosorah share a GPU and driver; otherwise capture
   works as before.
-
-## 0.52.0
-
-- **Choose which audio track each platform hears:** an Audio choice on every platform in
-  Settings → Accounts → Streaming platforms.
-- **A DRM free track, set up for you:** Track 2 holds everything except music. YouTube hears it
-  by default, and one tick (**VOD: DRM free**) keeps music out of your Twitch VODs while viewers
-  still hear everything live.
 
 ## Screenshots
 
