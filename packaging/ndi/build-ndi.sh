@@ -3,9 +3,17 @@
 # packages; Fedora and Ubuntu don't ship it. Rosorah loads it from /opt/rosorah-studio/gstreamer.
 # The NDI runtime itself (libndi) is not included: users install it from ndi.video.
 # Usage: build-ndi.sh <work dir> <output dir>   (add --offline to cargo with CARGO_NET_OFFLINE=true)
+#        build-ndi.sh --fetch   (download the source and its crates now, for a later offline build)
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-work="$1" out="$2"
+fetch_only=false
+if [ "${1:-}" = --fetch ]; then
+    fetch_only=true
+    work="$(mktemp -d)" out=""
+    trap 'rm -rf "$work"' EXIT
+else
+    work="$1" out="$2"
+fi
 version=0.15.4
 sum=d31649d4056f9aa3a7b2ddfc81ef2dc3156a214f50361e88226d2ebdf2e6a415
 crate="$here/gst-plugin-ndi-$version.crate"
@@ -19,6 +27,10 @@ tar xzf "$crate" -C "$work/ndi-src"
 src="$work/ndi-src/gst-plugin-ndi-$version"
 # Built on its own, not as part of Rosorah's workspace.
 printf '\n[workspace]\n' >> "$src/Cargo.toml"
+if $fetch_only; then
+    (cd "$src" && cargo fetch --locked)
+    exit 0
+fi
 (cd "$src" && CARGO_TARGET_DIR="$work/ndi-build" cargo build --release --locked)
 mkdir -p "$out"
 install -m 0755 "$work/ndi-build/release/libgstndi.so" "$out/"

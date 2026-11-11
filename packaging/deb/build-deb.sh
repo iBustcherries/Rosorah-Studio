@@ -9,6 +9,9 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
 command -v podman >/dev/null || { echo "Missing 'podman': sudo dnf install podman" >&2; exit 1; }
 mkdir -p "$root/dist" "${CARGO_HOME:-$HOME/.cargo}/registry"
+# The container builds offline from this registry, so everything it needs is downloaded first.
+(cd "$root" && cargo fetch --locked)
+bash "$here/../ndi/build-ndi.sh" --fetch
 # The Spout bridge is a Windows program, so it's built here (cargo-xwin) and handed in.
 bridge="$root/target-windows/bridge-out"
 rm -rf "$bridge" && mkdir -p "$bridge"

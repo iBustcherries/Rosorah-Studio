@@ -8,7 +8,7 @@
 # The bundled browser runtime's Qt must never be offered to other packages, its own libraries
 # need no system copies, and its GTK theme plugin is optional (Qt skips it without GTK).
 %global __provides_exclude_from ^/opt/rosorah-studio/(hooks|browser-runtime)/.*$
-%global __requires_exclude ^(libQt6|libicu[a-z]*\.so\.73|libpyside6|libshiboken6|libgtk-3|libgdk-3|libgdk_pixbuf|libatk-1|libcairo|libpango|libharfbuzz)
+%global __requires_exclude ^(libQt6|libicu[a-z0-9]*\.so\.73|libpyside6|libshiboken6|libgtk-3|libgdk-3|libgdk_pixbuf|libatk-1|libcairo|libpango|libharfbuzz)
 
 Name:           rosorah-studio
 Version:        %{pkgversion}
