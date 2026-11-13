@@ -9,7 +9,15 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
 **[Download the latest release](https://github.com/iBustcherries/RosorahStudio-releases/releases/latest)**
 · Windows 10/11 installer, Fedora `.rpm`, Ubuntu/Debian `.deb`
 
-## What's new in 0.55.0
+## What's new in 0.56.0
+
+- **Automatic game capture at any resolution (Windows):** games in a window, or borderless at a
+  size other than your screen's (Hearthstone and League of Legends, for example), are now
+  captured automatically, without the title bar. Games are recognised by their game engine,
+  their name or their game library folder; launchers, browsers and streaming tools like VTube
+  Studio are left alone. The mode is now called **Automatic game capture**.
+
+## 0.55.0
 
 - **Chat no longer stops mid-stream on Windows:** a chat message with a curly apostrophe (’),
   an accented letter or a dash disconnected Rosorah's chat, and it kept failing on every
@@ -17,27 +25,6 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
 - **Hear a sound in your headphones from its ⚙:** "Play it in my headphones" is there in Simple
   mode too, picks your computer's default output if no headphones are chosen, and says where
   the sound plays.
-
-## 0.54.0
-
-- **Capture card and second-microphone sound:** **+ Add sound → Another device…** gives any
-  microphone or capture input (a console through a capture card, for example) its own strip.
-- **Simpler Sound settings:** headphones are chosen in Settings → Sound; each sound's delay,
-  listening and tracks are in its ⚙. Voice isolation and Low cut filters, Hide and Delete for
-  sounds, and the Music strip glides between scenes.
-- **The browser is built in:** chat, web panels and browser sources use Chromium 140 (Qt
-  WebEngine 6.12), shipped inside the installer and packages. Nothing is downloaded the first
-  time they start.
-- **Game capture on the graphics card (Windows)**, and games with anti-cheat are found by
-  automatic game capture.
-- **Cameras start as soon as you choose one**, with a live preview in Layer Properties.
-- **Now playing** gets sliding long names and a music visualizer.
-- **Twitch and Kick go live with AMD graphics** (the encoder now sends regular keyframes), and
-  streams with a Twitch VOD track no longer fail to start.
-- **Sign-ins:** expired ones renew themselves, Twitch's sign-in has no Windows passkey pop-up,
-  and you can import your Twitch login from Firefox for co-streaming invites.
-- **YouTube stream key:** a selected broadcast with no stream key says so and how to link one.
-- **Fixes** for OBS/Firebot import on Windows, font names, Wayland browser windows and more.
 
 ## Screenshots
 
