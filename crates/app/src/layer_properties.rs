@@ -491,9 +491,9 @@ impl Studio {
         #[cfg(windows)]
         {
             egui::ComboBox::from_id_salt("windows-capture-mode")
-                .selected_text(match mode {rosorah_capture::Target::AutoFullscreen=>"Automatic fullscreen application",rosorah_capture::Target::Window=>"Specific window",_=>"Entire monitor"})
+                .selected_text(match mode {rosorah_capture::Target::AutoFullscreen=>"Automatic game capture",rosorah_capture::Target::Window=>"Specific window",_=>"Entire monitor"})
                 .show_ui(ui,|ui|{
-                    ui.selectable_value(&mut mode,rosorah_capture::Target::AutoFullscreen,"Automatic fullscreen application");
+                    ui.selectable_value(&mut mode,rosorah_capture::Target::AutoFullscreen,"Automatic game capture");
                     ui.selectable_value(&mut mode,rosorah_capture::Target::Window,"Specific window");
                     ui.selectable_value(&mut mode,rosorah_capture::Target::Screen,"Entire monitor");
                 });
@@ -519,7 +519,7 @@ impl Studio {
             }
             if mode!=rosorah_capture::Target::AutoFullscreen && ui.button("Refresh windows / monitors").clicked(){crate::desktop::refresh();}
             if crate::desktop::probing(){ui.spinner();ui.ctx().request_repaint_after(Duration::from_millis(100));}
-            ui.small(if mode==rosorah_capture::Target::AutoFullscreen {"Automatically follows eligible fullscreen graphics applications. Uses Windows window capture; no renderer injection or desktop fallback."} else if mode==rosorah_capture::Target::Window {"Captures only the selected window. Protected or minimized windows may not supply frames."} else {"Captures the entire selected monitor."});
+            ui.small(if mode==rosorah_capture::Target::AutoFullscreen {"Follows the game you are playing: fullscreen, borderless or in a window, at any resolution. Windowed games are found by their game engine, name or game library folder, and only the game picture is captured (no title bar). Uses Windows window capture; no renderer injection or desktop fallback."} else if mode==rosorah_capture::Target::Window {"Captures only the selected window. Protected or minimized windows may not supply frames."} else {"Captures the entire selected monitor."});
         }
         #[cfg(not(windows))]
         egui::ComboBox::from_id_salt("capture-target")

@@ -1,4 +1,4 @@
-//! Windows Graphics Capture for explicit windows and opted-in fullscreen applications.
+//! Windows Graphics Capture for explicit windows and opted-in automatic game capture.
 //! No process injection and no whole-monitor fallback for a window request.
 use anyhow::{Context, Result, bail, ensure};
 use rosorah_capture::{Backend, GameProcess, Options, Producer};
@@ -18,6 +18,7 @@ use windows::{
         Graphics::{
             Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN},
             Direct3D11::*,
+            Dwm::*,
             Dxgi::{Common::*, *},
             Gdi::*,
         },
@@ -162,8 +163,33 @@ fn automatic() -> Option<Window> {
             return None;
         }
         let m = monitor.rcMonitor;
-        if !crate::capture_policy::fullscreen([rect.left,rect.top,rect.right,rect.bottom],[m.left,m.top,m.right,m.bottom]) { return None; }
+        if !crate::capture_policy::fullscreen([rect.left,rect.top,rect.right,rect.bottom],[m.left,m.top,m.right,m.bottom]) {
+            // Not the size of the screen: only a window that is clearly a game counts.
+            let mut client = RECT::default();
+            GetClientRect(hwnd, &mut client).ok()?;
+            let mut class = [0u16; 256];
+            let n = GetClassNameW(hwnd, &mut class).max(0) as usize;
+            let class = String::from_utf16_lossy(&class[..n]);
+            if !crate::capture_policy::windowed_game(&w.process.name, &class, (client.right - client.left, client.bottom - client.top)) {
+                return None;
+            }
+        }
         graphics_process(w.process.pid).then_some(w)
+    }
+}
+/// A window's own picture (no title bar or borders) within its captured frame, as x, y, width, height.
+/// Windows captures a window by its frame as DWM draws it, so the client area is measured from there.
+fn client_area(hwnd: HWND) -> Option<[i32; 4]> {
+    unsafe {
+        let mut frame = RECT::default();
+        DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &mut frame as *mut RECT as *mut _, std::mem::size_of::<RECT>() as u32).ok()?;
+        let mut client = RECT::default();
+        GetClientRect(hwnd, &mut client).ok()?;
+        let mut origin = POINT::default();
+        if !ClientToScreen(hwnd, &mut origin).as_bool() {
+            return None;
+        }
+        Some([origin.x - frame.left, origin.y - frame.top, client.right - client.left, client.bottom - client.top])
     }
 }
 struct Apartment;
@@ -273,6 +299,8 @@ struct Session {
     /// Whether the last frame went to the studio on the graphics card, or why it can't.
     on_gpu: bool,
     problem: Option<String>,
+    /// The window whose client area alone is kept, for automatic game capture.
+    client: Option<usize>,
     _item: GraphicsCaptureItem,
 }
 /// "A new frame is waiting", from Windows' capture thread to the capture loop.
@@ -306,7 +334,8 @@ impl Drop for Session {
     }
 }
 impl Session {
-    fn open(window: &Window, cursor: bool, gpu: Option<Adapter>) -> Result<Self> {
+    /// `client`: keep only the window's own picture, without title bar and borders.
+    fn open(window: &Window, cursor: bool, gpu: Option<Adapter>, client: bool) -> Result<Self> {
         unsafe {
             ensure!(
                 GraphicsCaptureSession::IsSupported()?,
@@ -320,7 +349,9 @@ impl Session {
             let interop: IGraphicsCaptureItemInterop =
                 windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
             let item: GraphicsCaptureItem = interop.CreateForWindow(hwnd)?;
-            Self::open_item(item, cursor, gpu)
+            let mut session = Self::open_item(item, cursor, gpu)?;
+            session.client = client.then_some(window.handle);
+            Ok(session)
         }
     }
     fn open_monitor(id: &str, cursor: bool, gpu: Option<Adapter>) -> Result<Self> {
@@ -408,6 +439,7 @@ impl Session {
                 copied: None,
                 on_gpu: false,
                 problem,
+                client: None,
                 _item: item,
             })
         }
@@ -463,7 +495,13 @@ impl Session {
             );
             let width = (size.Width as u32).min(desc.Width);
             let height = (size.Height as u32).min(desc.Height);
-            if let Some(shared) = self.share(&texture, &desc, width, height, cancel) {
+            let area = self
+                .client
+                .and_then(|hwnd| client_area(HWND(hwnd as *mut _)))
+                .and_then(|area| crate::capture_policy::crop(area, (width, height)))
+                .unwrap_or([0, 0, width, height]);
+            let [x, y, width, height] = area;
+            if let Some(shared) = self.share(&texture, &desc, area, cancel) {
                 return Ok(shared);
             }
             if self.staging.is_none() {
@@ -514,8 +552,9 @@ impl Session {
             let _unmap = Unmap(&self.context, staging);
             let bytes = std::slice::from_raw_parts(
                 mapped.pData.cast::<u8>(),
-                mapped.RowPitch as usize * height as usize,
+                mapped.RowPitch as usize * desc.Height as usize,
             );
+            let bytes = &bytes[y as usize * mapped.RowPitch as usize + x as usize * 4..];
             Ok(Some(crate::pixels::convert(
                 bytes,
                 width,
@@ -530,7 +569,8 @@ impl Session {
 impl Session {
     /// Hands a frame to the studio on the graphics card when it draws on this device's adapter.
     /// None sends it through memory instead; Some(None) skips it (no free slot, or stopping).
-    fn share(&mut self, texture: &ID3D11Texture2D, desc: &D3D11_TEXTURE2D_DESC, width: u32, height: u32, cancel: &watch::Receiver<bool>) -> Option<Option<rosorah_capture::Frame>> {
+    fn share(&mut self, texture: &ID3D11Texture2D, desc: &D3D11_TEXTURE2D_DESC, area: [u32; 4], cancel: &watch::Receiver<bool>) -> Option<Option<rosorah_capture::Frame>> {
+        let [_, _, width, height] = area;
         self.on_gpu = false;
         let luid = self.gpu.and_then(|f| f())?;
         if self.adapter != Some(luid) {
@@ -541,7 +581,7 @@ impl Session {
             return None;
         }
         let stop = || *cancel.borrow() || cancel.has_changed().is_err();
-        match unsafe { copy_shared(&self.device, &self.context, &mut self.ring, &mut self.copied, texture, width, height, &stop) } {
+        match unsafe { copy_shared(&self.device, &self.context, &mut self.ring, &mut self.copied, texture, area, &stop) } {
             Ok(frame) => {
                 self.on_gpu = true;
                 self.problem = None;
@@ -565,19 +605,19 @@ impl Session {
         }
     }
 }
-/// Copies a frame into a free texture of the ring and waits for the copy: the frame to hand to the
-/// studio, or None when every texture is still in use or `stop` says to stop.
-#[allow(clippy::too_many_arguments)]
+/// Copies `area` (x, y, width, height) of a frame into a free texture of the ring and waits for
+/// the copy: the frame to hand to the studio, or None when every texture is still in use or
+/// `stop` says to stop.
 unsafe fn copy_shared(
     device: &ID3D11Device,
     context: &ID3D11DeviceContext,
     ring: &mut Option<Ring>,
     copied: &mut Option<ID3D11Query>,
     texture: &ID3D11Texture2D,
-    width: u32,
-    height: u32,
+    area: [u32; 4],
     stop: &dyn Fn() -> bool,
 ) -> Result<Option<rosorah_capture::Frame>> {
+    let [x, y, width, height] = area;
     unsafe {
         if ring.as_ref().is_none_or(|r| r.size != (width, height)) {
             *ring = Some(Ring::new(device, width, height)?);
@@ -590,7 +630,7 @@ unsafe fn copy_shared(
             return Ok(None);
         };
         ring.full_since = None;
-        let area = D3D11_BOX { left: 0, top: 0, front: 0, right: width, bottom: height, back: 1 };
+        let area = D3D11_BOX { left: x, top: y, front: 0, right: x + width, bottom: y + height, back: 1 };
         context.CopySubresourceRegion(&ring.textures[slot], 0, 0, 0, 0, texture, 0, Some(&area));
         // The studio draws with another device, so wait here until the copy is done: it
         // never sees half a picture.
@@ -671,7 +711,7 @@ impl ShareCheck {
         let pixels: Vec<u8> = (0..width * height).flat_map(|_| [rgba[2], rgba[1], rgba[0], rgba[3]]).collect();
         unsafe {
             self.context.UpdateSubresource(&self.picture, 0, None, pixels.as_ptr().cast(), width * 4, 0);
-            copy_shared(&self.device, &self.context, &mut self.ring, &mut self.copied, &self.picture, width, height, &|| false)
+            copy_shared(&self.device, &self.context, &mut self.ring, &mut self.copied, &self.picture, [0, 0, width, height], &|| false)
         }
     }
 }
@@ -714,7 +754,7 @@ impl Backend for WindowBackend {
                         session = None;
                         selected = Some(w);
                         received = false;
-                        output.clear("Connecting to fullscreen application");
+                        output.clear("Connecting to the game");
                     }
                 }
             }
@@ -728,7 +768,7 @@ impl Backend for WindowBackend {
                 selected = None;
                 received = false;
                 output.clear(
-                    "Captured application closed; waiting for another fullscreen application",
+                    "Captured game closed; waiting for another game",
                 );
                 if !auto {
                     anyhow::bail!("Selected window closed; choose another window")
@@ -736,7 +776,7 @@ impl Backend for WindowBackend {
             }
             if let Some(w) = &selected {
                 if session.is_none() {
-                    session = Some(Session::open(w, options.cursor, self.gpu)?);
+                    session = Some(Session::open(w, options.cursor, self.gpu, auto)?);
                     output.game(Some(w.process.clone()));
                     last_frame = Instant::now();
                 }
