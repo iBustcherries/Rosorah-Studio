@@ -154,7 +154,14 @@ impl Compositor {
         match self.nv12.flights.front() {
             None => return Ok(Vec::new()),
             Some(oldest) if wait => {
-                self.device.poll(wgpu::PollType::Wait { submission_index: Some(oldest.submission.clone()), timeout: Some(Duration::from_secs(2)) })?;
+                // A game switching to fullscreen can hold the graphics card for a few seconds; that's
+                // not a failure, the caller just has nothing new yet.
+                match self.device.poll(wgpu::PollType::Wait { submission_index: Some(oldest.submission.clone()), timeout: Some(Duration::from_secs(2)) }) {
+                    Err(wgpu::PollError::Timeout) => return Ok(Vec::new()),
+                    other => {
+                        other?;
+                    }
+                }
             }
             Some(_) => {
                 self.device.poll(wgpu::PollType::Poll)?;

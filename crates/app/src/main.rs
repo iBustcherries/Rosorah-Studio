@@ -24,6 +24,7 @@ mod camera_layout;
 mod canvas_edit;
 mod capture;
 mod capture_log;
+mod crash_report;
 mod avatars;
 mod chat_render;
 mod twemoji;
@@ -317,9 +318,13 @@ fn main() -> Result<()> {
         }
         return media::render_demo(&project, &output, seconds);
     }
+    let screenshot = option(&args, "--screenshot").map(PathBuf::from);
+    // Screenshot runs are tests: they keep no log and leave no crash marker.
+    if screenshot.is_none() {
+        crash_report::start();
+    }
     let project_path = project_path.unwrap_or_else(|| profiles::path(&profiles::current()));
     let (project, notice) = profiles::open(&project_path)?;
-    let screenshot = option(&args, "--screenshot").map(PathBuf::from);
     let page = option(&args, "--page").unwrap_or("studio".into());
     let viewport = eframe::egui::ViewportBuilder::default()
         .with_title("Rosorah Studio")

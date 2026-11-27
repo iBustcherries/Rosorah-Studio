@@ -85,7 +85,10 @@ impl Queue {
         if self.inactive {
             return;
         }
-        if self.bytes + tag.data.len() > MAX_QUEUE || self.tags.len() >= 512 {
+        // The byte budget sets how far behind an output may fall (about 10 s at 6,000 kbps); 512
+        // tags was only 3-4 s of 60 fps video with two audio tracks, so a brief upload hiccup
+        // dropped the connection.
+        if self.bytes + tag.data.len() > MAX_QUEUE || self.tags.len() >= 4096 {
             self.tags.clear();
             self.bytes = 0;
             self.overflow = true;

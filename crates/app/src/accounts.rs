@@ -593,19 +593,26 @@ fn json(request: RequestBuilder) -> Result<Value> {
     if status.as_u16() == 204 {
         return Ok(Value::Null);
     }
-    let value: Value = response.json().context("Invalid platform response")?;
+    let text = response.text().context("Could not reach platform")?;
+    let value: Value = match serde_json::from_str(&text) {
+        Ok(value) => value,
+        Err(_) if !status.is_success() => anyhow::bail!("Platform request failed (HTTP {}). Check account permissions or reconnect.", status.as_u16()),
+        Err(e) => return Err(e).context("Invalid platform response"),
+    };
     if !status.is_success() {
+        // Twitch and Kick put the useful reason ("Missing scope…", "banned words") in "message";
+        // Twitch's "error" is only the status name. Google puts it in error.errors[0].reason.
         let reason = value["error"]["errors"][0]["reason"]
             .as_str()
-            .or(value["error"].as_str())
-            // Kick reports failures as {"message": "..."}.
             .or(value["message"].as_str())
+            .or(value["error"]["message"].as_str())
+            .or(value["error"].as_str())
             .unwrap_or("request rejected");
-        // Do not echo response bodies, OAuth tokens or arbitrary remote content into diagnostics.
+        // Do not echo whole response bodies, OAuth tokens or arbitrary remote content into diagnostics.
         let reason: String = reason
             .chars()
-            .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .take(80)
+            .filter(|c| c.is_ascii_alphanumeric() || " _-:.,'()".contains(*c))
+            .take(120)
             .collect();
         anyhow::bail!(
             "Platform request failed (HTTP {}, {}). Check account permissions or reconnect.",
@@ -817,9 +824,14 @@ fn run(
                 } else {
                     None
                 };
+                let update = matches!(command, Command::Update { .. });
                 if let Err(e) = session.command(command, &client, &config, &token, tx) {
                     if let Some(request) = post {
                         let _=tx.send(Event::PostResult(j!({"type":"post_result","request":request,"platform":platform.name(),"ok":false,"text":format!("{e}. Your draft was kept; messages are never automatically resent.")})));
+                    } else if update {
+                        // Shown as a toast too: the status line sits in a closed section and is soon replaced.
+                        let _ = tx.send(Event::Notice(format!("{}: title and category not updated. {e}", platform.name())));
+                        let _ = tx.send(Event::Status(e.to_string()));
                     } else {
                         let _ = tx.send(Event::Status(e.to_string()));
                     }

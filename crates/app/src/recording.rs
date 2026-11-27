@@ -25,7 +25,9 @@ use std::{
 const RATE: u64 = 48_000;
 const BLOCK: u64 = 480;
 const LEAD: Duration = Duration::from_millis(60);
-const MAX_LAG: Duration = Duration::from_secs(3);
+/// How long the encoder may fall behind before the output stops. A game changing display mode can
+/// stall the graphics card's encoder for a few seconds, so this leaves room for that.
+const MAX_LAG: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {

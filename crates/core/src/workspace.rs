@@ -30,6 +30,8 @@ pub struct WorkspaceSettings {
     pub update_popup: bool,
     /// The version the update window last opened by itself for, so it does so once per version.
     pub update_offered: String,
+    /// Sends crash and stream-disconnect reports to the developer without asking each time.
+    pub send_reports: bool,
     /// Sound panel strips hidden from view (still heard on stream).
     pub hidden_sounds: BTreeSet<Id>,
     /// Names given to sound panel strips; the channel keeps its own name underneath.
@@ -140,6 +142,7 @@ impl Default for WorkspaceSettings {
             skipped_update: String::new(),
             update_popup: true,
             update_offered: String::new(),
+            send_reports: false,
             hidden_sounds: BTreeSet::new(),
             sound_names: BTreeMap::new(),
         }

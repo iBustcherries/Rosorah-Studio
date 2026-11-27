@@ -328,6 +328,10 @@ fn draw(g: &mut Compositor, current: &Project, active: &Canvas, job: &Job, tag: 
         // Two frames out at once at most; beyond that the graphics card is behind, so wait.
         let wait = Instant::now();
         while g.nv12_in_flight() >= 2 {
+            // Meanwhile the writer repeats the last picture, so the stream stays up through a stall.
+            if wait.elapsed() > Duration::from_secs(20) {
+                bail!("The graphics card stopped answering for 20 seconds");
+            }
             for (done_tag, done) in g.finished_nv12(true)? {
                 hand_over(pending, done_tag, done);
             }

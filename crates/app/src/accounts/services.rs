@@ -785,10 +785,15 @@ impl Session {
                     "Title is empty or too long"
                 );
                 if self.platform == Platform::Twitch {
+                    // An empty game_id tells Twitch to clear the game, so it's left out when unknown.
+                    let mut body = j!({"title":title});
+                    if !category.is_empty() {
+                        body["game_id"] = j!(category);
+                    }
                     json(
                         self.twitch(client, config, token, M::PATCH, "channels")
                             .query(&[("broadcaster_id", &self.id)])
-                            .json(&j!({"title":title,"game_id":category})),
+                            .json(&body),
                     )?;
                 } else {
                     ensure!(
@@ -807,7 +812,9 @@ impl Session {
                             .json(&body),
                     )?;
                 }
+                let _ = tx.send(Event::Metadata(title.trim().into(), category));
                 let _ = tx.send(Event::Status("Stream title and category updated".into()));
+                let _ = tx.send(Event::Notice(format!("{}: stream title and category updated", self.platform.name())));
             }
         }
         Ok(())
@@ -861,15 +868,23 @@ impl Session {
                 keyed = true;
             }
         }
-        self.bound_stream = item["contentDetails"]["boundStreamId"]
-            .as_str()
-            .unwrap_or("")
-            .into();
+        let bound = item["contentDetails"]["boundStreamId"].as_str().unwrap_or("");
+        // Discovery selects the same broadcast again while it has no live chat; that must not put
+        // YouTube's saved title back over one being edited, nor replace the status line every minute.
+        let fresh = self.broadcast != id || self.bound_stream != bound;
+        let chat_id = item["snippet"]["liveChatId"].as_str().unwrap_or("");
+        let new_chat = self.chat_id != chat_id;
+        self.bound_stream = bound.into();
         self.broadcast = id;
         let _ = tx.try_send(Event::Selected(self.broadcast.clone()));
-        self.chat_id = item["snippet"]["liveChatId"].as_str().unwrap_or("").into();
-        self.page.clear();
-        self.next_poll = Instant::now();
+        self.chat_id = chat_id.into();
+        if fresh || new_chat {
+            self.page.clear();
+            self.next_poll = Instant::now();
+        }
+        if !fresh {
+            return Ok(());
+        }
         let v = json(
             self.yt(client, token, reqwest::Method::GET, "videos")
                 .query(&[("part", "snippet"), ("id", self.broadcast.as_str())]),

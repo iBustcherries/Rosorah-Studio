@@ -301,34 +301,69 @@ impl Studio {
     }
 }
 impl Studio {
-    /// Help > Report a problem: technical details to pass to whoever is helping.
+    /// The state of the studio for a problem report: technical details only.
+    fn problem_details(&self) -> String {
+        let audio = self.audio.view();
+        format!(
+            "Rosorah Studio {}\n{}\nStream: {}\nRecording: {}\nGame audio: {}\nAudio error: {}\nAudio connection: {}\nCaptured process: {:?}\nChat: {}",
+            env!("CARGO_PKG_VERSION"),
+            crate::capture_log::details(),
+            self.stream_error,
+            self.recording_error,
+            audio.status.get(&crate::game_audio::CHANNEL).cloned().unwrap_or_default(),
+            audio.error,
+            audio.capture_error,
+            self.captures.game(),
+            self.browser_chat.status,
+        )
+    }
+    /// Help > Report a bug: sends what went wrong (and Rosorah's log) to the developer.
     fn report_window(&mut self, ctx: &egui::Context) {
         if !self.report_open {
             return;
         }
         let mut open = true;
-        pop_window(ctx, "Report a problem")
+        pop_window(ctx, "Report a bug")
             .frame(solid_window(ctx))
             .open(&mut open)
-            .default_width(460.)
+            .default_width(480.)
             .show(ctx, |ui| {
-                ui.label("Copy a report, then paste it to whoever is helping you.");
-                note(ui, "It has technical details only: no chat messages, passwords or stream keys.");
-                if ui.add(self.primary_button("Copy problem report")).clicked() {
-                    let audio = self.audio.view();
-                    let report = format!(
-                        "Rosorah Studio {}\n{}\nStream: {}\nRecording: {}\nGame audio: {}\nAudio error: {}\nAudio connection: {}\nCaptured process: {:?}\nChat: {}",
-                        env!("CARGO_PKG_VERSION"),
-                        crate::capture_log::details(),
-                        self.stream_error,
-                        self.recording_error,
-                        audio.status.get(&crate::game_audio::CHANNEL).cloned().unwrap_or_default(),
-                        audio.error,
-                        audio.capture_error,
-                        self.captures.game(),
-                        self.browser_chat.status,
-                    );
-                    ui.ctx().copy_text(report);
+                use crate::crash_report::Sending;
+                ui.label("What went wrong? What were you doing when it happened?");
+                ui.add(egui::TextEdit::multiline(&mut self.bug_text).desired_rows(5).desired_width(f32::INFINITY).hint_text("For example: when a new League match starts, the game goes black on stream"));
+                ui.label("Your name or Discord (optional)");
+                ui.add(egui::TextEdit::singleline(&mut self.bug_contact).desired_width(f32::INFINITY).hint_text("So the developer can ask you about it"));
+                ui.checkbox(&mut self.bug_details, "Include technical details and Rosorah's log (recommended)");
+                note(ui, "Never includes stream keys, passwords or chat messages.");
+                let state = self.reports.state();
+                ui.horizontal_wrapped(|ui| {
+                    let busy = matches!(state, Sending::Busy);
+                    if ui.add_enabled(!busy && !self.bug_text.trim().is_empty(), self.primary_button("Send report")).clicked() {
+                        let extra = if self.bug_details { self.problem_details() } else { String::new() };
+                        let report = crate::crash_report::bug(&self.bug_text, &self.bug_contact, &extra, self.bug_details);
+                        self.reports.send(report, String::new(), false);
+                    }
+                    match &state {
+                        Sending::Busy => {
+                            ui.spinner();
+                            note(ui, "Sending…");
+                        }
+                        Sending::Sent(number) => {
+                            ui.colored_label(crate::appearance::current().good, if *number > 0 { format!("Sent as report #{number}. Thank you!") } else { "Sent. Thank you!".into() });
+                        }
+                        Sending::Failed(e) => {
+                            ui.colored_label(crate::appearance::current().error, format!("Not sent: {e}"));
+                        }
+                        Sending::Idle => {}
+                    }
+                });
+                if matches!(state, Sending::Sent(_)) && !self.bug_text.is_empty() {
+                    self.bug_text.clear();
+                }
+                ui.separator();
+                note(ui, "Or copy the technical details to paste to whoever is helping you.");
+                if ui.button("Copy problem report").clicked() {
+                    ui.ctx().copy_text(self.problem_details());
                     self.tell("Problem report copied".into());
                 }
                 if !self.stream_config.tiktok_username.trim().is_empty()
@@ -350,6 +385,52 @@ impl Studio {
             self.tell("TikTok page structure copied".into());
         }
         self.report_open = open;
+    }
+    /// After a crash or a stream disconnect: asks whether to send the report (unless reports go
+    /// automatically). Never pops up while live; it waits until the stream or recording ends.
+    fn report_prompt(&mut self, ctx: &egui::Context) {
+        let live = self.live_stream.is_some() || self.live_recording.is_some();
+        if live || self.screenshot.is_some() {
+            return;
+        }
+        let Some(report) = self.reports.waiting.first().cloned() else { return };
+        let mut answer: Option<bool> = None;
+        pop_modal(ctx, egui::Id::new("problem report prompt")).show(ctx, |ui| {
+            ui.set_max_width(460.);
+            ui.heading(match report.kind {
+                crate::crash_report::Kind::Disconnect => "Your stream disconnected",
+                _ => "Rosorah ran into a problem",
+            });
+            ui.add_space(6.);
+            ui.label(&report.summary);
+            ui.label("Send a report so the developer can find and fix the cause?");
+            note(ui, "It has Rosorah's log and your system details, never stream keys, passwords or chat messages.");
+            ui.collapsing("What gets sent", |ui| {
+                egui::ScrollArea::vertical().max_height(220.).show(ui, |ui| {
+                    ui.add(egui::Label::new(egui::RichText::new(crate::crash_report::scrub(&report.details)).monospace().small()).wrap());
+                });
+            });
+            ui.checkbox(&mut self.project.preferences.workspace.send_reports, "Send these automatically from now on");
+            ui.horizontal(|ui| {
+                if ui.add(self.primary_button("Send report")).clicked() {
+                    answer = Some(true);
+                }
+                if ui.button("Don't send").clicked() {
+                    answer = Some(false);
+                }
+            });
+        });
+        match answer {
+            Some(true) => {
+                self.reports.send(report, String::new(), true);
+                self.dirty = true;
+            }
+            Some(false) => {
+                self.reports.dismiss(&report.id);
+                self.dirty = true;
+            }
+            None => {}
+        }
     }
 }
 #[cfg(test)]

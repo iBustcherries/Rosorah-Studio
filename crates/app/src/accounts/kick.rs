@@ -106,11 +106,25 @@ fn moderate(client: &Client, token: &Token, channel: u64, events: &kick_events::
 fn search_categories(client: &Client, token: &Token, query: &str) -> Result<Vec<Choice>> {
     let query = query.trim();
     ensure!(!query.is_empty(), "Enter a category to search for");
-    let value = json(client.get(format!("{API}/categories")).bearer_auth(&token.access).query(&[("q", query)]))?;
-    Ok(value["data"].as_array().into_iter().flatten().filter_map(|c| Some(Choice {
-        id: c["id"].as_u64()?.to_string(),
-        name: c["name"].as_str()?.into(),
-    })).take(30).collect())
+    let choices = |value: Value| -> Vec<Choice> {
+        value["data"].as_array().into_iter().flatten().filter_map(|c| Some(Choice {
+            id: c["id"].as_u64()?.to_string(),
+            name: c["name"].as_str()?.into(),
+        })).take(30).collect()
+    };
+    // Kick's v1 search is deprecated; v2 matches by name (3+ characters). v1 stays as the fallback
+    // for short or partial names v2 doesn't find.
+    let v2 = if query.chars().count() >= 3 {
+        json(client.get(API.replace("/v1", "/v2") + "/categories").bearer_auth(&token.access).query(&[("name", query), ("limit", "30")]))
+            .map(choices)
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if !v2.is_empty() {
+        return Ok(v2);
+    }
+    Ok(choices(json(client.get(format!("{API}/categories")).bearer_auth(&token.access).query(&[("q", query)]))?))
 }
 
 fn update_channel(client: &Client, token: &Token, title: &str, category: &str) -> Result<()> {
@@ -167,8 +181,11 @@ pub(super) fn session(client: &Client, config: &ClientConfig, mut token: Token,
     // Sign-ins made before chat and activity support lack those permissions.
     let granted = identity["data"]["scope"].as_str().unwrap_or_default();
     let upgraded = ["chat:write", "channel:write", "events:subscribe", "moderation:chat_message:manage"].iter().all(|s| granted.contains(s));
+    let can_retitle = granted.is_empty() || granted.contains("channel:write");
     if !granted.is_empty() && !upgraded {
-        let _ = tx.send(Event::Status("Kick connected. Sign out and connect Kick again once to allow chat, title changes, activity and deleting messages.".into()));
+        let text = "Kick connected. Sign out and connect Kick again once to allow chat, title changes, activity and deleting messages.";
+        let _ = tx.send(Event::Status(text.into()));
+        let _ = tx.send(Event::Notice(text.into()));
     }
     let mut retry_at = Instant::now();
     let mut watching = ViewerCheck::default();
@@ -218,12 +235,20 @@ pub(super) fn session(client: &Client, config: &ClientConfig, mut token: Token,
                 Ok(choices) => {let _ = tx.send(Event::Categories(choices));}
                 Err(e) => {let _ = tx.send(Event::Status(e.to_string()));}
             },
+            Ok(Command::Update {..}) if !can_retitle => {
+                let _ = tx.send(Event::Notice("Kick: title not updated. This Kick sign-in can't change titles: sign out of Kick in Settings > Accounts and connect again.".into()));
+            }
             Ok(Command::Update {title, category}) => match update_channel(client, &token, &title, &category) {
                 Ok(()) => {
                     let _ = tx.send(Event::Metadata(title.trim().into(), category));
                     let _ = tx.send(Event::Status("Stream title and category updated".into()));
+                    let _ = tx.send(Event::Notice("Kick: stream title and category updated".into()));
                 }
-                Err(e) => {let _ = tx.send(Event::Status(format!("{e}. If permission is missing, sign out and connect Kick again.")));}
+                Err(e) => {
+                    let text = format!("{e}. If permission is missing, sign out and connect Kick again.");
+                    let _ = tx.send(Event::Notice(format!("Kick: title and category not updated. {text}")));
+                    let _ = tx.send(Event::Status(text));
+                }
             },
             Ok(Command::Live(live)) => if live { watching.start() } else { watching.stop(tx) },
             Ok(Command::Emotes(slug)) => {

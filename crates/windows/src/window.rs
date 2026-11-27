@@ -67,8 +67,32 @@ pub fn process(pid: u32) -> Option<GameProcess> {
         })
     }
 }
+/// Whether the game is still running. Anti-cheat (Riot Vanguard) can turn down even this limited
+/// query once a match starts; a refused query means the process is there, just hidden from us.
 pub fn alive(game: &GameProcess) -> bool {
-    process(game.pid).is_some_and(|g| g.start_time == game.start_time)
+    match process(game.pid) {
+        Some(g) => g.start_time == game.start_time,
+        None => match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, game.pid) } {
+            // It opened, so process() turned it down for having exited.
+            Ok(h) => {
+                drop(Handle(h));
+                false
+            }
+            Err(e) => e.code() == ERROR_ACCESS_DENIED.to_hresult(),
+        },
+    }
+}
+/// The captured window is still there and still belongs to the same game.
+fn still_open(w: &Window) -> bool {
+    let hwnd = HWND(w.handle as *mut _);
+    let mut pid = 0;
+    unsafe {
+        if !IsWindow(hwnd).as_bool() {
+            return false;
+        }
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
+    pid == w.process.pid && alive(&w.process)
 }
 fn inspect(hwnd: HWND) -> Option<Window> {
     unsafe {
@@ -416,6 +440,10 @@ impl Session {
             session
                 .SetIsCursorCaptureEnabled(cursor)
                 .context("Cursor control requires a current Windows 10/11 release")?;
+            // Hide the yellow border Windows draws around a captured window.
+            // Windows 11 allows this for desktop apps; older Windows 10
+            // builds don't have the switch and keep the border.
+            let _ = session.SetIsBorderRequired(false);
             let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let signal = closed.clone();
             item.Closed(&TypedEventHandler::new(move |_, _| {
@@ -742,6 +770,10 @@ impl Backend for WindowBackend {
         let mut last_frame = Instant::now();
         let mut received = false;
         let mut notice = Instant::now();
+        // Automatic capture: when the game's window can't be captured yet (a match loading, a
+        // window being remade), wait and try again here rather than stopping the whole capture.
+        let mut retry_at = Instant::now();
+        let mut alive_checked = Instant::now() - Duration::from_secs(1);
         output.connecting();
         while !*cancel.borrow() && cancel.has_changed().is_ok() {
             if auto && checked.elapsed() >= Duration::from_millis(500) {
@@ -758,11 +790,15 @@ impl Backend for WindowBackend {
                     }
                 }
             }
-            if selected.as_ref().is_some_and(|w| {
-                !alive(&w.process) || !unsafe { IsWindow(HWND(w.handle as *mut _)) }.as_bool()
-            }) || session
-                .as_ref()
-                .is_some_and(|s| s.closed.load(std::sync::atomic::Ordering::Relaxed))
+            // The process check opens the process, so not on every frame.
+            let gone = alive_checked.elapsed() >= Duration::from_millis(250) && {
+                alive_checked = Instant::now();
+                selected.as_ref().is_some_and(|w| !still_open(w))
+            };
+            if gone
+                || session
+                    .as_ref()
+                    .is_some_and(|s| s.closed.load(std::sync::atomic::Ordering::Relaxed))
             {
                 session = None;
                 selected = None;
@@ -776,7 +812,19 @@ impl Backend for WindowBackend {
             }
             if let Some(w) = &selected {
                 if session.is_none() {
-                    session = Some(Session::open(w, options.cursor, self.gpu, auto)?);
+                    if Instant::now() < retry_at {
+                        std::thread::sleep(Duration::from_millis(50));
+                        continue;
+                    }
+                    match Session::open(w, options.cursor, self.gpu, auto) {
+                        Ok(s) => session = Some(s),
+                        Err(e) if auto => {
+                            output.waiting(&format!("Can't capture {} yet ({e:#}); trying again", w.title));
+                            retry_at = Instant::now() + Duration::from_millis(750);
+                            continue;
+                        }
+                        Err(e) => return Err(e),
+                    }
                     output.game(Some(w.process.clone()));
                     last_frame = Instant::now();
                 }
@@ -787,18 +835,35 @@ impl Backend for WindowBackend {
                     std::thread::sleep(wait);
                 }
                 s.arrived.wait(Duration::from_millis(50));
-                if let Some(frame) = s.next(options.resolution, &cancel)? {
+                let route = s.route();
+                let next = s.next(options.resolution, &cancel).and_then(|frame| match frame {
+                    Some(frame) => output
+                        .publish_with_detail(
+                            frame,
+                            Some(&format!(
+                                "Live · Windows window capture · {} · cursor {} · {}",
+                                w.title,
+                                if options.cursor { "on" } else { "off" },
+                                route
+                            )),
+                        )
+                        .map(|_| true),
+                    None => Ok(false),
+                });
+                let published = match next {
+                    Ok(published) => published,
+                    Err(e) if auto => {
+                        // Open a fresh capture of the same window shortly; the last picture stays up.
+                        output.note(&format!("Game capture interrupted ({e:#}); reconnecting"));
+                        session = None;
+                        retry_at = Instant::now() + Duration::from_millis(500);
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
+                if published {
                     last_frame = Instant::now();
                     received = true;
-                    output.publish_with_detail(
-                        frame,
-                        Some(&format!(
-                            "Live · Windows window capture · {} · cursor {} · {}",
-                            w.title,
-                            if options.cursor { "on" } else { "off" },
-                            s.route()
-                        )),
-                    )?;
                 } else if last_frame.elapsed() > Duration::from_secs(3)
                     && notice.elapsed() > Duration::from_secs(3)
                 {

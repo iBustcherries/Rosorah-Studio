@@ -72,6 +72,8 @@ pub struct Captures {
     modes: std::collections::BTreeMap<Id, Target>,
     armed: std::collections::BTreeSet<Id>,
     attempts: std::collections::BTreeMap<Id, std::time::Instant>,
+    /// The capture status last written to the diagnostics log, so only changes are logged.
+    logged: std::collections::BTreeMap<Id, String>,
 }
 /// Whether a source shows in the scene on one of the canvases right now.
 fn shown(project: &Project, id: Id) -> bool {
@@ -640,6 +642,15 @@ impl Captures {
             .collect();
         for id in retries {
             self.start(id);
+        }
+        // Game and window capture changes go to the log that problem reports carry.
+        for id in self.armed.iter().chain(self.modes.keys()).copied().collect::<std::collections::BTreeSet<_>>() {
+            let Some(snapshot) = self.engine.snapshot(id) else { continue };
+            let line = format!("{:?}: {}", snapshot.phase, snapshot.detail.lines().next().unwrap_or_default());
+            if self.logged.get(&id) != Some(&line) {
+                crate::capture_log::event(format!("Capture {id} {line}"));
+                self.logged.insert(id, line);
+            }
         }
 
         let ready: Vec<_> = self

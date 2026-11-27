@@ -590,8 +590,19 @@ pub struct Studio {
     /// When the microphone was last heard, for the Go live checklist.
     mic_heard: Option<Instant>,
     report_open: bool,
+    /// Crash, disconnect and bug reports waiting for an answer or being sent.
+    reports: crate::crash_report::Outbox,
+    /// Help > Report a bug: what went wrong, how to reach the person, and whether the log goes too.
+    bug_text: String,
+    bug_contact: String,
+    bug_details: bool,
+    /// Each stream destination's phase last frame, to notice one dropping.
+    destination_phases: Vec<crate::streaming::Phase>,
+    disconnect_reports: u32,
     /// The stream title being typed in the Stream panel.
     title_draft: String,
+    /// The platforms' title when the draft last followed it.
+    title_synced: String,
     /// No saved project existed at start, so the setup guide may replace the demo scenes.
     first_run: bool,
     toast: Option<Toast>,
@@ -919,6 +930,10 @@ impl Studio {
             .insert(egui::TextStyle::Heading, egui::FontId::proportional(20.));
         cc.egui_ctx.set_style(style);
         let render_state = cc.wgpu_render_state.clone();
+        if let Some(state) = &render_state {
+            let info = state.adapter.get_info();
+            crate::capture_log::event(format!("Graphics card: {} ({:?}, driver {} {})", info.name, info.backend, info.driver, info.driver_info));
+        }
         let (gpu, gpu_error) = match &render_state {
             Some(state) => (
                 Some(Compositor::from_device(
@@ -1077,7 +1092,14 @@ impl Studio {
             go_live_open: false,
             mic_heard: None,
             report_open: false,
+            reports: Default::default(),
+            bug_text: String::new(),
+            bug_contact: String::new(),
+            bug_details: true,
+            destination_phases: Vec::new(),
+            disconnect_reports: 0,
             title_draft: String::new(),
+            title_synced: String::new(),
             first_run,
             toast: None,
             recovering,
@@ -1811,8 +1833,9 @@ impl Studio {
             self.page = Page::Studio;
             ui.close();
         }
-        if ui.button("Report a problem…").clicked() {
+        if ui.button("Report a bug…").on_hover_text("Tell the developer what went wrong").clicked() {
             self.report_open = true;
+            *self.reports.sending.lock().unwrap() = crate::crash_report::Sending::Idle;
             ui.close();
         }
         if ui.button("Check for updates…").clicked() {
@@ -4580,8 +4603,29 @@ impl Studio {
         let Some(stream) = &self.live_stream else {
             return;
         };
+        // A destination that was sending and dropped: logged, and a report put aside (at most
+        // two per stream, so a flaky connection doesn't make dozens).
+        let destinations = stream.destinations();
+        for (index, dest) in destinations.iter().enumerate() {
+            let before = self.destination_phases.get(index).copied();
+            if before == Some(dest.phase) {
+                continue;
+            }
+            crate::capture_log::event(format!("Stream to {}: {} {}", dest.name, dest.phase.label(), dest.detail));
+            if before == Some(crate::streaming::Phase::Sending)
+                && matches!(dest.phase, crate::streaming::Phase::Reconnecting | crate::streaming::Phase::Failed)
+                && dest.path.is_none()
+                && self.disconnect_reports < 2
+            {
+                self.disconnect_reports += 1;
+                crate::crash_report::disconnect(&dest.name, &dest.detail);
+            }
+        }
+        self.destination_phases = destinations.iter().map(|d| d.phase).collect();
         let view = stream.view();
         if let Some(result) = view.result {
+            self.destination_phases.clear();
+            self.disconnect_reports = 0;
             self.stream_details = view.details;
             for dest in stream.destinations() {
                 if let Some(path) = dest.path {
@@ -4925,29 +4969,40 @@ impl Studio {
         if accounts.is_empty() {
             return;
         }
-        if self.title_draft.is_empty()
-            && let Some(title) = accounts.iter().map(|a| a.title.clone()).find(|t| !t.is_empty())
-        {
-            self.title_draft = title;
+        // Follows the title set elsewhere (Category & thumbnail, or the platform) unless it's being typed.
+        let current = accounts.iter().map(|a| a.title.clone()).find(|t| !t.is_empty()).unwrap_or_default();
+        let typing = ui.memory(|m| m.has_focus(egui::Id::new("stream title draft")));
+        if current != self.title_synced && !typing {
+            if !current.is_empty() {
+                self.title_draft = current.clone();
+            }
+            self.title_synced = current;
         }
         ui.separator();
         ui.strong("Stream title");
-        let field = ui.add(egui::TextEdit::singleline(&mut self.title_draft).hint_text("What are you streaming today?").desired_width(f32::INFINITY).char_limit(140));
+        let field = ui.add(egui::TextEdit::singleline(&mut self.title_draft).id(egui::Id::new("stream title draft")).hint_text("What are you streaming today?").desired_width(f32::INFINITY).char_limit(140));
         let enter = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         let busy = accounts.iter().any(|a| a.operation_busy);
         let names: Vec<_> = accounts.iter().map(|a| a.platform.name()).collect();
+        let youtube = accounts.iter().any(|a| a.platform == Platform::YouTube);
+        if youtube && self.title_draft.trim().chars().count() > 100 {
+            ui.colored_label(crate::appearance::current().warning, "YouTube titles can be up to 100 characters");
+        }
         if (ui.add_enabled(!self.title_draft.trim().is_empty() && !busy, egui::Button::new(format!("Update on {}", names.join(" and ")))).clicked() || enter)
             && !self.title_draft.trim().is_empty()
         {
+            let title = self.title_draft.trim().to_owned();
+            crate::capture_log::event(format!("Stream title update sent to {}", names.join(", ")));
             for account in &mut accounts {
-                // YouTube titles belong to a broadcast; skip it until one exists.
+                // YouTube titles belong to a broadcast; say so instead of skipping it quietly.
                 if account.platform == Platform::YouTube && account.broadcast.is_empty() {
+                    account.notices.push("YouTube: no broadcast yet. Choose or create one under Category & thumbnail, then update again.".into());
                     continue;
                 }
-                account.title = self.title_draft.trim().to_owned();
-                account.send(crate::accounts::Command::Update { title: account.title.clone(), category: account.category.clone() });
+                account.title = title.clone();
+                account.send(crate::accounts::Command::Update { title: title.clone(), category: account.category.clone() });
             }
-            self.tell("Stream title sent".into());
+            self.title_synced = title;
         }
         if busy {
             ui.horizontal(|ui| {
@@ -6226,6 +6281,18 @@ impl Studio {
             }
         }
         self.update_tick(ctx);
+        if self.screenshot.is_none() {
+            self.reports.tick(self.project.preferences.workspace.send_reports);
+            let quiet = std::mem::take(&mut *self.reports.sent_quietly.lock().unwrap());
+            if !quiet.is_empty() {
+                let sent = quiet.iter().filter(|r| r.is_ok()).count();
+                let failed = quiet.iter().find_map(|r| r.as_ref().err());
+                self.tell(match failed {
+                    None => format!("Sent {sent} problem report(s) to the developer"),
+                    Some(e) => format!("A problem report couldn't be sent: {e}"),
+                });
+            }
+        }
         self.web_docks.tick();
         // The page itself stays clear so the backdrop shows in the gaps between docked panels.
         egui::CentralPanel::default().frame(egui::Frame::central_panel(&ctx.style()).fill(bg())).show(ctx, |ui| {
@@ -7151,6 +7218,16 @@ if changed{self.changed();}
             note(ui, format!("New versions come from github.com/{}.", crate::updates::REPO));
         });
         ui.add_space(20.);
+        card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.strong("Problem reports");
+            changed |= ui.checkbox(&mut self.project.preferences.workspace.send_reports, "Send crash and stream disconnect reports to the developer automatically").changed();
+            note(ui, "Off: Rosorah asks each time. Reports include Rosorah's log, your Windows/Linux version and graphics card, never stream keys, passwords or chat messages. Help > Report a bug sends one yourself.");
+            if ui.button("Open the log folder").clicked() {
+                let _ = crate::desktop::open(auroracast_core::platform::config_root().join("rosorah-studio").join("logs"));
+            }
+        });
+        ui.add_space(20.);
         changed |= self.backups_settings(ui);
         ui.add_space(20.);
         self.profiles_settings(ui);
@@ -8036,18 +8113,24 @@ impl eframe::App for Studio {
                 self.browser_chat.finish_post(serde_json::json!({"type":"post_result","platform":request["platform"],"request":id,"ok":false,"text":"Connect this account in Settings > Accounts. Your draft was kept."}));
             }
         }
+        // Notices from several platforms at once (such as a title update) share one toast.
+        let mut notices = Vec::new();
         for account in self.accounts.iter_mut().chain(std::iter::once(&mut self.kick_account)).chain(self.bots.iter_mut()) {
             if let Some(result) = account.moderation_results.drain(..).next_back() {
                 self.browser_chat.post_status = result;
             }
             if let Some(notice) = account.notices.drain(..).next_back() {
-                self.toast = Some(Toast { text: notice, undo: false, until: Instant::now() + Duration::from_secs(8) });
+                crate::capture_log::event(format!("{}: {notice}", account.platform.name()));
+                notices.push(notice);
             }
             for result in account.post_results.drain(..) {
                 if result["request"].as_str().is_some_and(|s|s.starts_with("automation-")){
                     self.automation_queue.log(format!("{}{} automation chat: {}",account.platform.name(),if account.bot{" bot"}else{""},if result["ok"].as_bool()==Some(true){"sent"}else{result["text"].as_str().unwrap_or("failed")}));
                 }else{self.browser_chat.finish_post(result);}
             }
+        }
+        if !notices.is_empty() {
+            self.toast = Some(Toast { text: notices.join("\n"), undo: false, until: Instant::now() + Duration::from_secs(8 + 2 * notices.len() as u64) });
         }
         if self.browser_chat.open_accounts {
             self.browser_chat.open_accounts = false;
@@ -8374,6 +8457,7 @@ impl eframe::App for Studio {
         self.readiness_window(ctx);
         self.go_live_window(ctx);
         self.report_window(ctx);
+        self.report_prompt(ctx);
         self.toast_ui(ctx);
         if self.custom_title_bar {
             crate::title_bar::resize_edges(ctx);
@@ -8471,6 +8555,10 @@ impl eframe::App for Studio {
         }
         if self.project.preferences.backups.on_close && self.recovery_candidate.is_none() {
             let _ = self.back_up("on close");
+        }
+        // Before a restart below, so the new Rosorah doesn't take this one for a crash.
+        if self.screenshot.is_none() {
+            crate::crash_report::clean_exit();
         }
         // Switching profile: start Rosorah again once this one has saved and stopped everything.
         if (self.restart_profile.take().is_some() || self.restart_after_update)
