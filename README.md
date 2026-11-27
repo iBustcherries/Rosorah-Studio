@@ -9,22 +9,24 @@ scenes, multistreaming, unified chat, alerts and automations live in one app.
 **[Download the latest release](https://github.com/iBustcherries/RosorahStudio-releases/releases/latest)**
 · Windows 10/11 installer, Fedora `.rpm`, Ubuntu/Debian `.deb`
 
-## What's new in 0.56.0
+## What's new in 0.57.0
+
+- **Report a bug from inside Rosorah:** Help → **Report a bug…** sends what went wrong to the
+  developer. After a crash, a PC freeze or a stream disconnect, Rosorah offers to send a report
+  (never while you're live), or sends them itself if you turn that on in Settings → Advanced.
+  Reports never include stream keys, passwords or chat messages.
+- **Game capture no longer drops out (Windows):** automatic game capture keeps retrying after an
+  error, a new match loading or anti-cheat (VALORANT's Vanguard), instead of stopping for good.
+- **Stream title and game changes say whether they worked** on each platform, with fixes for
+  Twitch, Kick and YouTube. Streams also ride out slow frames and short network hiccups.
+
+## 0.56.0
 
 - **Automatic game capture at any resolution (Windows):** games in a window, or borderless at a
   size other than your screen's (Hearthstone and League of Legends, for example), are now
   captured automatically, without the title bar. Games are recognised by their game engine,
   their name or their game library folder; launchers, browsers and streaming tools like VTube
   Studio are left alone. The mode is now called **Automatic game capture**.
-
-## 0.55.0
-
-- **Chat no longer stops mid-stream on Windows:** a chat message with a curly apostrophe (’),
-  an accented letter or a dash disconnected Rosorah's chat, and it kept failing on every
-  restart. Every character now comes through, emoji and other languages included.
-- **Hear a sound in your headphones from its ⚙:** "Play it in my headphones" is there in Simple
-  mode too, picks your computer's default output if no headphones are chosen, and says where
-  the sound plays.
 
 ## Screenshots
 
